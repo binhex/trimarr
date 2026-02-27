@@ -4,7 +4,7 @@ This software is under *HEAVY* development right now, expect lack of documentati
 
 ## Description
 
-Removes (trims) unrequired audio and subtitles from matroska container format video files.
+Removes (trims) unwanted audio and subtitles from matroska container format video files.
 
 ## Prerequisites
 
