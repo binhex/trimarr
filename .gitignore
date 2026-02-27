@@ -26,9 +26,6 @@ notes.txt
 # folders
 ####
 
-# ignore ai personas
-.ai/
-
 # ignore scratch folder
 .scratch/
 
