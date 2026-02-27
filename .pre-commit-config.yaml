@@ -32,6 +32,7 @@ repos:
           - click
           - tenacity
           - pydantic-settings
+          - loguru
 
   - repo: https://github.com/PyCQA/autoflake
     rev: v2.3.1

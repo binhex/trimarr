@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import stat
 import tarfile
 import tempfile
@@ -43,12 +42,10 @@ def _get_latest_release_asset_url(repo: str, asset_name: str) -> str:
     release = response.json()
     for asset in release.get("assets", []):
         if asset["name"] == asset_name:
-            return asset["browser_download_url"]
+            return str(asset["browser_download_url"])
 
     tag = release.get("tag_name", "unknown")
-    raise RuntimeError(
-        f"Asset '{asset_name}' not found in latest release '{tag}' of '{repo}'."
-    )
+    raise RuntimeError(f"Asset '{asset_name}' not found in latest release '{tag}' of '{repo}'.")
 
 
 def download_mkvmerge(dest_dir: str | Path | None = None) -> Path:
@@ -98,9 +95,7 @@ def download_mkvmerge(dest_dir: str | Path | None = None) -> Path:
                 None,
             )
             if mkvmerge_member is None:
-                raise RuntimeError(
-                    f"Could not find 'mkvmerge' binary inside '{_MKVTOOLNIX_ASSET}'."
-                )
+                raise RuntimeError(f"Could not find 'mkvmerge' binary inside '{_MKVTOOLNIX_ASSET}'.")
 
             # Extract to temp dir then move to final destination
             tar.extract(mkvmerge_member, path=tmp, filter="data")

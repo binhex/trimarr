@@ -1,6 +1,6 @@
 """Command-line interface for trimarr."""
 
-from importlib.metadata import version, PackageNotFoundError
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import click
@@ -19,6 +19,7 @@ _PROJECT_ROOT = get_project_root()
 _DEFAULT_MKVMERGE_PATH = f"{_PROJECT_ROOT}/bin/mkvmerge"
 _DEFAULT_DB_PATH = f"{_PROJECT_ROOT}/db/trimarr.db"
 _DEFAULT_LOGS_PATH = f"{_PROJECT_ROOT}/logs/trimarr.log"
+
 
 @click.command()
 @click.option(
@@ -100,7 +101,6 @@ _DEFAULT_LOGS_PATH = f"{_PROJECT_ROOT}/logs/trimarr.log"
     default=False,
     help="If specified, the script will perform a dry run without making any changes.",
 )
-
 @click.version_option(version=_VERSION, prog_name="Trimarr")
 def cli(
     language: str,
@@ -136,6 +136,6 @@ def cli(
 
     logger.info("Trimarr CLI is not yet implemented. Please run `trimarr --help` for usage instructions.")
 
+
 if __name__ == "__main__":
     cli()
-

@@ -96,6 +96,7 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 strict_equality = true
 mypy_path = "src"
+explicit_package_bases = true
 plugins = ["pydantic.mypy"]
 
 # Relax for tests
