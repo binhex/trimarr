@@ -51,7 +51,7 @@ uv venv --quiet
 uv sync --extra dev
 ```
 
-If you wish to perform linting on all files before committing (PR will nt be
+If you wish to perform linting on all files before committing (PR will not be
 accepted if it does not pass all linting) then run `pre-commit run --all-files`.
 
 ## FAQ
