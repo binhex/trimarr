@@ -1,14 +1,21 @@
-"""Command-line interface for AppName."""
+"""Command-line interface for trimarr."""
+
+from importlib.metadata import version, PackageNotFoundError
 
 import click
 
 from core.logging import create_logger
 from utils.utils import get_project_root
 
+try:
+    _VERSION = version("Trimarr")
+except PackageNotFoundError:
+    _VERSION = "unknown"
 
-# Compute default database path (project_root/db/AppName.db)
+
+# Compute default database path (project_root/db/trimarr.db)
 _PROJECT_ROOT = get_project_root()
-_DEFAULT_DB_PATH = f"{_PROJECT_ROOT}/db/AppName.db"
+_DEFAULT_DB_PATH = f"{_PROJECT_ROOT}/db/trimarr.db"
 
 @click.command()
 @click.option(
@@ -18,7 +25,7 @@ _DEFAULT_DB_PATH = f"{_PROJECT_ROOT}/db/AppName.db"
     default=_DEFAULT_DB_PATH,
     show_default=True,
     metavar="<path>",
-    help="Path to SQLite database file for tracking processed albums in automatic mode",
+    help="Path to SQLite database file for tracking processed files.",
 )
 @click.option(
     "--log-level",
@@ -28,12 +35,12 @@ _DEFAULT_DB_PATH = f"{_PROJECT_ROOT}/db/AppName.db"
     show_default=True,
     help="Logging level for console output",
 )
-@click.version_option()
+@click.version_option(version=_VERSION, prog_name="Trimarr")
 def cli(
     database_path: str | None,
     log_level: str,
 ) -> None:
-    """AppName - Short description.
+    """Trimarr - Removes (trims) unrequired audio and subtitles from matroska container format video files.
 
     Long description
     """
@@ -43,6 +50,7 @@ def cli(
 
     logger = create_logger(log_format=log_format, log_level=log_level)
 
+    logger.info("Trimarr CLI is not yet implemented. Please run `trimarr --help` for usage instructions.")
 
 if __name__ == "__main__":
     cli()
