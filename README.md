@@ -9,11 +9,11 @@ Removes (trims) unwanted audio and subtitles from matroska container format vide
 ## Prerequisites
 
 - [Python 3.12+](https://www.python.org/downloads/)
-- [Astral uv](https://github.com/astral-sh/uv#installation)
+- [Astral uv](https://github.com/astral-sh/uv#installation) (optional)
 
 ## Quick start
 
-### Installation
+### Installation using uv (recommended)
 
 ```bash
 git clone https://github.com/binhex/trimarr
@@ -22,10 +22,20 @@ uv venv --quiet
 uv sync
 ```
 
+### Installation using pip
+
+```bash
+git clone https://github.com/binhex/trimarr
+cd trimarr
+python -m venv .venv
+source .venv/bin/activate
+pip install .
+```
+
 ### Running
 
 ```bash
-trimarr
+trimarr --help
 ```
 
 ## Options
