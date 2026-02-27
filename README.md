@@ -10,7 +10,9 @@ Removes (trims) unrequired audio and subtitles from matroska container format vi
 
 - Python 3.12+
 
-## Installation
+## Quick start
+
+### Installation
 
 ```bash
 git clone https://github.com/binhex/trimarr
@@ -18,6 +20,14 @@ cd trimarr
 uv venv --quiet
 uv sync
 ```
+
+### Running
+
+trimarr
+
+## Options
+
+WIP
 
 ## Development
 
@@ -28,11 +38,8 @@ uv venv --quiet
 uv sync --extra dev
 ```
 
-Run `pre-commit run --all-files` to perform linting before committing.
-
-## Configuration
-
-WIP
+If you wish to perform linting on all files before committing (PR will nt be
+accepted if it does not pass all linting) then run `pre-commit run --all-files`.
 
 ## FAQ
 
