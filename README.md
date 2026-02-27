@@ -23,7 +23,9 @@ uv sync
 
 ### Running
 
+```bash
 trimarr
+```
 
 ## Options
 
