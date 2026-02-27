@@ -1,10 +1,6 @@
 # files
 ####
 
-# ignore comments files
-todo.txt
-notes.txt
-
 # ignore mac generated files
 .DS_Store
 
