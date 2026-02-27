@@ -32,7 +32,7 @@ source .venv/bin/activate
 pip install .
 ```
 
-### Running
+### Usage
 
 ```bash
 trimarr --help
