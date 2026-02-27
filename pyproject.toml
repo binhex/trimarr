@@ -1,0 +1,143 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "appname"
+version = "1.0.0"
+description = "Automated tool"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "dev", email = "megalith01@gmail.com"}
+]
+keywords = ["movie", "imdb", "automation", "torrent"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "apscheduler",
+    "backoff",
+    "click",
+    "loguru",
+    "daemonize",
+    "apprise",
+    "pyyaml",
+    "requests",
+    "sqlalchemy",
+    "urllib3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-mock>=3.11.1",
+    "ruff>=0.1.0",
+    "mypy>=1.5.0",
+    "pre-commit>=3.6.0",
+    "autoflake>=2.3.1",
+]
+
+[project.scripts]
+appname = "cli.main:cli"
+
+[tool.setuptools]
+packages = ["appname"]
+package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+appname = ["py.typed"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # Pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "TCH", # flake8-type-checking
+]
+
+ignore = [
+    "E501",  # line too long (handled by formatter)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]  # unused imports in __init__.py
+"tests/*" = ["S101"]      # assert usage in tests
+
+[tool.ruff.lint.isort]
+known-first-party = ["appname"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+strict_equality = true
+mypy_path = "src"
+plugins = ["pydantic.mypy"]
+
+# Relax for tests
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+minversion = "7.0"
+addopts = """
+    -ra
+    --strict-markers
+    --strict-config
+    --cov=src/appname
+    --cov-report=term-missing
+    --cov-report=html
+    --cov-report=xml
+"""
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]
+
+[tool.pydantic-mypy]
+init_typed = true
+warn_required_dynamic_aliases = true
+warn_untyped_fields = true

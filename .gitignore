@@ -1,0 +1,47 @@
+# files
+####
+
+# ignore comments files
+todo.txt
+notes.txt
+
+# ignore mac generated files
+.DS_Store
+
+# ignore pycharm ide
+.idea
+
+# ignore vscode ide
+.vscode
+
+# ignore compiled python scripts
+*.py[cod]
+
+# ignore databases
+*.db
+
+# ignore log files
+*.log
+
+# folders
+####
+
+# ignore ai personas
+.ai/
+
+# ignore scratch folder
+.scratch/
+
+# ignore virtual env
+.venv
+
+# ignore egg info
+*.egg-info/
+
+# ignore python cache
+__pycache__/
+
+# ignore pytest, mypy and ruff cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
