@@ -8,7 +8,8 @@ Removes (trims) unrequired audio and subtitles from matroska container format vi
 
 ## Prerequisites
 
-- Python 3.12+
+- [Python 3.12+](https://www.python.org/downloads/)
+- [Astral uv](https://github.com/astral-sh/uv#installation)
 
 ## Quick start
 
