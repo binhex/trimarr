@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import os
 
-from loguru import Logger
 from loguru import logger as _logger
 
 
-def create_logger(log_format: str, log_level: str = "INFO", log_path: str | None = None) -> Logger:
+def create_logger(log_format: str, log_level: str = "INFO", log_path: str | None = None):  # type: ignore[no-untyped-def]
     """Return a configured Loguru logger instance.
 
     Args:

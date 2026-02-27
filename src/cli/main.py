@@ -27,7 +27,10 @@ _DEFAULT_LOGS_PATH = f"{_PROJECT_ROOT}/logs/trimarr.log"
     type=click.STRING,
     required=True,
     metavar="<language code>",
-    help="Specify the language you want to keep e.g. --language eng",
+    help=(
+        "Specify the language code for the audio/subtitle tracks to keep, e.g. 'eng' for English."
+        "Language codes: http://en.wikipedia.org/wiki/List_of_ISO_639-2_codes"
+    ),
 )
 @click.option(
     "--edit-metadata-title",
@@ -131,8 +134,6 @@ def cli(
         logger.info(f"mkvmerge not found at '{mkvmerge_path}', downloading latest binary...")
         mkvmerge_path = str(download_mkvmerge(dest_dir=_PROJECT_ROOT / "bin"))
         logger.success(f"mkvmerge installed at: {mkvmerge_path}")
-
-    logger.info("Trimarr CLI is not yet implemented. Please run `trimarr --help` for usage instructions.")
 
     logger.info("Trimarr CLI is not yet implemented. Please run `trimarr --help` for usage instructions.")
 
