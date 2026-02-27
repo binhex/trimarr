@@ -47,6 +47,7 @@ dev = [
 
 [project.scripts]
 Trimarr = "cli.main:cli"
+trimarr = "cli.main:cli"
 
 [tool.setuptools.packages.find]
 where = ["src"]
