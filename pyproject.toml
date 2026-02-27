@@ -3,12 +3,12 @@ requires = ["setuptools>=65.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "appname"
+name = "Trimarr"
 version = "1.0.0"
 description = "Automated tool"
 readme = "README.md"
 requires-python = ">=3.12"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "dev", email = "megalith01@gmail.com"}
 ]
@@ -16,7 +16,6 @@ keywords = ["movie", "imdb", "automation", "torrent"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
 ]
@@ -47,14 +46,13 @@ dev = [
 ]
 
 [project.scripts]
-appname = "cli.main:cli"
+Trimarr = "cli.main:cli"
 
-[tool.setuptools]
-packages = ["appname"]
-package-dir = {"" = "src"}
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.setuptools.package-data]
-appname = ["py.typed"]
+"*" = ["py.typed"]
 
 [tool.ruff]
 line-length = 120
@@ -83,7 +81,7 @@ ignore = [
 "tests/*" = ["S101"]      # assert usage in tests
 
 [tool.ruff.lint.isort]
-known-first-party = ["appname"]
+known-first-party = ["Trimarr"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -111,7 +109,7 @@ addopts = """
     -ra
     --strict-markers
     --strict-config
-    --cov=src/appname
+    --cov=src/Trimarr
     --cov-report=term-missing
     --cov-report=html
     --cov-report=xml
