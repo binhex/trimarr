@@ -40,9 +40,11 @@ def cli(
     database_path: str | None,
     log_level: str,
 ) -> None:
-    """Trimarr - Removes (trims) unrequired audio and subtitles from matroska container format video files.
+    """Trimarr - Removes (trims) unwanted audio and subtitles from matroska container format video files.
 
-    Long description
+    This script will remove unwanted audio and subtitle tracks from matroska container format video files based on
+		user-defined criteria. It uses matroska CLI tools for processing the video files and SQLite for tracking which files
+		have already been processed to avoid redundant work.
     """
 
     # Logger format for consistent output styling
