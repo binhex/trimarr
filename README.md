@@ -40,7 +40,19 @@ trimarr --help
 
 ## Options
 
-WIP
+| Option | Description | Default | Example | Type |
+| ------ | ----------- | ------- | ------- | ---- |
+| `--language` | Language code for the audio/subtitle tracks to keep. See [ISO 639-2 codes](http://en.wikipedia.org/wiki/List_of_ISO_639-2_codes). | — | `eng` | `string` |
+| `--media-path` | Path to the directory containing media files. | — | `/mnt/media/movies` | `path` |
+| `--mkvmerge-path` | Path to the mkvmerge executable. | `<project root>/bin/mkvmerge` | `/usr/bin/mkvmerge` | `path` |
+| `--database-path` | Path to the SQLite database file used for tracking processed files. | `<project root>/db/trimarr.db` | `/var/lib/trimarr/trimarr.db` | `path` |
+| `--log-path` | Path to the log file for tracking application events. | `<project root>/logs/trimarr.log` | `/var/log/trimarr.log` | `path` |
+| `--log-level` | Logging level for console output. Choices: `DEBUG`, `INFO`, `SUCCESS`, `WARNING`, `ERROR`. | `INFO` | `DEBUG` | `choice` |
+| `--edit-metadata-title` | If specified, the title metadata of each file will be updated to match its filename. | `false` | — | `flag` |
+| `--delete-metadata-title` | If specified, the title metadata of each file will be deleted. | `false` | — | `flag` |
+| `--keep-subtitles` | If specified, all subtitle tracks will be kept regardless of language. | `false` | — | `flag` |
+| `--keep-audio` | If specified, all audio tracks will be kept regardless of language. | `false` | — | `flag` |
+| `--dry-run` | If specified, performs a dry run without making any changes. | `false` | — | `flag` |
 
 ## Development
 
