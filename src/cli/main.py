@@ -21,7 +21,55 @@ _DEFAULT_DB_PATH = f"{_PROJECT_ROOT}/db/trimarr.db"
 _DEFAULT_LOGS_PATH = f"{_PROJECT_ROOT}/logs/trimarr.log"
 
 
-@click.command()
+class _CliCommand(click.Command):
+    """Custom Click Command subclass that stores CLI examples and renders the epilog without indentation."""
+
+    EXAMPLES = """
+\b
+Examples:
+  Keep only English audio and subtitles:
+    {prog} \\
+      --language eng \\
+      --media-path /mnt/media/movies
+
+\b
+  Keep only English audio, but retain all subtitle tracks:
+    {prog} \\
+      --language eng \\
+      --keep-subtitles \\
+      --media-path /mnt/media/movies
+
+\b
+  Dry run to preview changes without modifying files:
+    {prog} \\
+      --language eng \\
+      --dry-run \\
+      --media-path /mnt/media/movies
+
+\b
+  Keep only French audio and update each file's title metadata to match its filename:
+    {prog} \\
+      --language fre \\
+      --edit-metadata-title \\
+      --media-path /mnt/media/movies
+
+\b
+  Use a custom mkvmerge binary and database location:
+    {prog} \\
+      --language eng \\
+      --media-path /mnt/media/movies \\
+      --mkvmerge-path /usr/bin/mkvmerge \\
+      --database-path /var/lib/trimarr/trimarr.db
+\b
+"""
+
+    def format_epilog(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        if self.epilog:
+            formatter.write_paragraph()
+            formatter.write_text(self.epilog.replace("{prog}", ctx.info_name or ""))
+
+
+@click.command(cls=_CliCommand, epilog=_CliCommand.EXAMPLES)
 @click.option(
     "--language",
     type=click.STRING,
@@ -29,7 +77,7 @@ _DEFAULT_LOGS_PATH = f"{_PROJECT_ROOT}/logs/trimarr.log"
     metavar="<language code>",
     help=(
         "Specify the language code for the audio/subtitle tracks to keep, e.g. 'eng' for English."
-        "Language codes: http://en.wikipedia.org/wiki/List_of_ISO_639-2_codes"
+        " Language codes: http://en.wikipedia.org/wiki/List_of_ISO_639-2_codes"
     ),
 )
 @click.option(
