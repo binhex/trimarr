@@ -21,15 +21,11 @@ classifiers = [
 ]
 
 dependencies = [
-    "apscheduler",
     "backoff",
     "click",
     "loguru",
-    "daemonize",
     "apprise",
-    "pyyaml",
     "requests",
-    "sqlalchemy",
     "urllib3",
 ]
 
