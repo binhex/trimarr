@@ -24,7 +24,7 @@ def get_app_data_dir() -> Path:
     """
     xdg = os.environ.get("XDG_DATA_HOME", "")
     if xdg:
-        xdg_path = Path(xdg).expanduser()
+        xdg_path = Path(xdg)
         if xdg_path.is_absolute():
             return xdg_path / "trimarr"
     return Path.home() / ".local" / "share" / "trimarr"
