@@ -6,7 +6,7 @@ from pathlib import Path
 import click
 
 from core.logging import create_logger
-from utils.utils import download_mkvmerge, get_project_root
+from utils.utils import download_mkvmerge, get_app_data_dir
 
 try:
     _VERSION = version("Trimarr")
@@ -14,11 +14,12 @@ except PackageNotFoundError:
     _VERSION = "unknown"
 
 
-# Compute default database path (project_root/db/trimarr.db)
-_PROJECT_ROOT = get_project_root()
-_DEFAULT_MKVMERGE_PATH = f"{_PROJECT_ROOT}/bin/mkvmerge"
-_DEFAULT_DB_PATH = f"{_PROJECT_ROOT}/db/trimarr.db"
-_DEFAULT_LOGS_PATH = f"{_PROJECT_ROOT}/logs/trimarr.log"
+# Compute default paths under the user application data directory so they are
+# correct both during development and when installed via pip/uv.
+_APP_DATA_DIR = get_app_data_dir()
+_DEFAULT_MKVMERGE_PATH = f"{_APP_DATA_DIR}/bin/mkvmerge"
+_DEFAULT_DB_PATH = f"{_APP_DATA_DIR}/db/trimarr.db"
+_DEFAULT_LOGS_PATH = f"{_APP_DATA_DIR}/logs/trimarr.log"
 
 
 class _CliCommand(click.Command):
@@ -178,9 +179,12 @@ def cli(
 
     logger = create_logger(log_format=log_format, log_level=log_level, log_path=log_path)
 
+    if edit_metadata_title and delete_metadata_title:
+        raise click.UsageError("--edit-metadata-title and --delete-metadata-title are mutually exclusive.")
+
     if not Path(mkvmerge_path).is_file():
         logger.info(f"mkvmerge not found at '{mkvmerge_path}', downloading latest binary...")
-        mkvmerge_path = str(download_mkvmerge(dest_dir=_PROJECT_ROOT / "bin"))
+        mkvmerge_path = str(download_mkvmerge(dest_dir=_APP_DATA_DIR / "bin"))
         logger.success(f"mkvmerge installed at: {mkvmerge_path}")
 
     logger.info("Trimarr CLI is not yet implemented. Please run `trimarr --help` for usage instructions.")

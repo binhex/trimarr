@@ -2,17 +2,32 @@
 
 from __future__ import annotations
 
+import os
 import stat
 import tarfile
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 
+# ELF magic bytes — first 4 bytes of any Linux ELF binary
+_ELF_MAGIC = b"\x7fELF"
 
-def get_project_root() -> Path:
-    """Return the project root directory (three levels up from this file)."""
-    return Path(__file__).parent.parent.parent
+
+def get_app_data_dir() -> Path:
+    """Return the application data directory, honouring XDG_DATA_HOME.
+
+    Returns ``$XDG_DATA_HOME/trimarr`` when the env var is set to an absolute
+    path, otherwise ``~/.local/share/trimarr``.  Relative values and unexpanded
+    tildes are ignored per the XDG Base Directory Specification.
+    """
+    xdg = os.environ.get("XDG_DATA_HOME", "")
+    if xdg:
+        xdg_path = Path(xdg).expanduser()
+        if xdg_path.is_absolute():
+            return xdg_path / "trimarr"
+    return Path.home() / ".local" / "share" / "trimarr"
 
 
 # GitHub repo that publishes statically compiled MKVToolNix binaries for Linux
@@ -29,10 +44,10 @@ def _get_latest_release_asset_url(repo: str, asset_name: str) -> str:
         asset_name: Exact filename of the release asset.
 
     Returns:
-        Download URL string.
+        Download URL string (always ``https://github.com`` or ``https://objects.githubusercontent.com``).
 
     Raises:
-        RuntimeError: If the asset cannot be found in the latest release.
+        RuntimeError: If the asset cannot be found in the latest release or the URL is not from GitHub.
         requests.HTTPError: On non-2xx GitHub API responses.
     """
     url = f"{_GITHUB_API}/repos/{repo}/releases/latest"
@@ -42,7 +57,15 @@ def _get_latest_release_asset_url(repo: str, asset_name: str) -> str:
     release = response.json()
     for asset in release.get("assets", []):
         if asset["name"] == asset_name:
-            return str(asset["browser_download_url"])
+            download_url = str(asset["browser_download_url"])
+            # Validate the URL is from a trusted GitHub domain and uses HTTPS
+            parsed = urlparse(download_url)
+            trusted = {"github.com", "objects.githubusercontent.com", "github-releases.githubusercontent.com"}
+            if parsed.scheme != "https" or parsed.hostname not in trusted:
+                raise RuntimeError(
+                    f"Download URL '{download_url}' is not from a trusted GitHub domain over HTTPS. Refusing to use it."
+                )
+            return download_url
 
     tag = release.get("tag_name", "unknown")
     raise RuntimeError(f"Asset '{asset_name}' not found in latest release '{tag}' of '{repo}'.")
@@ -57,23 +80,24 @@ def download_mkvmerge(dest_dir: str | Path | None = None) -> Path:
 
     Args:
         dest_dir: Directory to place the ``mkvmerge`` binary in.  Defaults to
-            ``<project_root>/bin``.
+            ``<app_data_dir>/bin``.
 
     Returns:
         :class:`~pathlib.Path` to the installed ``mkvmerge`` binary.
 
     Raises:
-        RuntimeError: If the asset or binary cannot be located.
+        RuntimeError: If the asset or binary cannot be located, or the extracted
+            file is not a valid ELF binary.
         requests.HTTPError: On download failures.
     """
     if dest_dir is None:
-        dest_dir = get_project_root() / "bin"
+        dest_dir = get_app_data_dir() / "bin"
 
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_binary = dest_dir / "mkvmerge"
 
-    # Resolve latest download URL via GitHub API
+    # Resolve latest download URL via GitHub API (URL is validated inside)
     download_url = _get_latest_release_asset_url(_MKVTOOLNIX_REPO, _MKVTOOLNIX_ASSET)
 
     # Download archive into a temp file
@@ -97,9 +121,19 @@ def download_mkvmerge(dest_dir: str | Path | None = None) -> Path:
             if mkvmerge_member is None:
                 raise RuntimeError(f"Could not find 'mkvmerge' binary inside '{_MKVTOOLNIX_ASSET}'.")
 
-            # Extract to temp dir then move to final destination
             tar.extract(mkvmerge_member, path=tmp, filter="data")
-            extracted = Path(tmp) / mkvmerge_member.name
+
+            # Use rglob to locate the extracted file regardless of nesting depth
+            matches = list(Path(tmp).rglob("mkvmerge"))
+            if not matches:
+                raise RuntimeError("Could not locate 'mkvmerge' after extraction.")
+            extracted = matches[0]
+
+            # Sanity-check: verify ELF magic bytes before installing
+            with extracted.open("rb") as fh:
+                magic = fh.read(4)
+            if magic != _ELF_MAGIC:
+                raise RuntimeError(f"Downloaded 'mkvmerge' does not appear to be a valid ELF binary (magic={magic!r}).")
 
             dest_binary.write_bytes(extracted.read_bytes())
 

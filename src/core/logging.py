@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import os
+from typing import TYPE_CHECKING
 
 from loguru import logger as _logger
 
+if TYPE_CHECKING:
+    from loguru import Logger
 
-def create_logger(log_format: str, log_level: str = "INFO", log_path: str | None = None):  # type: ignore[no-untyped-def]
+
+def create_logger(log_format: str, log_level: str = "INFO", log_path: str | None = None) -> Logger:
     """Return a configured Loguru logger instance.
 
     Args:
@@ -30,7 +34,12 @@ def create_logger(log_format: str, log_level: str = "INFO", log_path: str | None
 
     # File sink
     if log_path:
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        # Only call makedirs when the path has a directory component; a bare
+        # filename (e.g. "trimarr.log") would produce an empty string which
+        # causes os.makedirs to raise FileNotFoundError.
+        log_dir = os.path.dirname(log_path)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
         _logger.add(
             sink=log_path,
             level=log_level.upper(),
