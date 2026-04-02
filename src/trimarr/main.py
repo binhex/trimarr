@@ -59,17 +59,18 @@ def run(
             "<green>DRY-RUN</green>  | No files will be modified — logging planned changes only."
         )
 
+    total = len(mkv_files)
     counts: dict[str, int] = {"processed": 0, "skipped": 0, "failed": 0, "no_change": 0}
 
     with Database(database_path) as db:
-        for file_path in mkv_files:
-            logger.debug(f"Examining: {file_path}")
-
+        for idx, file_path in enumerate(mkv_files, 1):
             # Skip unchanged files
             if db.is_processed(file_path):
                 logger.debug(f"Already processed (unchanged): {file_path}")
                 counts["skipped"] += 1
                 continue
+
+            logger.info(f"  [{idx}/{total}] Checking '{file_path.relative_to(root)}'...")
 
             # Probe tracks
             try:

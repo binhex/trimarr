@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import contextlib
+import itertools
 import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from loguru import Logger
 
 
@@ -49,6 +56,49 @@ def _is_commentary(name: str | None) -> bool:
     if not name:
         return False
     return bool(_COMMENTARY_RE.search(name))
+
+
+def _fmt_track(t: MkvTrack) -> str:
+    """Format a track as a short string for log messages.
+
+    Track names come from untrusted MKV metadata, so control characters
+    (newlines, ANSI escapes, etc.) are stripped to prevent log injection.
+    """
+    parts = [f"ID {t.id}"]
+    if t.language:
+        parts.append(f"[{t.language}]")
+    if t.name:
+        safe_name = "".join(c for c in t.name if c.isprintable())
+        parts.append(f"'{safe_name}'")
+    return " ".join(parts)
+
+
+@contextlib.contextmanager
+def _spinner(message: str) -> Iterator[None]:
+    """Show a braille spinner on stderr while the body executes (TTY only)."""
+    if not sys.stderr.isatty():
+        yield
+        return
+
+    stop = threading.Event()
+
+    def _run() -> None:
+        for char in itertools.cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"):
+            if stop.is_set():
+                break
+            sys.stderr.write(f"\r  {char} {message}")
+            sys.stderr.flush()
+            time.sleep(0.1)
+        sys.stderr.write(f"\r{' ' * (len(message) + 5)}\r")
+        sys.stderr.flush()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join()
 
 
 def probe_file(mkvmerge_path: str, file_path: Path) -> list[MkvTrack]:
@@ -189,6 +239,21 @@ def build_mkvmerge_command(
     if not needs_audio_change and not needs_sub_change and not needs_metadata_change:
         return None
 
+    # Log what is being changed and why, so the user has full visibility.
+    if logger is not None:
+        audio_drop_set = set(audio_drop)
+        sub_drop_set = set(sub_drop)
+        if audio_drop:
+            descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "audio" and t.id in audio_drop_set)
+            logger.info(f"  Dropping {len(audio_drop)} audio track(s) (language ≠ '{language}'): {descs}")
+        if sub_drop:
+            descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "subtitles" and t.id in sub_drop_set)
+            logger.info(f"  Dropping {len(sub_drop)} subtitle track(s) (language ≠ '{language}'): {descs}")
+        if edit_metadata_title:
+            logger.info(f"  Metadata: setting title to '{input_path.stem}'")
+        elif delete_metadata_title:
+            logger.info("  Metadata: clearing title")
+
     cmd: list[str] = [mkvmerge_path, "-o", str(output_path)]
 
     # Metadata title edit
@@ -294,7 +359,8 @@ def process_file(
         patched_cmd[out_idx] = str(tmp_path)
 
         logger.debug(f"Running: {' '.join(patched_cmd)}")
-        result = subprocess.run(patched_cmd, capture_output=True, text=True, timeout=3600)
+        with _spinner(f"Remuxing '{file_path.name}'..."):
+            result = subprocess.run(patched_cmd, capture_output=True, text=True, timeout=3600)
 
         if result.returncode == 1:
             logger.warning(
