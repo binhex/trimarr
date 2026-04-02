@@ -64,6 +64,14 @@ def run(
         logger: Loguru logger instance.
     """
     root = Path(media_path)
+
+    if not root.exists():
+        logger.error(f"Media path '{media_path}' does not exist.")
+        return
+    if not root.is_dir():
+        logger.error(f"Media path '{media_path}' is not a directory.")
+        return
+
     mkv_files = sorted(root.rglob("*.mkv"))
 
     if not mkv_files:
@@ -85,66 +93,76 @@ def run(
     try:
         with Database(database_path) as db:
             for idx, file_path in enumerate(mkv_files, 1):
-                # Skip unchanged files
-                if db.is_processed(file_path):
-                    logger.debug(f"Already processed (unchanged): {file_path}")
-                    counts["skipped"] += 1
-                    continue
-
-                logger.info(f"  [{idx}/{total}] Checking '{file_path.relative_to(root)}'...")
-
-                # Probe tracks
                 try:
-                    tracks = probe_file(mkvmerge_path, file_path)
-                except RuntimeError as exc:
-                    logger.error(f"Could not probe '{file_path}': {exc}")
-                    counts["failed"] += 1
-                    continue
+                    # Skip unchanged files
+                    if db.is_processed(file_path):
+                        logger.debug(f"Already processed (unchanged): {file_path}")
+                        counts["skipped"] += 1
+                        continue
 
-                # Build the mkvmerge command (returns None if nothing to do)
-                cmd = build_mkvmerge_command(
-                    mkvmerge_path=mkvmerge_path,
-                    input_path=file_path,
-                    output_path=file_path,  # placeholder; process_file patches this
-                    tracks=tracks,
-                    language=language,
-                    keep_audio=keep_audio,
-                    keep_subtitles=keep_subtitles,
-                    edit_metadata_title=edit_metadata_title,
-                    delete_metadata_title=delete_metadata_title,
-                    logger=logger,
-                )
+                    logger.info(f"  [{idx}/{total}] Checking '{file_path.relative_to(root)}'...")
 
-                if cmd is None:
-                    if not dry_run:
-                        logger.info(f"No changes needed for '{file_path.name}' — marking as processed.")
-                        db.mark_processed(file_path, bytes_saved=0)
+                    # Probe tracks
+                    try:
+                        tracks = probe_file(mkvmerge_path, file_path)
+                    except RuntimeError as exc:
+                        logger.error(f"Could not probe '{file_path}': {exc}")
+                        counts["failed"] += 1
+                        continue
+
+                    # Build the mkvmerge command (returns None if nothing to do)
+                    cmd = build_mkvmerge_command(
+                        mkvmerge_path=mkvmerge_path,
+                        input_path=file_path,
+                        output_path=file_path,  # placeholder; process_file patches this
+                        tracks=tracks,
+                        language=language,
+                        keep_audio=keep_audio,
+                        keep_subtitles=keep_subtitles,
+                        edit_metadata_title=edit_metadata_title,
+                        delete_metadata_title=delete_metadata_title,
+                        logger=logger,
+                    )
+
+                    if cmd is None:
+                        if not dry_run:
+                            logger.info(f"No changes needed for '{file_path.name}' — marking as processed.")
+                            db.mark_processed(file_path, bytes_saved=0)
+                        else:
+                            logger.info(f"No changes needed for '{file_path.name}'.")
+                        counts["no_change"] += 1
+                        continue
+
+                    if dry_run:
+                        # Patch the displayed -o argument to reflect the actual temp-file-then-rename
+                        # execution strategy; mkvmerge refuses input == output, so showing the raw
+                        # command (where placeholder output_path == input_path) would be misleading.
+                        display_cmd = list(cmd)
+                        display_cmd[display_cmd.index("-o") + 1] = "<tmpfile>"
+                        logger.opt(colors=True).info(f"<green>DRY-RUN</green>  | Would run: {' '.join(display_cmd)}")
+                        counts["processed"] += 1
+                        continue
+
+                    # Process the file
+                    size_before = file_path.stat().st_size
+                    success = process_file(
+                        mkvmerge_path=mkvmerge_path,
+                        file_path=file_path,
+                        command=cmd,
+                        no_backup=no_backup,
+                        logger=logger,
+                    )
+                    if success:
+                        bytes_saved = size_before - file_path.stat().st_size
+                        session_bytes_saved += bytes_saved
+                        db.mark_processed(file_path, bytes_saved=bytes_saved)
+                        logger.success(f"Processed: {file_path.name}")
+                        counts["processed"] += 1
                     else:
-                        logger.info(f"No changes needed for '{file_path.name}'.")
-                    counts["no_change"] += 1
-                    continue
+                        counts["failed"] += 1
 
-                if dry_run:
-                    logger.opt(colors=True).info(f"<green>DRY-RUN</green>  | Would run: {' '.join(cmd)}")
-                    counts["processed"] += 1
-                    continue
-
-                # Process the file
-                size_before = file_path.stat().st_size
-                success = process_file(
-                    mkvmerge_path=mkvmerge_path,
-                    file_path=file_path,
-                    command=cmd,
-                    no_backup=no_backup,
-                    logger=logger,
-                )
-                if success:
-                    bytes_saved = size_before - file_path.stat().st_size
-                    session_bytes_saved += bytes_saved
-                    db.mark_processed(file_path, bytes_saved=bytes_saved)
-                    logger.success(f"Processed: {file_path.name}")
-                    counts["processed"] += 1
-                else:
+                except OSError as exc:
+                    logger.error(f"File system error processing '{file_path}': {exc}")
                     counts["failed"] += 1
 
     except KeyboardInterrupt:

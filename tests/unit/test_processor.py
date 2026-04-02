@@ -533,14 +533,33 @@ class TestProcessFile:
         assert mkv.read_bytes() == b"processed"
         assert not (tmp_path / "movie.mkv.bak").exists()
 
-    def test_exit_code_1_treated_as_failure(self, tmp_path: Path) -> None:
+    def test_exit_code_1_with_valid_output_succeeds_with_warning(self, tmp_path: Path) -> None:
+        """mkvmerge exit 1 means 'completed with warnings' — output is still valid."""
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"original")
         cmd = self._cmd(mkv, tmp_path / "out.mkv")
         logger = self._make_logger()
 
         def fake_run(args: list[str], **kwargs: object) -> MagicMock:
-            Path(args[2]).write_bytes(b"partial")
+            Path(args[2]).write_bytes(b"processed")
+            return MagicMock(returncode=1, stdout="", stderr="warning from mkvmerge")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=logger)
+
+        assert result is True
+        assert mkv.read_bytes() == b"processed"
+        logger.warning.assert_called_once()
+
+    def test_exit_code_1_with_empty_output_fails(self, tmp_path: Path) -> None:
+        """mkvmerge exit 1 with an empty/missing output is still a failure."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"original")
+        cmd = self._cmd(mkv, tmp_path / "out.mkv")
+        logger = self._make_logger()
+
+        def fake_run(args: list[str], **kwargs: object) -> MagicMock:
+            Path(args[2]).write_bytes(b"")  # Empty — not usable
             return MagicMock(returncode=1, stdout="", stderr="warning from mkvmerge")
 
         with patch("subprocess.run", side_effect=fake_run):
@@ -548,7 +567,6 @@ class TestProcessFile:
 
         assert result is False
         assert mkv.read_bytes() == b"original"  # Original untouched
-        logger.warning.assert_called_once()
 
     def test_exit_code_2_treated_as_failure(self, tmp_path: Path) -> None:
         mkv = tmp_path / "movie.mkv"
@@ -570,7 +588,7 @@ class TestProcessFile:
 
         def fake_run(args: list[str], **kwargs: object) -> MagicMock:
             Path(args[2]).write_bytes(b"partial")
-            return MagicMock(returncode=1, stdout="", stderr="")
+            return MagicMock(returncode=2, stdout="", stderr="fatal error")
 
         with patch("subprocess.run", side_effect=fake_run):
             process_file(MKVMERGE, mkv, cmd, no_backup=False, logger=self._make_logger())

@@ -97,11 +97,12 @@ class Database:
         self._conn.execute("PRAGMA journal_mode=WAL;")
         self._conn.executescript(_SCHEMA)
         # Migrate existing databases that pre-date the bytes_saved column.
-        try:
+        # Use PRAGMA rather than catching OperationalError so disk I/O and locking
+        # errors are never silently swallowed.
+        existing_cols = {row[1] for row in self._conn.execute("PRAGMA table_info(processed_files)")}
+        if "bytes_saved" not in existing_cols:
             self._conn.execute(_MIGRATE_ADD_BYTES_SAVED)
             self._conn.commit()
-        except sqlite3.OperationalError:
-            pass  # Column already exists — nothing to do.
 
     def close(self) -> None:
         """Close the database connection."""

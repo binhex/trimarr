@@ -364,19 +364,20 @@ def process_file(
         with _spinner(f"Remuxing '{file_path.name}'..."):
             result = subprocess.run(patched_cmd, capture_output=True, text=True, timeout=3600)
 
-        if result.returncode == 1:
-            logger.warning(
-                f"mkvmerge reported warnings for '{file_path}' (exit 1) — keeping original.\n"
-                f"{result.stderr.strip() or result.stdout.strip()}"
-            )
-            return False
-
-        if result.returncode != 0:
+        if result.returncode not in (0, 1):
             logger.error(
                 f"mkvmerge failed for '{file_path}' (exit {result.returncode}).\n"
                 f"{result.stderr.strip() or result.stdout.strip()}"
             )
             return False
+
+        # mkvmerge exit 1 means "completed with warnings" — the output is still valid.
+        # Log the warning but continue; the output file check below confirms usability.
+        if result.returncode == 1:
+            logger.warning(
+                f"mkvmerge reported warnings for '{file_path}' (exit 1) — output validated and accepted.\n"
+                f"{result.stderr.strip() or result.stdout.strip()}"
+            )
 
         # Validate output file
         if not tmp_path.exists() or tmp_path.stat().st_size == 0:
