@@ -54,6 +54,11 @@ def run(
 
     logger.info(f"Found {len(mkv_files)} .mkv file(s) under '{media_path}'.")
 
+    if dry_run:
+        logger.opt(colors=True).info(
+            "<green>DRY-RUN</green>  | No files will be modified — logging planned changes only."
+        )
+
     counts: dict[str, int] = {"processed": 0, "skipped": 0, "failed": 0, "no_change": 0}
 
     with Database(database_path) as db:
@@ -95,7 +100,7 @@ def run(
                 continue
 
             if dry_run:
-                logger.info(f"[dry-run] Would run: {' '.join(cmd)}")
+                logger.opt(colors=True).info(f"<green>DRY-RUN</green>  | Would run: {' '.join(cmd)}")
                 counts["processed"] += 1
                 continue
 
@@ -114,9 +119,18 @@ def run(
             else:
                 counts["failed"] += 1
 
-    logger.info(
-        f"Done — processed: {counts['processed']}, "
-        f"no change needed: {counts['no_change']}, "
-        f"skipped (already done): {counts['skipped']}, "
-        f"failed: {counts['failed']}."
-    )
+    if dry_run:
+        logger.opt(colors=True).info(
+            f"<green>DRY-RUN</green>  | Complete — no files were modified. "
+            f"Would have processed: {counts['processed']}, "
+            f"no change needed: {counts['no_change']}, "
+            f"skipped (already done): {counts['skipped']}, "
+            f"failed: {counts['failed']}."
+        )
+    else:
+        logger.info(
+            f"Done — processed: {counts['processed']}, "
+            f"no change needed: {counts['no_change']}, "
+            f"skipped (already done): {counts['skipped']}, "
+            f"failed: {counts['failed']}."
+        )
