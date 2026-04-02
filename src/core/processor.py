@@ -244,11 +244,13 @@ def build_mkvmerge_command(
         audio_drop_set = set(audio_drop)
         sub_drop_set = set(sub_drop)
         if audio_drop:
+            logger.info(f"  Dropping {len(audio_drop)} audio track(s) (language ≠ '{language}').")
             descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "audio" and t.id in audio_drop_set)
-            logger.info(f"  Dropping {len(audio_drop)} audio track(s) (language ≠ '{language}'): {descs}")
+            logger.debug(f"  Dropping audio track(s): {descs}")
         if sub_drop:
+            logger.info(f"  Dropping {len(sub_drop)} subtitle track(s) (language ≠ '{language}').")
             descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "subtitles" and t.id in sub_drop_set)
-            logger.info(f"  Dropping {len(sub_drop)} subtitle track(s) (language ≠ '{language}'): {descs}")
+            logger.debug(f"  Dropping subtitle track(s): {descs}")
         if edit_metadata_title:
             logger.info(f"  Metadata: setting title to '{input_path.stem}'")
         elif delete_metadata_title:
