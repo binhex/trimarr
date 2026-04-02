@@ -148,6 +148,15 @@ Examples:
     help="Logging level for console output",
 )
 @click.option(
+    "--no-backup",
+    is_flag=True,
+    default=False,
+    help=(
+        "If specified, the original file is deleted instead of being renamed to '<name>.bak'"
+        " after successful processing.  By default a backup is always created."
+    ),
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     default=False,
@@ -165,6 +174,7 @@ def cli(
     database_path: str,
     log_path: str,
     log_level: str,
+    no_backup: bool,
     dry_run: bool,
 ) -> None:
     """Trimarr - Removes (trims) unwanted audio and subtitles from matroska container format video files.
@@ -173,6 +183,7 @@ def cli(
     user-defined criteria. It uses matroska CLI tools for processing the video files and SQLite for tracking which files
     have already been processed to avoid redundant work.
     """
+    from trimarr.main import run
 
     # Logger format for consistent output styling
     log_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>"
@@ -187,7 +198,19 @@ def cli(
         mkvmerge_path = str(download_mkvmerge(dest_dir=_APP_DATA_DIR / "bin"))
         logger.success(f"mkvmerge installed at: {mkvmerge_path}")
 
-    logger.info("Trimarr CLI is not yet implemented. Please run `trimarr --help` for usage instructions.")
+    run(
+        language=language,
+        edit_metadata_title=edit_metadata_title,
+        delete_metadata_title=delete_metadata_title,
+        keep_subtitles=keep_subtitles,
+        keep_audio=keep_audio,
+        media_path=media_path,
+        mkvmerge_path=mkvmerge_path,
+        database_path=database_path,
+        no_backup=no_backup,
+        dry_run=dry_run,
+        logger=logger,
+    )
 
 
 if __name__ == "__main__":
