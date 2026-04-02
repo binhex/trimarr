@@ -24,6 +24,10 @@ def _make_tracks(
     audio_langs: list[str | None],
     sub_langs: list[str | None],
     video_count: int = 1,
+    audio_names: list[str | None] | None = None,
+    sub_names: list[str | None] | None = None,
+    audio_defaults: list[bool] | None = None,
+    sub_defaults: list[bool] | None = None,
 ) -> list[MkvTrack]:
     """Build a minimal track list for testing."""
     tracks: list[MkvTrack] = []
@@ -31,11 +35,15 @@ def _make_tracks(
     for _ in range(video_count):
         tracks.append(MkvTrack(id=tid, type="video", language=None))
         tid += 1
-    for lang in audio_langs:
-        tracks.append(MkvTrack(id=tid, type="audio", language=lang))
+    for i, lang in enumerate(audio_langs):
+        name = audio_names[i] if audio_names else None
+        default = audio_defaults[i] if audio_defaults else False
+        tracks.append(MkvTrack(id=tid, type="audio", language=lang, name=name, default_track=default))
         tid += 1
-    for lang in sub_langs:
-        tracks.append(MkvTrack(id=tid, type="subtitles", language=lang))
+    for i, lang in enumerate(sub_langs):
+        name = sub_names[i] if sub_names else None
+        default = sub_defaults[i] if sub_defaults else False
+        tracks.append(MkvTrack(id=tid, type="subtitles", language=lang, name=name, default_track=default))
         tid += 1
     return tracks
 
@@ -54,7 +62,11 @@ class TestProbeFile:
     def test_parses_tracks_correctly(self, tmp_path: Path) -> None:
         raw_tracks = [
             {"id": 0, "type": "video", "properties": {"language": "und"}},
-            {"id": 1, "type": "audio", "properties": {"language": "eng"}},
+            {
+                "id": 1,
+                "type": "audio",
+                "properties": {"language": "eng", "track_name": "Main Audio", "default_track": True},
+            },
             {"id": 2, "type": "subtitles", "properties": {"language": "fre"}},
         ]
         mkv = tmp_path / "movie.mkv"
@@ -66,8 +78,36 @@ class TestProbeFile:
 
         assert len(result) == 3
         assert result[0] == MkvTrack(id=0, type="video", language=None)  # "und" → None
-        assert result[1] == MkvTrack(id=1, type="audio", language="eng")
+        assert result[1] == MkvTrack(id=1, type="audio", language="eng", name="Main Audio", default_track=True)
         assert result[2] == MkvTrack(id=2, type="subtitles", language="fre")
+
+    def test_parses_track_name_and_default_flag(self, tmp_path: Path) -> None:
+        raw_tracks = [
+            {
+                "id": 0,
+                "type": "audio",
+                "properties": {"language": "eng", "track_name": "Commentary 1", "default_track": True},
+            },
+            {"id": 1, "type": "audio", "properties": {"language": "eng", "default_track": False}},
+        ]
+        mkv = tmp_path / "movie.mkv"
+        mkv.touch()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=self._mkvmerge_json(raw_tracks), stderr="")
+            result = probe_file(MKVMERGE, mkv)
+        assert result[0].name == "Commentary 1"
+        assert result[0].default_track is True
+        assert result[1].name is None
+        assert result[1].default_track is False
+
+    def test_empty_track_name_normalised_to_none(self, tmp_path: Path) -> None:
+        raw_tracks = [{"id": 0, "type": "audio", "properties": {"language": "eng", "track_name": ""}}]
+        mkv = tmp_path / "movie.mkv"
+        mkv.touch()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=self._mkvmerge_json(raw_tracks), stderr="")
+            result = probe_file(MKVMERGE, mkv)
+        assert result[0].name is None
 
     def test_raises_on_nonzero_exit(self, tmp_path: Path) -> None:
         mkv = tmp_path / "bad.mkv"
@@ -244,6 +284,196 @@ class TestBuildMkvmergeCommand:
         cmd = self._build(tracks, input_path=inp)
         assert cmd is not None
         assert cmd[-1] == str(inp)
+
+
+# ---------------------------------------------------------------------------
+# Commentary default-track reassignment tests
+# ---------------------------------------------------------------------------
+
+
+class TestCommentaryDefaultTrack:
+    """Tests for the commentary --default-track reassignment logic."""
+
+    def _build(
+        self,
+        tracks: list[MkvTrack],
+        language: str = ENG,
+        logger: MagicMock | None = None,
+    ) -> list[str] | None:
+        return build_mkvmerge_command(
+            mkvmerge_path=MKVMERGE,
+            input_path=Path("/media/Movie.mkv"),
+            output_path=Path("/media/Movie.mkv.tmp"),
+            tracks=tracks,
+            language=language,
+            keep_audio=False,
+            keep_subtitles=False,
+            edit_metadata_title=False,
+            delete_metadata_title=False,
+            logger=logger,
+        )
+
+    def test_audio_commentary_default_reassigned_to_non_commentary(self) -> None:
+        """Commentary track with default=True is demoted; non-commentary promoted."""
+        # tid 0: video, tid 1: eng commentary (default), tid 2: eng normal, tid 3: fre (dropped)
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name="Commentary 1", default_track=True),
+            MkvTrack(id=2, type="audio", language="eng", name="Main Audio", default_track=False),
+            MkvTrack(id=3, type="audio", language="fre"),
+        ]
+        cmd = self._build(tracks)
+        assert cmd is not None
+        assert "--default-track" in cmd
+        assert "1:0" in cmd  # commentary tid demoted
+        assert "2:1" in cmd  # non-commentary tid promoted
+
+    def test_audio_commentary_no_default_no_flags_emitted(self) -> None:
+        """Commentary track present but non-commentary track already default — no change needed."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name="Commentary 1", default_track=False),
+            MkvTrack(id=2, type="audio", language="eng", name="Main Audio", default_track=True),
+            MkvTrack(id=3, type="audio", language="fre"),
+        ]
+        cmd = self._build(tracks)
+        assert cmd is not None
+        # Non-commentary already holds default — no reassignment needed
+        assert "--default-track" not in cmd
+
+    def test_audio_all_kept_commentary_warns_and_demotes_default(self) -> None:
+        """All remaining audio tracks are commentary — demote default, log warning."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name="Commentary 1", default_track=True),
+            MkvTrack(id=2, type="audio", language="fre"),  # dropped
+        ]
+        logger = MagicMock()
+        cmd = self._build(tracks, logger=logger)
+        assert cmd is not None
+        # Commentary default must still be unset even though there's nothing to promote
+        assert "--default-track" in cmd
+        assert "1:0" in cmd
+        logger.warning.assert_called()
+        assert "commentary" in logger.warning.call_args[0][0].lower()
+
+    def test_audio_not_removing_tracks_no_flags_emitted(self) -> None:
+        """No audio tracks dropped — commentary default-track logic must not fire."""
+        # All audio matches language, so audio_drop is empty
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name="Commentary 1", default_track=True),
+            MkvTrack(id=2, type="audio", language="eng", name="Main Audio", default_track=False),
+        ]
+        # Nothing to remove → returns None
+        result = self._build(tracks)
+        assert result is None
+
+    def test_subtitle_commentary_default_reassigned_to_non_commentary(self) -> None:
+        """Commentary subtitle with default=True is demoted; non-commentary promoted."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng"),
+            MkvTrack(id=2, type="subtitles", language="eng", name="Commentary", default_track=True),
+            MkvTrack(id=3, type="subtitles", language="eng", name="SDH", default_track=False),
+            MkvTrack(id=4, type="subtitles", language="fre"),  # dropped
+        ]
+        cmd = self._build(tracks)
+        assert cmd is not None
+        assert "--default-track" in cmd
+        assert "2:0" in cmd
+        assert "3:1" in cmd
+
+    def test_audio_no_source_default_promotes_non_commentary(self) -> None:
+        """Source file has no default audio track — commentary kept → promote non-commentary.
+
+        This is the real-world case seen in the screenshot: all tracks have
+        default_track=False, but the non-commentary track should still be
+        promoted to default when we are removing tracks.
+        """
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=2, type="audio", language="eng", name="Commentary 1", default_track=False),
+            MkvTrack(id=3, type="audio", language="eng", name="Commentary 2", default_track=False),
+            MkvTrack(id=6, type="audio", language="eng", name="Eng", default_track=False),
+            MkvTrack(id=7, type="audio", language="fre"),  # dropped
+        ]
+        cmd = self._build(tracks)
+        assert cmd is not None
+        assert "--default-track" in cmd
+        assert "6:1" in cmd  # non-commentary promoted
+        assert "2:0" not in cmd  # commentary not demoted (was never default)
+        assert "3:0" not in cmd
+
+    def test_subtitle_no_source_default_promotes_non_commentary(self) -> None:
+        """Source file has no default subtitle track — commentary kept → promote non-commentary."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng"),
+            MkvTrack(id=2, type="subtitles", language="eng", name="English", default_track=False),
+            MkvTrack(id=4, type="subtitles", language="eng", name="Commentary 1", default_track=False),
+            MkvTrack(id=5, type="subtitles", language="eng", name="Commentary 2", default_track=False),
+            MkvTrack(id=8, type="subtitles", language="fre"),  # dropped
+        ]
+        cmd = self._build(tracks)
+        assert cmd is not None
+        assert "--default-track" in cmd
+        assert "2:1" in cmd  # English subtitle promoted
+        assert "4:0" not in cmd
+        assert "5:0" not in cmd
+
+    def test_subtitle_commentary_no_default_no_flags_emitted(self) -> None:
+        """Commentary subtitle present but non-commentary already default — no change needed."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng"),
+            MkvTrack(id=2, type="subtitles", language="eng", name="Commentary", default_track=False),
+            MkvTrack(id=3, type="subtitles", language="eng", name="SDH", default_track=True),
+            MkvTrack(id=4, type="subtitles", language="fre"),  # dropped
+        ]
+        cmd = self._build(tracks)
+        assert cmd is not None
+        assert "--default-track" not in cmd
+
+    def test_subtitle_all_kept_commentary_warns_and_demotes_default(self) -> None:
+        """All remaining subtitle tracks are commentary — demote default, log warning."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng"),
+            MkvTrack(id=2, type="subtitles", language="eng", name="Director Commentary", default_track=True),
+            MkvTrack(id=3, type="subtitles", language="fre"),  # dropped
+        ]
+        logger = MagicMock()
+        cmd = self._build(tracks, logger=logger)
+        assert cmd is not None
+        assert "--default-track" in cmd
+        assert "2:0" in cmd
+        logger.warning.assert_called()
+
+    def test_subtitle_not_removing_tracks_no_flags_emitted(self) -> None:
+        """No subtitle tracks dropped — commentary default-track logic must not fire."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng"),
+            MkvTrack(id=2, type="subtitles", language="eng", name="Commentary", default_track=True),
+        ]
+        result = self._build(tracks)
+        assert result is None
+
+    def test_commentary_name_case_insensitive(self) -> None:
+        """Commentary matching is case-insensitive (e.g. 'COMMENTARY', 'Commentary 2')."""
+        for name in ("COMMENTARY", "commentary", "Director's Commentary", "Commentary 2"):
+            tracks = [
+                MkvTrack(id=0, type="video", language=None),
+                MkvTrack(id=1, type="audio", language="eng", name=name, default_track=True),
+                MkvTrack(id=2, type="audio", language="eng", name="Main", default_track=False),
+                MkvTrack(id=3, type="audio", language="fre"),
+            ]
+            cmd = self._build(tracks)
+            assert cmd is not None, f"Expected command for name={name!r}"
+            assert "--default-track" in cmd, f"Expected flags for name={name!r}"
+            assert "1:0" in cmd
+            assert "2:1" in cmd
 
 
 # ---------------------------------------------------------------------------
