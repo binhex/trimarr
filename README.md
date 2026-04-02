@@ -1,10 +1,17 @@
 # Trimarr
 
-This software is under *HEAVY* development right now, expect lack of documentation, major bugs and missing functionality.
-
-## Description
-
 Removes (trims) unwanted audio and subtitles from matroska container format video files.
+
+## Features
+
+- **Recursive scan** — finds all `.mkv` files under the specified directory tree.
+- **Smart skip** — tracks processed files in SQLite using a fingerprint (size + mtime + partial hash); only reprocesses a file if its content has changed.
+- **Commentary track safety** — if the default audio or subtitle track is a commentary track, trimarr automatically demotes it and promotes the first non-commentary track to be the new default.
+- **Language safety fallback** — if *no* audio (or subtitle) tracks match the target language, all tracks are kept to prevent accidentally silencing a file. A warning is logged.
+- **Auto-managed mkvmerge** — downloads the mkvmerge binary from MKVToolNix GitHub releases on first run and keeps it up to date automatically (disable with `--no-update-check`).
+- **Space savings summary** — reports bytes reclaimed at the end of each run and a cumulative all-time total across all sessions.
+- **Graceful interrupt** — Ctrl+C shows a partial summary before exiting with code 130.
+- **Safe file replacement** — output is written to a temp file first, then atomically renamed over the original so a failed remux never corrupts the source.
 
 ## Prerequisites
 
@@ -42,17 +49,23 @@ trimarr --help
 
 | Option | Description | Default | Example | Type |
 | ------ | ----------- | ------- | ------- | ---- |
-| `--language` | Language code for the audio/subtitle tracks to keep. See [ISO 639-2 codes](http://en.wikipedia.org/wiki/List_of_ISO_639-2_codes). | — | `eng` | `string` |
-| `--media-path` | Path to the directory containing media files. | — | `/mnt/media/movies` | `path` |
-| `--mkvmerge-path` | Path to the mkvmerge executable. | `<project root>/bin/mkvmerge` | `/usr/bin/mkvmerge` | `path` |
-| `--database-path` | Path to the SQLite database file used for tracking processed files. | `<project root>/db/trimarr.db` | `/var/lib/trimarr/trimarr.db` | `path` |
-| `--log-path` | Path to the log file for tracking application events. | `<project root>/logs/trimarr.log` | `/var/log/trimarr.log` | `path` |
+| `--language` ✱ | Language code for the audio/subtitle tracks to keep. See [ISO 639-2 codes](http://en.wikipedia.org/wiki/List_of_ISO_639-2_codes). | — | `eng` | `string` |
+| `--media-path` ✱ | Path to the directory containing media files to process (scanned recursively). | — | `/mnt/media/movies` | `path` |
+| `--mkvmerge-path` | Path to the mkvmerge executable. When omitted, trimarr manages its own binary and auto-updates it. | `~/.local/share/trimarr/bin/mkvmerge` | `/usr/bin/mkvmerge` | `path` |
+| `--database-path` | Path to the SQLite database file used for tracking processed files. | `~/.local/share/trimarr/db/trimarr.db` | `/var/lib/trimarr/trimarr.db` | `path` |
+| `--log-path` | Path to the log file for tracking application events. | `~/.local/share/trimarr/logs/trimarr.log` | `/var/log/trimarr.log` | `path` |
 | `--log-level` | Logging level for console output. Choices: `DEBUG`, `INFO`, `SUCCESS`, `WARNING`, `ERROR`. | `INFO` | `DEBUG` | `choice` |
-| `--edit-metadata-title` | If specified, the title metadata of each file will be updated to match its filename. | `false` | — | `flag` |
-| `--delete-metadata-title` | If specified, the title metadata of each file will be deleted. | `false` | — | `flag` |
-| `--keep-subtitles` | If specified, all subtitle tracks will be kept regardless of language. | `false` | — | `flag` |
-| `--keep-audio` | If specified, all audio tracks will be kept regardless of language. | `false` | — | `flag` |
-| `--dry-run` | If specified, performs a dry run without making any changes. | `false` | — | `flag` |
+| `--edit-metadata-title` | Update the container title metadata of each file to match its filename stem. Mutually exclusive with `--delete-metadata-title`. | `false` | — | `flag` |
+| `--delete-metadata-title` | Remove the container title metadata from each file. Mutually exclusive with `--edit-metadata-title`. | `false` | — | `flag` |
+| `--keep-subtitles` | Keep all subtitle tracks regardless of language. | `false` | — | `flag` |
+| `--keep-audio` | Keep all audio tracks regardless of language. | `false` | — | `flag` |
+| `--no-backup` | Delete the original file after successful processing instead of renaming it to `<name>.bak`. By default a backup is always created. | `false` | — | `flag` |
+| `--no-update-check` | Skip the automatic check for a newer mkvmerge version. Has no effect when `--mkvmerge-path` is supplied (user-managed binaries are never auto-updated). | `false` | — | `flag` |
+| `--dry-run` | Log planned changes without modifying any files. Processed files are not recorded to the database in this mode. | `false` | — | `flag` |
+
+✱ Required.
+
+> **Note:** All default paths respect `XDG_DATA_HOME`. If set to an absolute path, trimarr uses `$XDG_DATA_HOME/trimarr/` instead of `~/.local/share/trimarr/`.
 
 ## Development
 
