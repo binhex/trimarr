@@ -93,7 +93,6 @@ warn_unused_ignores = true
 strict_equality = true
 mypy_path = "src"
 explicit_package_bases = true
-plugins = ["pydantic.mypy"]
 
 # Relax for tests
 [[tool.mypy.overrides]]
@@ -133,7 +132,7 @@ exclude_lines = [
     "@abstractmethod",
 ]
 
-[tool.pydantic-mypy]
-init_typed = true
-warn_required_dynamic_aliases = true
-warn_untyped_fields = true
+[dependency-groups]
+dev = [
+    "types-requests>=2.33.0.20260402",
+]
