@@ -170,12 +170,12 @@ def run(
             f"failed: {counts['failed']}."
         )
         if counts["processed"] > 0:
-            with Database(database_path) as db_summary:
-                all_time_saved = db_summary.total_bytes_saved()
             logger.info(
                 f"Space saved this session: {_fmt_bytes(session_bytes_saved)} ({counts['processed']} file(s) remuxed)."
             )
-            logger.info(f"Space saved (all sessions): {_fmt_bytes(all_time_saved)}.")
+        with Database(database_path) as db_summary:
+            all_time_saved = db_summary.total_bytes_saved()
+        logger.info(f"Space saved (all sessions): {_fmt_bytes(all_time_saved)}.")
 
     if interrupted:
         sys.exit(130)
