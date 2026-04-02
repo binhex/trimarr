@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from trimarr.main import run
 
 if TYPE_CHECKING:
@@ -113,3 +115,88 @@ class TestDryRunDoesNotRecordToDatabase:
             run(**_run_kwargs(tmp_path, dry_run=False, db_path=db_path))
 
         mock_mark.assert_called_once_with(mkv, bytes_saved=0)
+
+
+# ---------------------------------------------------------------------------
+# KeyboardInterrupt handling
+# ---------------------------------------------------------------------------
+
+
+class TestKeyboardInterruptHandling:
+    """Verify that Ctrl+C produces a graceful partial summary and exits 130."""
+
+    def test_interrupt_exits_130(self, tmp_path: Path) -> None:
+        """KeyboardInterrupt must cause sys.exit(130) — not exit 0 or re-raise KI."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        db_path = str(tmp_path / "trimarr.db")
+
+        with (
+            patch("trimarr.main.probe_file", side_effect=KeyboardInterrupt),
+            patch("core.database.Database.mark_processed"),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            run(**_run_kwargs(tmp_path, dry_run=False, db_path=db_path))
+
+        assert exc_info.value.code == 130
+
+    def test_interrupt_logs_warning(self, tmp_path: Path) -> None:
+        """A warning must be logged when the run is interrupted."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        db_path = str(tmp_path / "trimarr.db")
+        logger = _make_logger()
+
+        with (
+            patch("trimarr.main.probe_file", side_effect=KeyboardInterrupt),
+            pytest.raises(SystemExit),
+        ):
+            run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
+
+        warning_calls = [str(c) for c in logger.warning.call_args_list]
+        assert any("nterrupted" in msg for msg in warning_calls)
+
+    def test_interrupt_after_partial_processing_shows_summary(self, tmp_path: Path) -> None:
+        """Files processed before the interrupt should appear in the session summary."""
+        mkv1 = tmp_path / "a.mkv"
+        mkv2 = tmp_path / "b.mkv"
+        mkv1.write_bytes(b"fake mkv 1")
+        mkv2.write_bytes(b"fake mkv 2")
+        db_path = str(tmp_path / "trimarr.db")
+        logger = _make_logger()
+        fake_cmd = ["/usr/bin/mkvmerge", "--output", str(mkv1), str(mkv1)]
+
+        call_count = 0
+
+        def probe_side_effect(*_args, **_kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise KeyboardInterrupt
+            return []
+
+        with (
+            patch("trimarr.main.probe_file", side_effect=probe_side_effect),
+            patch("trimarr.main.build_mkvmerge_command", return_value=fake_cmd),
+            patch("trimarr.main.process_file", return_value=True),
+            pytest.raises(SystemExit),
+        ):
+            run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
+
+        # The summary (counts line) must mention "Interrupted"
+        info_calls = [str(c) for c in logger.info.call_args_list]
+        assert any("nterrupted" in msg for msg in info_calls)
+
+    def test_interrupt_in_dry_run_exits_130(self, tmp_path: Path) -> None:
+        """Ctrl+C in dry-run mode must also exit 130."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        db_path = str(tmp_path / "trimarr.db")
+
+        with (
+            patch("trimarr.main.probe_file", side_effect=KeyboardInterrupt),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            run(**_run_kwargs(tmp_path, dry_run=True, db_path=db_path))
+
+        assert exc_info.value.code == 130

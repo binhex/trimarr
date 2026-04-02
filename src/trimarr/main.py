@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -79,74 +80,83 @@ def run(
     total = len(mkv_files)
     counts: dict[str, int] = {"processed": 0, "skipped": 0, "failed": 0, "no_change": 0}
     session_bytes_saved: int = 0
+    interrupted = False
 
-    with Database(database_path) as db:
-        for idx, file_path in enumerate(mkv_files, 1):
-            # Skip unchanged files
-            if db.is_processed(file_path):
-                logger.debug(f"Already processed (unchanged): {file_path}")
-                counts["skipped"] += 1
-                continue
+    try:
+        with Database(database_path) as db:
+            for idx, file_path in enumerate(mkv_files, 1):
+                # Skip unchanged files
+                if db.is_processed(file_path):
+                    logger.debug(f"Already processed (unchanged): {file_path}")
+                    counts["skipped"] += 1
+                    continue
 
-            logger.info(f"  [{idx}/{total}] Checking '{file_path.relative_to(root)}'...")
+                logger.info(f"  [{idx}/{total}] Checking '{file_path.relative_to(root)}'...")
 
-            # Probe tracks
-            try:
-                tracks = probe_file(mkvmerge_path, file_path)
-            except RuntimeError as exc:
-                logger.error(f"Could not probe '{file_path}': {exc}")
-                counts["failed"] += 1
-                continue
+                # Probe tracks
+                try:
+                    tracks = probe_file(mkvmerge_path, file_path)
+                except RuntimeError as exc:
+                    logger.error(f"Could not probe '{file_path}': {exc}")
+                    counts["failed"] += 1
+                    continue
 
-            # Build the mkvmerge command (returns None if nothing to do)
-            cmd = build_mkvmerge_command(
-                mkvmerge_path=mkvmerge_path,
-                input_path=file_path,
-                output_path=file_path,  # placeholder; process_file patches this
-                tracks=tracks,
-                language=language,
-                keep_audio=keep_audio,
-                keep_subtitles=keep_subtitles,
-                edit_metadata_title=edit_metadata_title,
-                delete_metadata_title=delete_metadata_title,
-                logger=logger,
-            )
+                # Build the mkvmerge command (returns None if nothing to do)
+                cmd = build_mkvmerge_command(
+                    mkvmerge_path=mkvmerge_path,
+                    input_path=file_path,
+                    output_path=file_path,  # placeholder; process_file patches this
+                    tracks=tracks,
+                    language=language,
+                    keep_audio=keep_audio,
+                    keep_subtitles=keep_subtitles,
+                    edit_metadata_title=edit_metadata_title,
+                    delete_metadata_title=delete_metadata_title,
+                    logger=logger,
+                )
 
-            if cmd is None:
-                if not dry_run:
-                    logger.info(f"No changes needed for '{file_path.name}' — marking as processed.")
-                    db.mark_processed(file_path, bytes_saved=0)
+                if cmd is None:
+                    if not dry_run:
+                        logger.info(f"No changes needed for '{file_path.name}' — marking as processed.")
+                        db.mark_processed(file_path, bytes_saved=0)
+                    else:
+                        logger.info(f"No changes needed for '{file_path.name}'.")
+                    counts["no_change"] += 1
+                    continue
+
+                if dry_run:
+                    logger.opt(colors=True).info(f"<green>DRY-RUN</green>  | Would run: {' '.join(cmd)}")
+                    counts["processed"] += 1
+                    continue
+
+                # Process the file
+                size_before = file_path.stat().st_size
+                success = process_file(
+                    mkvmerge_path=mkvmerge_path,
+                    file_path=file_path,
+                    command=cmd,
+                    no_backup=no_backup,
+                    logger=logger,
+                )
+                if success:
+                    bytes_saved = size_before - file_path.stat().st_size
+                    session_bytes_saved += bytes_saved
+                    db.mark_processed(file_path, bytes_saved=bytes_saved)
+                    logger.success(f"Processed: {file_path.name}")
+                    counts["processed"] += 1
                 else:
-                    logger.info(f"No changes needed for '{file_path.name}'.")
-                counts["no_change"] += 1
-                continue
+                    counts["failed"] += 1
 
-            if dry_run:
-                logger.opt(colors=True).info(f"<green>DRY-RUN</green>  | Would run: {' '.join(cmd)}")
-                counts["processed"] += 1
-                continue
+    except KeyboardInterrupt:
+        interrupted = True
+        logger.warning("Interrupted — showing partial results.")
 
-            # Process the file
-            size_before = file_path.stat().st_size
-            success = process_file(
-                mkvmerge_path=mkvmerge_path,
-                file_path=file_path,
-                command=cmd,
-                no_backup=no_backup,
-                logger=logger,
-            )
-            if success:
-                bytes_saved = size_before - file_path.stat().st_size
-                session_bytes_saved += bytes_saved
-                db.mark_processed(file_path, bytes_saved=bytes_saved)
-                logger.success(f"Processed: {file_path.name}")
-                counts["processed"] += 1
-            else:
-                counts["failed"] += 1
-
+    status = "Interrupted after" if interrupted else "Done —"
     if dry_run:
+        prefix = "<green>DRY-RUN</green>  | "
+        suffix = "Interrupted — no files were modified." if interrupted else "Complete — no files were modified."
         logger.opt(colors=True).info(
-            f"<green>DRY-RUN</green>  | Complete — no files were modified. "
+            f"{prefix}{suffix} "
             f"Would have processed: {counts['processed']}, "
             f"no change needed: {counts['no_change']}, "
             f"skipped (already done): {counts['skipped']}, "
@@ -154,7 +164,7 @@ def run(
         )
     else:
         logger.info(
-            f"Done — processed: {counts['processed']}, "
+            f"{status} processed: {counts['processed']}, "
             f"no change needed: {counts['no_change']}, "
             f"skipped (already done): {counts['skipped']}, "
             f"failed: {counts['failed']}."
@@ -166,3 +176,6 @@ def run(
                 f"Space saved this session: {_fmt_bytes(session_bytes_saved)} ({counts['processed']} file(s) remuxed)."
             )
             logger.info(f"Space saved (all sessions): {_fmt_bytes(all_time_saved)}.")
+
+    if interrupted:
+        sys.exit(130)

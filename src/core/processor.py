@@ -395,15 +395,20 @@ def process_file(
             file_path.rename(backup_path)
             try:
                 tmp_path.replace(file_path)
-            except Exception:
-                # Roll back: restore original from backup so the user doesn't lose data.
-                try:
-                    backup_path.rename(file_path)
-                except Exception as restore_exc:
-                    logger.error(
-                        f"CRITICAL: Could not restore original from backup '{backup_path}': {restore_exc}. "
-                        f"Original is at '{backup_path}'."
-                    )
+            except BaseException:
+                # Roll back: restore original from backup — but only if the replace did not
+                # complete.  os.rename() is atomic on POSIX, so file_path either exists (replace
+                # succeeded) or doesn't (replace was not reached / was interrupted before the
+                # syscall returned).  Catching BaseException here ensures KeyboardInterrupt is
+                # also covered.
+                if not file_path.exists():
+                    try:
+                        backup_path.rename(file_path)
+                    except Exception as restore_exc:
+                        logger.error(
+                            f"CRITICAL: Could not restore original from backup '{backup_path}': {restore_exc}. "
+                            f"Original is at '{backup_path}'."
+                        )
                 raise
             logger.debug(f"Original backed up to '{backup_path}'.")
         tmp_path = None  # Ownership transferred; do not delete in finally block.
