@@ -131,6 +131,7 @@ class TestBuildMkvmergeCommand:
         delete_metadata_title: bool = False,
         input_path: Path | None = None,
         output_path: Path | None = None,
+        logger: MagicMock | None = None,
     ) -> list[str] | None:
         inp = input_path or Path("/media/Movie.Name.mkv")
         out = output_path or Path("/media/Movie.Name.mkv.tmp")
@@ -144,6 +145,7 @@ class TestBuildMkvmergeCommand:
             keep_subtitles=keep_subtitles,
             edit_metadata_title=edit_metadata_title,
             delete_metadata_title=delete_metadata_title,
+            logger=logger,
         )
 
     def test_returns_none_when_no_changes_needed(self) -> None:
@@ -166,10 +168,18 @@ class TestBuildMkvmergeCommand:
         assert "3" not in cmd[idx]
 
     def test_no_audio_flag_when_none_match(self) -> None:
+        """Safety fallback: when NO audio tracks match, keep all — don't emit --no-audio."""
         tracks = _make_tracks(audio_langs=["fre", "ger"], sub_langs=[])
-        cmd = self._build(tracks, language="eng")
-        assert cmd is not None
-        assert "--no-audio" in cmd
+        # No matching audio + no other changes → nothing to do
+        assert self._build(tracks, language="eng") is None
+
+    def test_no_audio_safety_fallback_logs_warning(self) -> None:
+        """A logger-provided warning is emitted when the audio safety fallback fires."""
+        tracks = _make_tracks(audio_langs=["fre", "ger"], sub_langs=[])
+        logger = MagicMock()
+        self._build(tracks, language="eng", logger=logger)
+        logger.warning.assert_called_once()
+        assert "eng" in logger.warning.call_args[0][0]
 
     def test_keep_audio_overrides_language_filter(self) -> None:
         tracks = _make_tracks(audio_langs=["fre", "ger"], sub_langs=[])
@@ -183,10 +193,17 @@ class TestBuildMkvmergeCommand:
         assert "--subtitle-tracks" in cmd
 
     def test_no_subtitles_flag_when_none_match(self) -> None:
+        """Safety fallback: when NO subtitle tracks match, keep all — don't emit --no-subtitles."""
         tracks = _make_tracks(audio_langs=[], sub_langs=["fre"])
-        cmd = self._build(tracks, language="eng")
-        assert cmd is not None
-        assert "--no-subtitles" in cmd
+        # No matching subs + no other changes → nothing to do
+        assert self._build(tracks, language="eng") is None
+
+    def test_no_subtitles_safety_fallback_logs_warning(self) -> None:
+        """A logger-provided warning is emitted when the subtitle safety fallback fires."""
+        tracks = _make_tracks(audio_langs=[], sub_langs=["fre"])
+        logger = MagicMock()
+        self._build(tracks, language="eng", logger=logger)
+        logger.warning.assert_called_once()
 
     def test_keep_subtitles_overrides_language_filter(self) -> None:
         tracks = _make_tracks(audio_langs=[], sub_langs=["fre"])
@@ -211,7 +228,8 @@ class TestBuildMkvmergeCommand:
         assert cmd[idx] == ""
 
     def test_command_starts_with_mkvmerge_and_output(self) -> None:
-        tracks = _make_tracks(audio_langs=["fre"], sub_langs=[])
+        # Use a mixed-language track list so there IS something to drop
+        tracks = _make_tracks(audio_langs=["eng", "fre"], sub_langs=[])
         out = Path("/tmp/out.mkv")
         cmd = self._build(tracks, output_path=out)
         assert cmd is not None
@@ -220,7 +238,8 @@ class TestBuildMkvmergeCommand:
         assert cmd[2] == str(out)
 
     def test_input_path_appended_at_end(self) -> None:
-        tracks = _make_tracks(audio_langs=["fre"], sub_langs=[])
+        # Use a mixed-language track list so there IS something to drop
+        tracks = _make_tracks(audio_langs=["eng", "fre"], sub_langs=[])
         inp = Path("/media/test.mkv")
         cmd = self._build(tracks, input_path=inp)
         assert cmd is not None

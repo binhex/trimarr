@@ -85,6 +85,7 @@ def run(
                 keep_subtitles=keep_subtitles,
                 edit_metadata_title=edit_metadata_title,
                 delete_metadata_title=delete_metadata_title,
+                logger=logger,
             )
 
             if cmd is None:
