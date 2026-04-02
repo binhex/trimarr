@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -92,6 +93,7 @@ def build_mkvmerge_command(
     keep_subtitles: bool,
     edit_metadata_title: bool,
     delete_metadata_title: bool,
+    logger: Logger | None = None,
 ) -> list[str] | None:
     """Build the mkvmerge argv needed to produce a trimmed copy of *input_path*.
 
@@ -102,6 +104,8 @@ def build_mkvmerge_command(
 
     Audio and subtitle tracks that do **not** match the requested language are
     dropped, unless the ``keep_audio`` / ``keep_subtitles`` overrides are set.
+    If filtering would remove **all** tracks of a given type (i.e. no track
+    matches the language), that type is left untouched and a warning is logged.
     Video tracks are always kept.
 
     Args:
@@ -114,6 +118,8 @@ def build_mkvmerge_command(
         keep_subtitles: When *True*, retain all subtitle tracks regardless of language.
         edit_metadata_title: When *True*, set the container title to the file stem.
         delete_metadata_title: When *True*, clear the container title.
+        logger: Optional loguru logger; used to emit warnings when the safety
+            fallback is triggered (no tracks match the language filter).
 
     Returns:
         A list of strings suitable for :func:`subprocess.run`, or *None* if
@@ -136,6 +142,24 @@ def build_mkvmerge_command(
             else:
                 sub_drop.append(track.id)
         # Video tracks are always kept; no action needed.
+
+    # Safety fallback: if filtering would drop ALL audio tracks (none match the
+    # language), keep everything rather than produce a silent file.
+    if audio_drop and not audio_keep:
+        if logger is not None:
+            logger.warning(
+                f"No audio tracks match language '{language}' in '{input_path.name}' "
+                f"— keeping all audio to prevent silent data loss."
+            )
+        audio_drop.clear()
+
+    # Same safety fallback for subtitles.
+    if sub_drop and not sub_keep:
+        if logger is not None:
+            logger.warning(
+                f"No subtitle tracks match language '{language}' in '{input_path.name}' — keeping all subtitles."
+            )
+        sub_drop.clear()
 
     needs_audio_change = bool(audio_drop)
     needs_sub_change = bool(sub_drop)
@@ -199,8 +223,6 @@ def process_file(
     try:
         # Write temp file next to the original so the rename is atomic on most filesystems.
         tmp_fd, tmp_str = tempfile.mkstemp(dir=file_path.parent, suffix=".trimarr_tmp")
-        import os
-
         os.close(tmp_fd)
         tmp_path = Path(tmp_str)
 
