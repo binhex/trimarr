@@ -55,7 +55,7 @@ class TestDryRunDoesNotRecordToDatabase:
         mkv.write_bytes(b"fake mkv")
         db_path = str(tmp_path / "trimarr.db")
 
-        fake_cmd = ["/usr/bin/mkvmerge", "--output", str(mkv), str(mkv)]
+        fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), str(mkv)]
 
         with (
             patch("trimarr.main.probe_file", return_value=[]) as _,
@@ -104,7 +104,7 @@ class TestDryRunDoesNotRecordToDatabase:
         mkv.write_bytes(b"fake mkv")
         db_path = str(tmp_path / "trimarr.db")
 
-        fake_cmd = ["/usr/bin/mkvmerge", "--output", str(mkv), str(mkv)]
+        fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), str(mkv)]
 
         with (
             patch("trimarr.main.probe_file", return_value=[]),
@@ -164,7 +164,7 @@ class TestKeyboardInterruptHandling:
         mkv2.write_bytes(b"fake mkv 2")
         db_path = str(tmp_path / "trimarr.db")
         logger = _make_logger()
-        fake_cmd = ["/usr/bin/mkvmerge", "--output", str(mkv1), str(mkv1)]
+        fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv1), str(mkv1)]
 
         call_count = 0
 
@@ -200,3 +200,81 @@ class TestKeyboardInterruptHandling:
             run(**_run_kwargs(tmp_path, dry_run=True, db_path=db_path))
 
         assert exc_info.value.code == 130
+
+
+# ---------------------------------------------------------------------------
+# Media path validation
+# ---------------------------------------------------------------------------
+
+
+class TestMediaPathValidation:
+    """Verify that invalid media_path values produce clear error messages."""
+
+    def test_nonexistent_path_logs_error_and_returns(self, tmp_path: Path) -> None:
+        """A path that does not exist at all should log an error without crashing."""
+        missing = str(tmp_path / "does_not_exist")
+        logger = _make_logger()
+        kwargs = {
+            **_run_kwargs(tmp_path, dry_run=False, db_path=str(tmp_path / "trimarr.db")),
+            "media_path": missing,
+            "logger": logger,
+        }
+        run(**kwargs)
+        error_calls = [str(c) for c in logger.error.call_args_list]
+        assert any("does not exist" in msg for msg in error_calls)
+
+    def test_file_path_given_instead_of_directory_logs_error(self, tmp_path: Path) -> None:
+        """Passing a file path where a directory is expected should log an error."""
+        file_path = tmp_path / "movie.mkv"
+        file_path.write_bytes(b"data")
+        logger = _make_logger()
+        kwargs = {
+            **_run_kwargs(tmp_path, dry_run=False, db_path=str(tmp_path / "trimarr.db")),
+            "media_path": str(file_path),
+            "logger": logger,
+        }
+        run(**kwargs)
+        error_calls = [str(c) for c in logger.error.call_args_list]
+        assert any("not a directory" in msg for msg in error_calls)
+
+
+# ---------------------------------------------------------------------------
+# Per-file OSError resilience
+# ---------------------------------------------------------------------------
+
+
+class TestPerFileOsErrorResilience:
+    """Verify that a file vanishing mid-scan never aborts the entire batch."""
+
+    def test_file_vanishing_during_is_processed_increments_failed_continues(self, tmp_path: Path) -> None:
+        """FileNotFoundError from is_processed() must be caught; remaining files processed."""
+        mkv1 = tmp_path / "a.mkv"
+        mkv2 = tmp_path / "b.mkv"
+        mkv1.write_bytes(b"fake mkv 1")
+        mkv2.write_bytes(b"fake mkv 2")
+        db_path = str(tmp_path / "trimarr.db")
+        logger = _make_logger()
+
+        call_count = 0
+
+        def is_processed_side_effect(path):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise FileNotFoundError(f"No such file: {path}")
+            return False
+
+        with (
+            patch("core.database.Database.is_processed", side_effect=is_processed_side_effect),
+            patch("trimarr.main.probe_file", return_value=[]),
+            patch("trimarr.main.build_mkvmerge_command", return_value=None),
+            patch("core.database.Database.mark_processed"),
+        ):
+            run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
+
+        # Error must have been logged for the vanished file
+        error_calls = [str(c) for c in logger.error.call_args_list]
+        assert any("File system error" in msg for msg in error_calls)
+        # The second file must still have been attempted — loop continued past the OSError
+        info_calls = " ".join(str(c) for c in logger.info.call_args_list)
+        assert "b.mkv" in info_calls

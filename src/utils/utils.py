@@ -185,9 +185,12 @@ def download_mkvmerge(dest_dir: str | Path | None = None) -> Path:
             if magic != _ELF_MAGIC:
                 raise RuntimeError(f"Downloaded 'mkvmerge' does not appear to be a valid ELF binary (magic={magic!r}).")
 
-            # Atomically install the binary: write to a temp file in dest_dir, set permissions,
-            # then rename into place so concurrent readers never observe a partial write.
-            tmp_bin = dest_dir / ".mkvmerge.installing.tmp"
+            # Atomically install the binary: write to a uniquely-named temp file in dest_dir,
+            # set permissions, then rename into place so concurrent readers never observe a
+            # partial write and concurrent trimarr processes do not clobber each other.
+            tmp_bin_fd, tmp_bin_str = tempfile.mkstemp(dir=dest_dir, prefix=".mkvmerge.bin.", suffix=".tmp")
+            os.close(tmp_bin_fd)
+            tmp_bin = Path(tmp_bin_str)
             try:
                 tmp_bin.write_bytes(extracted.read_bytes())
                 tmp_bin.chmod(tmp_bin.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -197,7 +200,10 @@ def download_mkvmerge(dest_dir: str | Path | None = None) -> Path:
                 raise
 
     # Atomically write the version file so the binary and version are never mismatched.
-    tmp_ver = dest_dir / ".mkvmerge.version.installing.tmp"
+    # Use a unique temp name to prevent concurrent trimarr processes clobbering each other.
+    tmp_ver_fd, tmp_ver_str = tempfile.mkstemp(dir=dest_dir, prefix=".mkvmerge.version.", suffix=".tmp")
+    os.close(tmp_ver_fd)
+    tmp_ver = Path(tmp_ver_str)
     try:
         tmp_ver.write_text(release_tag, encoding="utf-8")
         os.replace(tmp_ver, dest_dir / _VERSION_FILE)

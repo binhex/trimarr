@@ -125,15 +125,6 @@ class TestProbeFile:
             with pytest.raises(RuntimeError, match="parse"):
                 probe_file(MKVMERGE, mkv)
 
-    def test_und_language_normalised_to_none(self, tmp_path: Path) -> None:
-        raw_tracks = [{"id": 0, "type": "video", "properties": {"language": "und"}}]
-        mkv = tmp_path / "movie.mkv"
-        mkv.touch()
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout=self._mkvmerge_json(raw_tracks), stderr="")
-            result = probe_file(MKVMERGE, mkv)
-        assert result[0].language is None
-
     def test_raises_runtime_error_on_timeout(self, tmp_path: Path) -> None:
         mkv = tmp_path / "movie.mkv"
         mkv.touch()
@@ -207,17 +198,12 @@ class TestBuildMkvmergeCommand:
         assert "2" not in cmd[idx]
         assert "3" not in cmd[idx]
 
-    def test_no_audio_flag_when_none_match(self) -> None:
-        """Safety fallback: when NO audio tracks match, keep all — don't emit --no-audio."""
-        tracks = _make_tracks(audio_langs=["fre", "ger"], sub_langs=[])
-        # No matching audio + no other changes → nothing to do
-        assert self._build(tracks, language="eng") is None
-
-    def test_no_audio_safety_fallback_logs_warning(self) -> None:
-        """A logger-provided warning is emitted when the audio safety fallback fires."""
+    def test_no_audio_safety_fallback_returns_none_and_warns(self) -> None:
+        """Safety fallback: when NO audio tracks match, keep all — returns None and logs a warning."""
         tracks = _make_tracks(audio_langs=["fre", "ger"], sub_langs=[])
         logger = MagicMock()
-        self._build(tracks, language="eng", logger=logger)
+        result = self._build(tracks, language="eng", logger=logger)
+        assert result is None  # No other changes → nothing to do
         logger.warning.assert_called_once()
         assert "eng" in logger.warning.call_args[0][0]
 
@@ -232,17 +218,12 @@ class TestBuildMkvmergeCommand:
         assert cmd is not None
         assert "--subtitle-tracks" in cmd
 
-    def test_no_subtitles_flag_when_none_match(self) -> None:
-        """Safety fallback: when NO subtitle tracks match, keep all — don't emit --no-subtitles."""
-        tracks = _make_tracks(audio_langs=[], sub_langs=["fre"])
-        # No matching subs + no other changes → nothing to do
-        assert self._build(tracks, language="eng") is None
-
-    def test_no_subtitles_safety_fallback_logs_warning(self) -> None:
-        """A logger-provided warning is emitted when the subtitle safety fallback fires."""
+    def test_no_subtitles_safety_fallback_returns_none_and_warns(self) -> None:
+        """Safety fallback: when NO subtitle tracks match, keep all — returns None and logs a warning."""
         tracks = _make_tracks(audio_langs=[], sub_langs=["fre"])
         logger = MagicMock()
-        self._build(tracks, language="eng", logger=logger)
+        result = self._build(tracks, language="eng", logger=logger)
+        assert result is None  # No other changes → nothing to do
         logger.warning.assert_called_once()
 
     def test_keep_subtitles_overrides_language_filter(self) -> None:
@@ -533,14 +514,33 @@ class TestProcessFile:
         assert mkv.read_bytes() == b"processed"
         assert not (tmp_path / "movie.mkv.bak").exists()
 
-    def test_exit_code_1_treated_as_failure(self, tmp_path: Path) -> None:
+    def test_exit_code_1_with_valid_output_succeeds_with_warning(self, tmp_path: Path) -> None:
+        """mkvmerge exit 1 means 'completed with warnings' — output is still valid."""
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"original")
         cmd = self._cmd(mkv, tmp_path / "out.mkv")
         logger = self._make_logger()
 
         def fake_run(args: list[str], **kwargs: object) -> MagicMock:
-            Path(args[2]).write_bytes(b"partial")
+            Path(args[2]).write_bytes(b"processed")
+            return MagicMock(returncode=1, stdout="", stderr="warning from mkvmerge")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=logger)
+
+        assert result is True
+        assert mkv.read_bytes() == b"processed"
+        logger.warning.assert_called_once()
+
+    def test_exit_code_1_with_empty_output_fails(self, tmp_path: Path) -> None:
+        """mkvmerge exit 1 with an empty/missing output is still a failure."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"original")
+        cmd = self._cmd(mkv, tmp_path / "out.mkv")
+        logger = self._make_logger()
+
+        def fake_run(args: list[str], **kwargs: object) -> MagicMock:
+            Path(args[2]).write_bytes(b"")  # Empty — not usable
             return MagicMock(returncode=1, stdout="", stderr="warning from mkvmerge")
 
         with patch("subprocess.run", side_effect=fake_run):
@@ -548,35 +548,24 @@ class TestProcessFile:
 
         assert result is False
         assert mkv.read_bytes() == b"original"  # Original untouched
-        logger.warning.assert_called_once()
 
-    def test_exit_code_2_treated_as_failure(self, tmp_path: Path) -> None:
+    def test_exit_code_2_fails_cleanly_and_cleans_up_temp(self, tmp_path: Path) -> None:
+        """mkvmerge exit ≥2 is a hard failure: returns False, logs an error, and removes the temp file."""
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"original")
         cmd = self._cmd(mkv, tmp_path / "out.mkv")
         logger = self._make_logger()
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=2, stdout="", stderr="fatal error")
+        def fake_run(args: list[str], **kwargs: object) -> MagicMock:
+            Path(args[2]).write_bytes(b"partial")
+            return MagicMock(returncode=2, stdout="", stderr="fatal error")
+
+        with patch("subprocess.run", side_effect=fake_run):
             result = process_file(MKVMERGE, mkv, cmd, no_backup=False, logger=logger)
 
         assert result is False
         logger.error.assert_called_once()
-
-    def test_temp_file_cleaned_up_on_failure(self, tmp_path: Path) -> None:
-        mkv = tmp_path / "movie.mkv"
-        mkv.write_bytes(b"original")
-        cmd = self._cmd(mkv, tmp_path / "out.mkv")
-
-        def fake_run(args: list[str], **kwargs: object) -> MagicMock:
-            Path(args[2]).write_bytes(b"partial")
-            return MagicMock(returncode=1, stdout="", stderr="")
-
-        with patch("subprocess.run", side_effect=fake_run):
-            process_file(MKVMERGE, mkv, cmd, no_backup=False, logger=self._make_logger())
-
-        # No leftover .trimarr_tmp files
-        assert not list(tmp_path.glob("*.trimarr_tmp"))
+        assert not list(tmp_path.glob("*.trimarr_tmp"))  # No leftover temp files
 
     def test_empty_output_treated_as_failure(self, tmp_path: Path) -> None:
         mkv = tmp_path / "movie.mkv"

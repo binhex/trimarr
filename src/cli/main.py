@@ -216,8 +216,11 @@ def cli(
         if user_supplied_mkvmerge:
             raise click.UsageError(f"mkvmerge not found at the specified path: '{mkvmerge_path}'")
         logger.info(f"mkvmerge not found at '{mkvmerge_path}', downloading latest binary...")
-        mkvmerge_path = str(download_mkvmerge(dest_dir=_APP_DATA_DIR / "bin"))
-        logger.success(f"mkvmerge installed at: {mkvmerge_path}")
+        try:
+            mkvmerge_path = str(download_mkvmerge(dest_dir=_APP_DATA_DIR / "bin"))
+            logger.success(f"mkvmerge installed at: {mkvmerge_path}")
+        except Exception as exc:
+            raise click.ClickException(f"Could not download mkvmerge: {exc}") from exc
     elif not user_supplied_mkvmerge and not no_update_check:
         # Lightweight update check — only the release tag JSON is fetched (~few KB), no binary download.
         try:
