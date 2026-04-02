@@ -94,7 +94,7 @@ class TestDryRunDoesNotRecordToDatabase:
         ):
             run(**_run_kwargs(tmp_path, dry_run=False, db_path=db_path))
 
-        mock_mark.assert_called_once_with(mkv)
+        mock_mark.assert_called_once_with(mkv, bytes_saved=0)
 
     def test_non_dry_run_marks_processed_after_successful_processing(self, tmp_path: Path) -> None:
         """Control: without dry_run, a successfully processed file IS marked processed."""
@@ -112,4 +112,4 @@ class TestDryRunDoesNotRecordToDatabase:
         ):
             run(**_run_kwargs(tmp_path, dry_run=False, db_path=db_path))
 
-        mock_mark.assert_called_once_with(mkv)
+        mock_mark.assert_called_once_with(mkv, bytes_saved=0)

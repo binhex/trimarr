@@ -12,6 +12,23 @@ if TYPE_CHECKING:
     from loguru import Logger
 
 
+def _fmt_bytes(n: int) -> str:
+    """Return a human-readable string for a byte count.
+
+    Args:
+        n: Number of bytes (may be negative).
+
+    Returns:
+        A string such as ``"1.23 GB"`` or ``"512.00 KB"``.
+    """
+    value = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(value) < 1024.0:
+            return f"{value:.2f} {unit}"
+        value /= 1024.0
+    return f"{value:.2f} TB"
+
+
 def run(
     language: str,
     edit_metadata_title: bool,
@@ -61,6 +78,7 @@ def run(
 
     total = len(mkv_files)
     counts: dict[str, int] = {"processed": 0, "skipped": 0, "failed": 0, "no_change": 0}
+    session_bytes_saved: int = 0
 
     with Database(database_path) as db:
         for idx, file_path in enumerate(mkv_files, 1):
@@ -97,7 +115,7 @@ def run(
             if cmd is None:
                 if not dry_run:
                     logger.info(f"No changes needed for '{file_path.name}' — marking as processed.")
-                    db.mark_processed(file_path)
+                    db.mark_processed(file_path, bytes_saved=0)
                 else:
                     logger.info(f"No changes needed for '{file_path.name}'.")
                 counts["no_change"] += 1
@@ -109,6 +127,7 @@ def run(
                 continue
 
             # Process the file
+            size_before = file_path.stat().st_size
             success = process_file(
                 mkvmerge_path=mkvmerge_path,
                 file_path=file_path,
@@ -117,7 +136,9 @@ def run(
                 logger=logger,
             )
             if success:
-                db.mark_processed(file_path)
+                bytes_saved = size_before - file_path.stat().st_size
+                session_bytes_saved += bytes_saved
+                db.mark_processed(file_path, bytes_saved=bytes_saved)
                 logger.success(f"Processed: {file_path.name}")
                 counts["processed"] += 1
             else:
@@ -138,3 +159,10 @@ def run(
             f"skipped (already done): {counts['skipped']}, "
             f"failed: {counts['failed']}."
         )
+        if counts["processed"] > 0:
+            with Database(database_path) as db_summary:
+                all_time_saved = db_summary.total_bytes_saved()
+            logger.info(
+                f"Space saved this session: {_fmt_bytes(session_bytes_saved)} ({counts['processed']} file(s) remuxed)."
+            )
+            logger.info(f"Space saved (all sessions): {_fmt_bytes(all_time_saved)}.")

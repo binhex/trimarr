@@ -173,3 +173,93 @@ class TestDatabase:
         # Re-open and verify the record is still there
         with Database(db_path) as db2:
             assert db2.is_processed(mkv) is True
+
+
+# ---------------------------------------------------------------------------
+# Bytes-saved tracking
+# ---------------------------------------------------------------------------
+
+
+class TestBytesTracking:
+    """Tests for bytes_saved column and total_bytes_saved()."""
+
+    def test_total_bytes_saved_returns_zero_when_empty(self, tmp_path: Path) -> None:
+        with Database(tmp_path / "trimarr.db") as db:
+            assert db.total_bytes_saved() == 0
+
+    def test_mark_processed_stores_bytes_saved(self, tmp_path: Path) -> None:
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"content")
+        db_path = tmp_path / "trimarr.db"
+
+        with Database(db_path) as db:
+            db.mark_processed(mkv, bytes_saved=1_000_000)
+            conn = db._require_connection()
+            row = conn.execute(
+                "SELECT bytes_saved FROM processed_files WHERE file_path = ?",
+                (str(mkv),),
+            ).fetchone()
+            assert row is not None
+            assert row[0] == 1_000_000
+
+    def test_total_bytes_saved_sums_all_files(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "trimarr.db"
+        files = []
+        for i in range(3):
+            f = tmp_path / f"movie{i}.mkv"
+            f.write_bytes(b"x" * (i + 1))
+            files.append(f)
+
+        with Database(db_path) as db:
+            db.mark_processed(files[0], bytes_saved=500_000)
+            db.mark_processed(files[1], bytes_saved=1_500_000)
+            db.mark_processed(files[2], bytes_saved=2_000_000)
+            assert db.total_bytes_saved() == 4_000_000
+
+    def test_upsert_accumulates_bytes_saved(self, tmp_path: Path) -> None:
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"v1 content")
+        db_path = tmp_path / "trimarr.db"
+
+        with Database(db_path) as db:
+            db.mark_processed(mkv, bytes_saved=100)
+            # Simulate file being updated and re-processed — savings accumulate.
+            mkv.write_bytes(b"v2 updated content")
+            db.mark_processed(mkv, bytes_saved=200)
+            assert db.total_bytes_saved() == 300  # 100 + 200 accumulated
+
+    def test_no_change_preserves_prior_savings(self, tmp_path: Path) -> None:
+        """Marking a file as processed with bytes_saved=0 must not erase prior savings."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"content")
+        db_path = tmp_path / "trimarr.db"
+
+        with Database(db_path) as db:
+            db.mark_processed(mkv, bytes_saved=500_000)
+            # Re-run: file unchanged, no remux needed → bytes_saved=0
+            db.mark_processed(mkv, bytes_saved=0)
+            assert db.total_bytes_saved() == 500_000  # History preserved
+
+    def test_migration_adds_column_to_existing_db(self, tmp_path: Path) -> None:
+        """Databases created before bytes_saved existed should be migrated."""
+        import sqlite3
+
+        db_path = tmp_path / "old.db"
+        # Create a legacy schema without bytes_saved
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "CREATE TABLE processed_files ("
+            "  file_path TEXT NOT NULL PRIMARY KEY,"
+            "  file_hash TEXT NOT NULL,"
+            "  processed_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+            ")"
+        )
+        conn.commit()
+        conn.close()
+
+        # Opening via Database should run the migration silently
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"data")
+        with Database(db_path) as db:
+            db.mark_processed(mkv, bytes_saved=42)
+            assert db.total_bytes_saved() == 42

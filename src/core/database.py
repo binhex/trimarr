@@ -16,11 +16,15 @@ _PARTIAL_HASH_BYTES = 65_536
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS processed_files (
-    file_path  TEXT NOT NULL PRIMARY KEY,
-    file_hash  TEXT NOT NULL,
+    file_path   TEXT    NOT NULL PRIMARY KEY,
+    file_hash   TEXT    NOT NULL,
+    bytes_saved INTEGER NOT NULL DEFAULT 0,
     processed_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 """
+
+# Migration: add bytes_saved to databases created before this column existed.
+_MIGRATE_ADD_BYTES_SAVED = "ALTER TABLE processed_files ADD COLUMN bytes_saved INTEGER NOT NULL DEFAULT 0"
 
 
 def fingerprint(path: Path) -> str:
@@ -92,7 +96,12 @@ class Database:
         self._conn = sqlite3.connect(str(self._db_path))
         self._conn.execute("PRAGMA journal_mode=WAL;")
         self._conn.executescript(_SCHEMA)
-        self._conn.commit()
+        # Migrate existing databases that pre-date the bytes_saved column.
+        try:
+            self._conn.execute(_MIGRATE_ADD_BYTES_SAVED)
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists — nothing to do.
 
     def close(self) -> None:
         """Close the database connection."""
@@ -126,27 +135,42 @@ class Database:
         ).fetchone()
         return row is not None and row[0] == current_hash
 
-    def mark_processed(self, path: Path) -> None:
+    def mark_processed(self, path: Path, bytes_saved: int = 0) -> None:
         """Record *path* as processed with its current fingerprint.
 
         Performs an upsert so repeated calls are idempotent.
 
         Args:
             path: Absolute or relative path to the MKV file.
+            bytes_saved: Bytes removed from the file (original size minus new
+                size).  Pass ``0`` when no remux was performed (e.g. the file
+                already had the correct tracks).
         """
         conn = self._require_connection()
         current_hash = fingerprint(path)
         conn.execute(
             """
-            INSERT INTO processed_files (file_path, file_hash)
-            VALUES (?, ?)
+            INSERT INTO processed_files (file_path, file_hash, bytes_saved)
+            VALUES (?, ?, ?)
             ON CONFLICT(file_path) DO UPDATE SET
                 file_hash    = excluded.file_hash,
+                bytes_saved  = processed_files.bytes_saved + excluded.bytes_saved,
                 processed_at = CURRENT_TIMESTAMP
             """,
-            (str(path), current_hash),
+            (str(path), current_hash, bytes_saved),
         )
         conn.commit()
+
+    def total_bytes_saved(self) -> int:
+        """Return the cumulative bytes saved across all processed files.
+
+        Returns:
+            Sum of ``bytes_saved`` for every row in the database.  Returns
+            ``0`` when no files have been processed yet.
+        """
+        conn = self._require_connection()
+        row = conn.execute("SELECT COALESCE(SUM(bytes_saved), 0) FROM processed_files").fetchone()
+        return int(row[0])
 
     # ------------------------------------------------------------------
     # Internal helpers
