@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -25,11 +26,29 @@ class MkvTrack:
             ``"subtitles"``, or ``"video"``.
         language: ISO 639-2 language tag, or *None* when the track carries no
             language information.
+        name: Human-readable track name as stored in the container, or *None*
+            when the track has no name.
+        default_track: Whether this track is flagged as the default for its
+            type in the source container.
     """
 
     id: int
     type: str
     language: str | None
+    name: str | None = field(default=None)
+    default_track: bool = field(default=False)
+
+
+# Matches track names containing "commentary" (any case, with or without
+# surrounding words/numerics, e.g. "Commentary 1", "Director Commentary").
+_COMMENTARY_RE: re.Pattern[str] = re.compile(r"commentary", re.IGNORECASE)
+
+
+def _is_commentary(name: str | None) -> bool:
+    """Return *True* if *name* looks like a commentary track."""
+    if not name:
+        return False
+    return bool(_COMMENTARY_RE.search(name))
 
 
 def probe_file(mkvmerge_path: str, file_path: Path) -> list[MkvTrack]:
@@ -78,6 +97,8 @@ def probe_file(mkvmerge_path: str, file_path: Path) -> list[MkvTrack]:
                 id=raw["id"],
                 type=raw["type"],
                 language=lang,
+                name=props.get("track_name") or None,
+                default_track=bool(props.get("default_track", False)),
             )
         )
     return tracks
@@ -188,6 +209,39 @@ def build_mkvmerge_command(
     elif needs_sub_change and not sub_keep:
         cmd += ["--no-subtitles"]
 
+    # Commentary default-track reassignment.
+    # When we ARE removing tracks of a type, make sure no commentary track
+    # remains flagged as the default.  If one is, promote the first
+    # non-commentary kept track to default and demote the commentary one.
+    default_flags: list[str] = []
+    for track_type, needs_change, keep_ids in (
+        ("audio", needs_audio_change, audio_keep),
+        ("subtitles", needs_sub_change, sub_keep),
+    ):
+        if not needs_change:
+            continue
+        keep_set = set(keep_ids)
+        kept_tracks = [t for t in tracks if t.type == track_type and t.id in keep_set]
+        commentary_defaults = [t for t in kept_tracks if t.default_track and _is_commentary(t.name)]
+        if not commentary_defaults:
+            continue
+        non_commentary = [t for t in kept_tracks if not _is_commentary(t.name)]
+        if non_commentary:
+            for t in commentary_defaults:
+                default_flags += ["--default-track-flag", f"{t.id}:0"]
+            default_flags += ["--default-track-flag", f"{non_commentary[0].id}:1"]
+        else:
+            # All remaining tracks are commentary — still unset their default flags
+            # so no commentary track is marked as default in the output file.
+            for t in commentary_defaults:
+                default_flags += ["--default-track-flag", f"{t.id}:0"]
+            if logger is not None:
+                logger.warning(
+                    f"All remaining {track_type} tracks in '{input_path.name}' are commentary "
+                    f"— cannot reassign default {track_type} track."
+                )
+
+    cmd += default_flags
     cmd.append(str(input_path))
     return cmd
 
