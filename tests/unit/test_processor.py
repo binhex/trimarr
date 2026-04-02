@@ -292,7 +292,7 @@ class TestBuildMkvmergeCommand:
 
 
 class TestCommentaryDefaultTrack:
-    """Tests for the commentary default-track-flag reassignment logic."""
+    """Tests for the commentary --default-track reassignment logic."""
 
     def _build(
         self,
@@ -324,7 +324,7 @@ class TestCommentaryDefaultTrack:
         ]
         cmd = self._build(tracks)
         assert cmd is not None
-        assert "--default-track-flag" in cmd
+        assert "--default-track" in cmd
         assert "1:0" in cmd  # commentary tid demoted
         assert "2:1" in cmd  # non-commentary tid promoted
 
@@ -339,7 +339,7 @@ class TestCommentaryDefaultTrack:
         cmd = self._build(tracks)
         assert cmd is not None
         # Non-commentary already holds default — no reassignment needed
-        assert "--default-track-flag" not in cmd
+        assert "--default-track" not in cmd
 
     def test_audio_all_kept_commentary_warns_and_demotes_default(self) -> None:
         """All remaining audio tracks are commentary — demote default, log warning."""
@@ -352,7 +352,7 @@ class TestCommentaryDefaultTrack:
         cmd = self._build(tracks, logger=logger)
         assert cmd is not None
         # Commentary default must still be unset even though there's nothing to promote
-        assert "--default-track-flag" in cmd
+        assert "--default-track" in cmd
         assert "1:0" in cmd
         logger.warning.assert_called()
         assert "commentary" in logger.warning.call_args[0][0].lower()
@@ -380,7 +380,7 @@ class TestCommentaryDefaultTrack:
         ]
         cmd = self._build(tracks)
         assert cmd is not None
-        assert "--default-track-flag" in cmd
+        assert "--default-track" in cmd
         assert "2:0" in cmd
         assert "3:1" in cmd
 
@@ -400,7 +400,7 @@ class TestCommentaryDefaultTrack:
         ]
         cmd = self._build(tracks)
         assert cmd is not None
-        assert "--default-track-flag" in cmd
+        assert "--default-track" in cmd
         assert "6:1" in cmd  # non-commentary promoted
         assert "2:0" not in cmd  # commentary not demoted (was never default)
         assert "3:0" not in cmd
@@ -417,7 +417,7 @@ class TestCommentaryDefaultTrack:
         ]
         cmd = self._build(tracks)
         assert cmd is not None
-        assert "--default-track-flag" in cmd
+        assert "--default-track" in cmd
         assert "2:1" in cmd  # English subtitle promoted
         assert "4:0" not in cmd
         assert "5:0" not in cmd
@@ -433,7 +433,7 @@ class TestCommentaryDefaultTrack:
         ]
         cmd = self._build(tracks)
         assert cmd is not None
-        assert "--default-track-flag" not in cmd
+        assert "--default-track" not in cmd
 
     def test_subtitle_all_kept_commentary_warns_and_demotes_default(self) -> None:
         """All remaining subtitle tracks are commentary — demote default, log warning."""
@@ -446,7 +446,7 @@ class TestCommentaryDefaultTrack:
         logger = MagicMock()
         cmd = self._build(tracks, logger=logger)
         assert cmd is not None
-        assert "--default-track-flag" in cmd
+        assert "--default-track" in cmd
         assert "2:0" in cmd
         logger.warning.assert_called()
 
@@ -471,7 +471,7 @@ class TestCommentaryDefaultTrack:
             ]
             cmd = self._build(tracks)
             assert cmd is not None, f"Expected command for name={name!r}"
-            assert "--default-track-flag" in cmd, f"Expected flags for name={name!r}"
+            assert "--default-track" in cmd, f"Expected flags for name={name!r}"
             assert "1:0" in cmd
             assert "2:1" in cmd
 

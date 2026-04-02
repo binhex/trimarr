@@ -232,17 +232,17 @@ def build_mkvmerge_command(
             # Promote the first non-commentary track to default, unless one
             # already holds that flag in the source file.
             if not any(t.default_track for t in non_commentary):
-                default_flags += ["--default-track-flag", f"{non_commentary[0].id}:1"]
+                default_flags += ["--default-track", f"{non_commentary[0].id}:1"]
             # Demote any commentary track that is incorrectly flagged as default.
             for t in commentary_kept:
                 if t.default_track:
-                    default_flags += ["--default-track-flag", f"{t.id}:0"]
+                    default_flags += ["--default-track", f"{t.id}:0"]
         else:
             # All remaining tracks are commentary — still unset their default
             # flags so no commentary track is marked as default in the output.
             for t in commentary_kept:
                 if t.default_track:
-                    default_flags += ["--default-track-flag", f"{t.id}:0"]
+                    default_flags += ["--default-track", f"{t.id}:0"]
             if logger is not None:
                 logger.warning(
                     f"All remaining {track_type} tracks in '{input_path.name}' are commentary "
