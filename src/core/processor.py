@@ -211,8 +211,10 @@ def build_mkvmerge_command(
 
     # Commentary default-track reassignment.
     # When we ARE removing tracks of a type, make sure no commentary track
-    # remains flagged as the default.  If one is, promote the first
-    # non-commentary kept track to default and demote the commentary one.
+    # remains (or becomes) the default.  If commentary tracks are kept alongside
+    # non-commentary tracks, promote the first non-commentary track to default
+    # (unless one already is).  Always demote any commentary track that currently
+    # holds the default flag.
     default_flags: list[str] = []
     for track_type, needs_change, keep_ids in (
         ("audio", needs_audio_change, audio_keep),
@@ -222,19 +224,25 @@ def build_mkvmerge_command(
             continue
         keep_set = set(keep_ids)
         kept_tracks = [t for t in tracks if t.type == track_type and t.id in keep_set]
-        commentary_defaults = [t for t in kept_tracks if t.default_track and _is_commentary(t.name)]
-        if not commentary_defaults:
-            continue
+        commentary_kept = [t for t in kept_tracks if _is_commentary(t.name)]
+        if not commentary_kept:
+            continue  # No commentary tracks among the kept set — nothing to do.
         non_commentary = [t for t in kept_tracks if not _is_commentary(t.name)]
         if non_commentary:
-            for t in commentary_defaults:
-                default_flags += ["--default-track-flag", f"{t.id}:0"]
-            default_flags += ["--default-track-flag", f"{non_commentary[0].id}:1"]
+            # Promote the first non-commentary track to default, unless one
+            # already holds that flag in the source file.
+            if not any(t.default_track for t in non_commentary):
+                default_flags += ["--default-track-flag", f"{non_commentary[0].id}:1"]
+            # Demote any commentary track that is incorrectly flagged as default.
+            for t in commentary_kept:
+                if t.default_track:
+                    default_flags += ["--default-track-flag", f"{t.id}:0"]
         else:
-            # All remaining tracks are commentary — still unset their default flags
-            # so no commentary track is marked as default in the output file.
-            for t in commentary_defaults:
-                default_flags += ["--default-track-flag", f"{t.id}:0"]
+            # All remaining tracks are commentary — still unset their default
+            # flags so no commentary track is marked as default in the output.
+            for t in commentary_kept:
+                if t.default_track:
+                    default_flags += ["--default-track-flag", f"{t.id}:0"]
             if logger is not None:
                 logger.warning(
                     f"All remaining {track_type} tracks in '{input_path.name}' are commentary "

@@ -329,7 +329,7 @@ class TestCommentaryDefaultTrack:
         assert "2:1" in cmd  # non-commentary tid promoted
 
     def test_audio_commentary_no_default_no_flags_emitted(self) -> None:
-        """Commentary track present but not set as default — no reassignment needed."""
+        """Commentary track present but non-commentary track already default — no change needed."""
         tracks = [
             MkvTrack(id=0, type="video", language=None),
             MkvTrack(id=1, type="audio", language="eng", name="Commentary 1", default_track=False),
@@ -338,6 +338,7 @@ class TestCommentaryDefaultTrack:
         ]
         cmd = self._build(tracks)
         assert cmd is not None
+        # Non-commentary already holds default — no reassignment needed
         assert "--default-track-flag" not in cmd
 
     def test_audio_all_kept_commentary_warns_and_demotes_default(self) -> None:
@@ -383,8 +384,46 @@ class TestCommentaryDefaultTrack:
         assert "2:0" in cmd
         assert "3:1" in cmd
 
+    def test_audio_no_source_default_promotes_non_commentary(self) -> None:
+        """Source file has no default audio track — commentary kept → promote non-commentary.
+
+        This is the real-world case seen in the screenshot: all tracks have
+        default_track=False, but the non-commentary track should still be
+        promoted to default when we are removing tracks.
+        """
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=2, type="audio", language="eng", name="Commentary 1", default_track=False),
+            MkvTrack(id=3, type="audio", language="eng", name="Commentary 2", default_track=False),
+            MkvTrack(id=6, type="audio", language="eng", name="Eng", default_track=False),
+            MkvTrack(id=7, type="audio", language="fre"),  # dropped
+        ]
+        cmd = self._build(tracks)
+        assert cmd is not None
+        assert "--default-track-flag" in cmd
+        assert "6:1" in cmd  # non-commentary promoted
+        assert "2:0" not in cmd  # commentary not demoted (was never default)
+        assert "3:0" not in cmd
+
+    def test_subtitle_no_source_default_promotes_non_commentary(self) -> None:
+        """Source file has no default subtitle track — commentary kept → promote non-commentary."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng"),
+            MkvTrack(id=2, type="subtitles", language="eng", name="English", default_track=False),
+            MkvTrack(id=4, type="subtitles", language="eng", name="Commentary 1", default_track=False),
+            MkvTrack(id=5, type="subtitles", language="eng", name="Commentary 2", default_track=False),
+            MkvTrack(id=8, type="subtitles", language="fre"),  # dropped
+        ]
+        cmd = self._build(tracks)
+        assert cmd is not None
+        assert "--default-track-flag" in cmd
+        assert "2:1" in cmd  # English subtitle promoted
+        assert "4:0" not in cmd
+        assert "5:0" not in cmd
+
     def test_subtitle_commentary_no_default_no_flags_emitted(self) -> None:
-        """Commentary subtitle present but not default — no reassignment."""
+        """Commentary subtitle present but non-commentary already default — no change needed."""
         tracks = [
             MkvTrack(id=0, type="video", language=None),
             MkvTrack(id=1, type="audio", language="eng"),
