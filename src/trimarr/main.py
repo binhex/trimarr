@@ -95,8 +95,11 @@ def run(
             )
 
             if cmd is None:
-                logger.info(f"No changes needed for '{file_path.name}' — marking as processed.")
-                db.mark_processed(file_path)
+                if not dry_run:
+                    logger.info(f"No changes needed for '{file_path.name}' — marking as processed.")
+                    db.mark_processed(file_path)
+                else:
+                    logger.info(f"No changes needed for '{file_path.name}'.")
                 counts["no_change"] += 1
                 continue
 
