@@ -6,7 +6,7 @@ from pathlib import Path
 import click
 
 from core.logging import create_logger
-from utils.utils import download_mkvmerge, get_app_data_dir
+from utils.utils import get_app_data_dir
 
 try:
     _VERSION = version("Trimarr")
@@ -116,10 +116,13 @@ Examples:
     "--mkvmerge-path",
     type=click.Path(file_okay=True, dir_okay=False, resolve_path=True),
     required=False,
-    default=_DEFAULT_MKVMERGE_PATH,
-    show_default=True,
+    default=None,
+    show_default=False,
     metavar="<mkvmerge path>",
-    help="Path to mkvmerge executable.",
+    help=(
+        f"Path to mkvmerge executable.  When omitted, trimarr manages its own"
+        f" binary at '{_DEFAULT_MKVMERGE_PATH}' (auto-downloaded and kept up to date)."
+    ),
 )
 @click.option(
     "--database-path",
@@ -162,6 +165,15 @@ Examples:
     default=False,
     help="If specified, the script will perform a dry run without making any changes.",
 )
+@click.option(
+    "--no-update-check",
+    is_flag=True,
+    default=False,
+    help=(
+        "Skip the automatic check for a newer mkvmerge version."
+        " Has no effect when --mkvmerge-path is specified (user-managed binaries are never auto-updated)."
+    ),
+)
 @click.version_option(version=_VERSION, prog_name="Trimarr")
 def cli(
     language: str,
@@ -170,12 +182,13 @@ def cli(
     keep_subtitles: bool,
     keep_audio: bool,
     media_path: str,
-    mkvmerge_path: str,
+    mkvmerge_path: str | None,
     database_path: str,
     log_path: str,
     log_level: str,
     no_backup: bool,
     dry_run: bool,
+    no_update_check: bool,
 ) -> None:
     """Trimarr - Removes (trims) unwanted audio and subtitles from matroska container format video files.
 
@@ -184,6 +197,7 @@ def cli(
     have already been processed to avoid redundant work.
     """
     from trimarr.main import run
+    from utils.utils import download_mkvmerge, get_installed_mkvmerge_tag, get_latest_mkvmerge_tag
 
     # Logger format for consistent output styling
     log_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>"
@@ -193,10 +207,35 @@ def cli(
     if edit_metadata_title and delete_metadata_title:
         raise click.UsageError("--edit-metadata-title and --delete-metadata-title are mutually exclusive.")
 
+    # Determine whether we are managing the binary ourselves or the user supplied their own.
+    user_supplied_mkvmerge = mkvmerge_path is not None
+    if mkvmerge_path is None:
+        mkvmerge_path = _DEFAULT_MKVMERGE_PATH
+
     if not Path(mkvmerge_path).is_file():
+        if user_supplied_mkvmerge:
+            raise click.UsageError(f"mkvmerge not found at the specified path: '{mkvmerge_path}'")
         logger.info(f"mkvmerge not found at '{mkvmerge_path}', downloading latest binary...")
         mkvmerge_path = str(download_mkvmerge(dest_dir=_APP_DATA_DIR / "bin"))
         logger.success(f"mkvmerge installed at: {mkvmerge_path}")
+    elif not user_supplied_mkvmerge and not no_update_check:
+        # Lightweight update check — only the release tag JSON is fetched (~few KB), no binary download.
+        try:
+            installed_tag = get_installed_mkvmerge_tag(_APP_DATA_DIR / "bin")
+            latest_tag = get_latest_mkvmerge_tag()
+            if installed_tag is None:
+                # No version file — binary predates version tracking; update to establish the baseline.
+                logger.info(f"mkvmerge version unknown (pre-versioning install), updating to {latest_tag}...")
+                mkvmerge_path = str(download_mkvmerge(dest_dir=_APP_DATA_DIR / "bin"))
+                logger.success(f"mkvmerge updated to {latest_tag}.")
+            elif installed_tag != latest_tag:
+                logger.info(f"mkvmerge update available ({installed_tag} → {latest_tag}). Updating...")
+                mkvmerge_path = str(download_mkvmerge(dest_dir=_APP_DATA_DIR / "bin"))
+                logger.success(f"mkvmerge updated to {latest_tag}.")
+            else:
+                logger.debug(f"mkvmerge is up to date ({installed_tag}).")
+        except Exception as exc:
+            logger.warning(f"mkvmerge update check failed ({exc}). Proceeding with installed version.")
 
     run(
         language=language,
