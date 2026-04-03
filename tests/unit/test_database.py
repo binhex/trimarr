@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import sqlite3
 from typing import TYPE_CHECKING
 
 import pytest
@@ -51,8 +53,6 @@ class TestFingerprint:
         of content will collide.  This is a known and documented trade-off for speed;
         the mtime component catches most real-world in-place edits.
         """
-        import os
-
         shared_prefix = b"A" * _PARTIAL_HASH_BYTES
 
         f1 = tmp_path / "big1.mkv"
@@ -242,8 +242,6 @@ class TestBytesTracking:
 
     def test_migration_adds_column_to_existing_db(self, tmp_path: Path) -> None:
         """Databases created before bytes_saved existed should be migrated."""
-        import sqlite3
-
         db_path = tmp_path / "old.db"
         # Create a legacy schema without bytes_saved
         conn = sqlite3.connect(str(db_path))
