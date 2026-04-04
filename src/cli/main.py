@@ -1,5 +1,6 @@
 """Command-line interface for trimarr."""
 
+import platform
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -17,7 +18,8 @@ except PackageNotFoundError:
 # Compute default paths under the user application data directory so they are
 # correct both during development and when installed via pip/uv.
 _APP_DATA_DIR = get_app_data_dir()
-_DEFAULT_MKVMERGE_PATH = f"{_APP_DATA_DIR}/bin/mkvmerge"
+_MKVMERGE_BIN = "mkvmerge.exe" if platform.system() == "Windows" else "mkvmerge"
+_DEFAULT_MKVMERGE_PATH = str(_APP_DATA_DIR / "bin" / _MKVMERGE_BIN)
 _DEFAULT_DB_PATH = f"{_APP_DATA_DIR}/db/trimarr.db"
 _DEFAULT_LOGS_PATH = f"{_APP_DATA_DIR}/logs/trimarr.log"
 

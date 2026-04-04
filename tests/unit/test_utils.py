@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests as req
 
-from utils.utils import get_app_data_dir, get_installed_mkvmerge_tag, get_latest_mkvmerge_tag
+from utils.utils import _get_platform_asset, get_app_data_dir, get_installed_mkvmerge_tag, get_latest_mkvmerge_tag
 
 
 class TestGetAppDataDir:
@@ -93,3 +93,49 @@ class TestGetLatestMkvmergeTag:
         mock_response.raise_for_status.side_effect = req.HTTPError("404")
         with patch("utils.utils.requests.get", return_value=mock_response), pytest.raises(req.HTTPError):
             get_latest_mkvmerge_tag()
+
+
+class TestGetPlatformAsset:
+    """Tests for _get_platform_asset() — platform detection logic."""
+
+    def test_linux_x86_64(self) -> None:
+        with (
+            patch("utils.utils.platform.system", return_value="Linux"),
+            patch("utils.utils.platform.machine", return_value="x86_64"),
+        ):
+            asset, binary = _get_platform_asset()
+            assert asset == "mkvtoolnix-x86_64-linux.tar.xz"
+            assert binary == "mkvmerge"
+
+    def test_windows_amd64(self) -> None:
+        with (
+            patch("utils.utils.platform.system", return_value="Windows"),
+            patch("utils.utils.platform.machine", return_value="AMD64"),
+        ):
+            asset, binary = _get_platform_asset()
+            assert asset == "mkvtoolnix-x86_64-win.zip"
+            assert binary == "mkvmerge.exe"
+
+    def test_linux_aarch64_raises(self) -> None:
+        with (
+            patch("utils.utils.platform.system", return_value="Linux"),
+            patch("utils.utils.platform.machine", return_value="aarch64"),
+            pytest.raises(RuntimeError, match="No pre-built mkvmerge binary"),
+        ):
+            _get_platform_asset()
+
+    def test_unsupported_os_raises(self) -> None:
+        with (
+            patch("utils.utils.platform.system", return_value="Darwin"),
+            patch("utils.utils.platform.machine", return_value="x86_64"),
+            pytest.raises(RuntimeError, match="No pre-built mkvmerge binary"),
+        ):
+            _get_platform_asset()
+
+    def test_error_message_includes_platform_info(self) -> None:
+        with (
+            patch("utils.utils.platform.system", return_value="Linux"),
+            patch("utils.utils.platform.machine", return_value="aarch64"),
+            pytest.raises(RuntimeError, match="--mkvmerge-path"),
+        ):
+            _get_platform_asset()
