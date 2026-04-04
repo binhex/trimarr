@@ -159,7 +159,7 @@ def build_mkvmerge_command(
     input_path: Path,
     output_path: Path,
     tracks: list[MkvTrack],
-    language: str,
+    language: list[str],
     keep_audio: bool,
     keep_subtitles: bool,
     edit_metadata_title: bool,
@@ -184,7 +184,8 @@ def build_mkvmerge_command(
         input_path: Source MKV file.
         output_path: Destination path for the trimmed file (usually a temp path).
         tracks: Track list as returned by :func:`probe_file`.
-        language: ISO 639-2 language code to retain (e.g. ``"eng"``).
+        language: One or more ISO 639-2 language codes to retain (e.g. ``["eng"]``
+            or ``["eng", "fre"]``).
         keep_audio: When *True*, retain all audio tracks regardless of language.
         keep_subtitles: When *True*, retain all subtitle tracks regardless of language.
         edit_metadata_title: When *True*, set the container title to the file stem.
@@ -203,12 +204,12 @@ def build_mkvmerge_command(
 
     for track in tracks:
         if track.type == "audio":
-            if keep_audio or track.language == language:
+            if keep_audio or track.language in language:
                 audio_keep.append(track.id)
             else:
                 audio_drop.append(track.id)
         elif track.type == "subtitles":
-            if keep_subtitles or track.language == language:
+            if keep_subtitles or track.language in language:
                 sub_keep.append(track.id)
             else:
                 sub_drop.append(track.id)
@@ -218,8 +219,9 @@ def build_mkvmerge_command(
     # language), keep everything rather than produce a silent file.
     if audio_drop and not audio_keep:
         if logger is not None:
+            lang_desc = f"'{language[0]}'" if len(language) == 1 else str(language)
             logger.warning(
-                f"No audio tracks match language '{language}' in '{input_path.name}' "
+                f"No audio tracks match language {lang_desc} in '{input_path.name}' "
                 f"— keeping all audio to prevent silent data loss."
             )
         audio_drop.clear()
@@ -227,8 +229,9 @@ def build_mkvmerge_command(
     # Same safety fallback for subtitles.
     if sub_drop and not sub_keep:
         if logger is not None:
+            lang_desc = f"'{language[0]}'" if len(language) == 1 else str(language)
             logger.warning(
-                f"No subtitle tracks match language '{language}' in '{input_path.name}' — keeping all subtitles."
+                f"No subtitle tracks match language {lang_desc} in '{input_path.name}' — keeping all subtitles."
             )
         sub_drop.clear()
 
@@ -243,12 +246,13 @@ def build_mkvmerge_command(
     if logger is not None:
         audio_drop_set = set(audio_drop)
         sub_drop_set = set(sub_drop)
+        lang_filter = f"≠ '{language[0]}'" if len(language) == 1 else f"not in {language}"
         if audio_drop:
-            logger.info(f"  Dropping {len(audio_drop)} audio track(s) (language ≠ '{language}').")
+            logger.info(f"  Dropping {len(audio_drop)} audio track(s) (language {lang_filter}).")
             descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "audio" and t.id in audio_drop_set)
             logger.debug(f"  Dropping audio track(s): {descs}")
         if sub_drop:
-            logger.info(f"  Dropping {len(sub_drop)} subtitle track(s) (language ≠ '{language}').")
+            logger.info(f"  Dropping {len(sub_drop)} subtitle track(s) (language {lang_filter}).")
             descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "subtitles" and t.id in sub_drop_set)
             logger.debug(f"  Dropping subtitle track(s): {descs}")
         if edit_metadata_title:

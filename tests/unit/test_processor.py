@@ -15,7 +15,7 @@ from core.processor import MkvTrack, build_mkvmerge_command, probe_file, process
 # Helpers
 # ---------------------------------------------------------------------------
 
-ENG = "eng"
+ENG: list[str] = ["eng"]
 FRE = "fre"
 MKVMERGE = "/usr/bin/mkvmerge"
 
@@ -155,7 +155,7 @@ class TestBuildMkvmergeCommand:
     def _build(
         self,
         tracks: list[MkvTrack],
-        language: str = ENG,
+        language: list[str] = ENG,
         keep_audio: bool = False,
         keep_subtitles: bool = False,
         edit_metadata_title: bool = False,
@@ -181,7 +181,7 @@ class TestBuildMkvmergeCommand:
 
     def test_returns_none_when_no_changes_needed(self) -> None:
         tracks = _make_tracks(audio_langs=["eng"], sub_langs=["eng"])
-        assert self._build(tracks, language="eng") is None
+        assert self._build(tracks, language=["eng"]) is None
 
     def test_returns_none_with_no_tracks_to_remove_and_no_metadata(self) -> None:
         tracks = _make_tracks(audio_langs=[], sub_langs=[])
@@ -189,7 +189,7 @@ class TestBuildMkvmergeCommand:
 
     def test_drops_foreign_audio(self) -> None:
         tracks = _make_tracks(audio_langs=["eng", "fre", "ger"], sub_langs=[])
-        cmd = self._build(tracks, language="eng")
+        cmd = self._build(tracks, language=["eng"])
         assert cmd is not None
         assert "--audio-tracks" in cmd
         # Only track 1 (eng) should be kept
@@ -202,19 +202,19 @@ class TestBuildMkvmergeCommand:
         """Safety fallback: when NO audio tracks match, keep all — returns None and logs a warning."""
         tracks = _make_tracks(audio_langs=["fre", "ger"], sub_langs=[])
         logger = MagicMock()
-        result = self._build(tracks, language="eng", logger=logger)
+        result = self._build(tracks, language=["eng"], logger=logger)
         assert result is None  # No other changes → nothing to do
         logger.warning.assert_called_once()
         assert "eng" in logger.warning.call_args[0][0]
 
     def test_keep_audio_overrides_language_filter(self) -> None:
         tracks = _make_tracks(audio_langs=["fre", "ger"], sub_langs=[])
-        result = self._build(tracks, language="eng", keep_audio=True)
+        result = self._build(tracks, language=["eng"], keep_audio=True)
         assert result is None  # Nothing to do
 
     def test_drops_foreign_subtitles(self) -> None:
         tracks = _make_tracks(audio_langs=[], sub_langs=["eng", "fre"])
-        cmd = self._build(tracks, language="eng")
+        cmd = self._build(tracks, language=["eng"])
         assert cmd is not None
         assert "--subtitle-tracks" in cmd
 
@@ -222,14 +222,35 @@ class TestBuildMkvmergeCommand:
         """Safety fallback: when NO subtitle tracks match, keep all — returns None and logs a warning."""
         tracks = _make_tracks(audio_langs=[], sub_langs=["fre"])
         logger = MagicMock()
-        result = self._build(tracks, language="eng", logger=logger)
+        result = self._build(tracks, language=["eng"], logger=logger)
         assert result is None  # No other changes → nothing to do
         logger.warning.assert_called_once()
 
     def test_keep_subtitles_overrides_language_filter(self) -> None:
         tracks = _make_tracks(audio_langs=[], sub_langs=["fre"])
-        result = self._build(tracks, language="eng", keep_subtitles=True)
+        result = self._build(tracks, language=["eng"], keep_subtitles=True)
         assert result is None
+
+    def test_multi_language_keeps_all_matching_tracks(self) -> None:
+        """Multiple language codes: tracks in any listed language are retained."""
+        tracks = _make_tracks(audio_langs=["eng", "fre", "ger"], sub_langs=["eng", "fre", "jpn"])
+        cmd = self._build(tracks, language=["eng", "fre"])
+        assert cmd is not None
+        # eng(id=1) and fre(id=2) audio kept; ger(id=3) dropped
+        idx = cmd.index("--audio-tracks") + 1
+        assert "1" in cmd[idx]
+        assert "2" in cmd[idx]
+        assert "3" not in cmd[idx]
+        # eng(id=4) and fre(id=5) subtitles kept; jpn(id=6) dropped
+        idx = cmd.index("--subtitle-tracks") + 1
+        assert "4" in cmd[idx]
+        assert "5" in cmd[idx]
+        assert "6" not in cmd[idx]
+
+    def test_multi_language_no_drop_needed_returns_none(self) -> None:
+        """When all tracks match one of the listed languages, no changes are needed."""
+        tracks = _make_tracks(audio_langs=["eng", "fre"], sub_langs=["eng"])
+        assert self._build(tracks, language=["eng", "fre"]) is None
 
     def test_edit_metadata_title_included(self) -> None:
         tracks = _make_tracks(audio_langs=["eng"], sub_langs=[])
@@ -278,7 +299,7 @@ class TestCommentaryDefaultTrack:
     def _build(
         self,
         tracks: list[MkvTrack],
-        language: str = ENG,
+        language: list[str] = ENG,
         logger: MagicMock | None = None,
     ) -> list[str] | None:
         return build_mkvmerge_command(
