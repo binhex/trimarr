@@ -7,7 +7,8 @@ Removes (trims) unwanted audio and subtitles from matroska container format vide
 - **Recursive scan** — finds all `.mkv` files under the specified directory tree.
 - **Smart skip** — tracks processed files in SQLite using a fingerprint (size + mtime + partial hash); only reprocesses a file if its content has changed.
 - **Commentary track safety** — if the default audio or subtitle track is a commentary track, trimarr automatically demotes it and promotes the first non-commentary track to be the new default.
-- **Language safety fallback** — if *no* audio (or subtitle) tracks match the target language, all tracks are kept to prevent accidentally silencing a file. A warning is logged.
+- **Multi-language support** — keep tracks in any combination of languages with a single comma-separated value, e.g. `--language eng,fre` retains both English and French.
+- **Language safety fallback** — if *no* audio (or subtitle) tracks match the target language(s), all tracks are kept to prevent accidentally silencing a file. A warning is logged.
 - **Auto-managed mkvmerge** — downloads the mkvmerge binary from MKVToolNix GitHub releases on first run and keeps it up to date automatically (disable with `--no-update-check`).
 - **Space savings summary** — reports bytes reclaimed at the end of each run and a cumulative all-time total across all sessions.
 - **Graceful interrupt** — Ctrl+C shows a partial summary before exiting with code 130.
@@ -49,7 +50,7 @@ trimarr --help
 
 | Option | Description | Default | Example | Type |
 | ------ | ----------- | ------- | ------- | ---- |
-| `--language` ✱ | Language code for the audio/subtitle tracks to keep. See [ISO 639-2 codes](http://en.wikipedia.org/wiki/List_of_ISO_639-2_codes). | — | `eng` | `string` |
+| `--language` ✱ | One or more ISO 639-2 language codes (comma-separated) for the audio/subtitle tracks to keep. See [ISO 639-2 codes](http://en.wikipedia.org/wiki/List_of_ISO_639-2_codes). | — | `eng` or `eng,fre` | `string` |
 | `--media-path` ✱ | Path to the directory containing media files to process (scanned recursively). | — | `/mnt/media/movies` | `path` |
 | `--mkvmerge-path` | Path to the mkvmerge executable. When omitted, trimarr manages its own binary and auto-updates it. | `~/.local/share/trimarr/bin/mkvmerge` | `/usr/bin/mkvmerge` | `path` |
 | `--database-path` | Path to the SQLite database file used for tracking processed files. | `~/.local/share/trimarr/db/trimarr.db` | `/var/lib/trimarr/trimarr.db` | `path` |

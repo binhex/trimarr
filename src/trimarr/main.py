@@ -31,7 +31,7 @@ def _fmt_bytes(n: int) -> str:
 
 
 def run(
-    language: str,
+    language: list[str],
     edit_metadata_title: bool,
     delete_metadata_title: bool,
     keep_subtitles: bool,
@@ -50,7 +50,8 @@ def run(
     is logged but nothing on disk is modified.
 
     Args:
-        language: ISO 639-2 language code to retain (e.g. ``"eng"``).
+        language: One or more ISO 639-2 language codes to retain (e.g. ``["eng"]``
+            or ``["eng", "fre"]``).
         edit_metadata_title: Set each file's container title to its filename stem.
         delete_metadata_title: Clear each file's container title.
         keep_subtitles: Retain all subtitle tracks regardless of language.

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
-from utils.utils import get_app_data_dir, get_installed_mkvmerge_tag, get_latest_mkvmerge_tag
+import pytest
+import requests as req
 
-if TYPE_CHECKING:
-    import pytest
+from utils.utils import get_app_data_dir, get_installed_mkvmerge_tag, get_latest_mkvmerge_tag
 
 
 class TestGetAppDataDir:
@@ -83,16 +82,13 @@ class TestGetLatestMkvmergeTag:
     def test_raises_on_missing_tag_name(self) -> None:
         mock_response = MagicMock()
         mock_response.json.return_value = {"assets": []}
-        with patch("utils.utils.requests.get", return_value=mock_response):
-            import pytest
-
-            with pytest.raises(RuntimeError, match="Could not determine latest mkvmerge release tag"):
-                get_latest_mkvmerge_tag()
+        with (
+            patch("utils.utils.requests.get", return_value=mock_response),
+            pytest.raises(RuntimeError, match="Could not determine latest mkvmerge release tag"),
+        ):
+            get_latest_mkvmerge_tag()
 
     def test_raises_on_http_error(self) -> None:
-        import pytest
-        import requests as req
-
         mock_response = MagicMock()
         mock_response.raise_for_status.side_effect = req.HTTPError("404")
         with patch("utils.utils.requests.get", return_value=mock_response), pytest.raises(req.HTTPError):

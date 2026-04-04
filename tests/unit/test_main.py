@@ -27,7 +27,7 @@ def _make_logger() -> MagicMock:
 
 def _run_kwargs(tmp_path: Path, *, dry_run: bool, db_path: str) -> dict:
     return {
-        "language": "eng",
+        "language": ["eng"],
         "edit_metadata_title": False,
         "delete_metadata_title": False,
         "keep_subtitles": False,

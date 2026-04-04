@@ -34,6 +34,12 @@ Examples:
       --media-path /mnt/media/movies
 
 \b
+  Keep English and French audio and subtitles:
+    {prog} \\
+      --language eng,fre \\
+      --media-path /mnt/media/movies
+
+\b
   Keep only English audio, but retain all subtitle tracks:
     {prog} \\
       --language eng \\
@@ -75,9 +81,10 @@ Examples:
     "--language",
     type=click.STRING,
     required=True,
-    metavar="<language code>",
+    metavar="<code[,code...]>",
     help=(
-        "Specify the language code for the audio/subtitle tracks to keep, e.g. 'eng' for English."
+        "One or more ISO 639-2 language codes (comma-separated) for the audio/subtitle tracks to keep,"
+        " e.g. 'eng' for English only or 'eng,fre' for English and French."
         " Language codes: http://en.wikipedia.org/wiki/List_of_ISO_639-2_codes"
     ),
 )
@@ -199,6 +206,9 @@ def cli(
     from trimarr.main import run
     from utils.utils import download_mkvmerge, get_installed_mkvmerge_tag, get_latest_mkvmerge_tag
 
+    # Parse comma-separated language codes into a normalised list.
+    languages = [code.strip().lower() for code in language.split(",") if code.strip()]
+
     # Logger format for consistent output styling
     log_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>"
 
@@ -241,7 +251,7 @@ def cli(
             logger.warning(f"mkvmerge update check failed ({exc}). Proceeding with installed version.")
 
     run(
-        language=language,
+        language=languages,
         edit_metadata_title=edit_metadata_title,
         delete_metadata_title=delete_metadata_title,
         keep_subtitles=keep_subtitles,
