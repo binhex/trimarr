@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+import platform
 import stat
 import tarfile
 import tempfile
+import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -13,15 +15,25 @@ import requests
 
 # ELF magic bytes — first 4 bytes of any Linux ELF binary
 _ELF_MAGIC = b"\x7fELF"
+# PE magic bytes — first 2 bytes of any Windows PE binary (MZ header)
+_PE_MAGIC = b"MZ"
 
 
 def get_app_data_dir() -> Path:
-    """Return the application data directory, honouring XDG_DATA_HOME.
+    """Return the platform-appropriate application data directory.
 
-    Returns ``$XDG_DATA_HOME/trimarr`` when the env var is set to an absolute
-    path, otherwise ``~/.local/share/trimarr``.  Relative values and unexpanded
-    tildes are ignored per the XDG Base Directory Specification.
+    * **Windows** — ``%LOCALAPPDATA%\\trimarr`` (falls back to ``%APPDATA%``,
+      then ``~\\AppData\\Local``).
+    * **Linux / other** — ``$XDG_DATA_HOME/trimarr`` when *XDG_DATA_HOME* is set
+      to an absolute path, otherwise ``~/.local/share/trimarr``.
     """
+    if platform.system() == "Windows":
+        app_data = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        if app_data:
+            return Path(app_data) / "trimarr"
+        return Path.home() / "AppData" / "Local" / "trimarr"
+
+    # Linux / other POSIX: honour XDG Base Directory Specification.
     xdg = os.environ.get("XDG_DATA_HOME", "")
     if xdg:
         xdg_path = Path(xdg)
@@ -30,12 +42,68 @@ def get_app_data_dir() -> Path:
     return Path.home() / ".local" / "share" / "trimarr"
 
 
-# GitHub repo that publishes statically compiled MKVToolNix binaries for Linux
+# GitHub repo that publishes statically compiled MKVToolNix binaries
 _MKVTOOLNIX_REPO = "Jesseatgao/MKVToolNix-static-builds"
-_MKVTOOLNIX_ASSET = "mkvtoolnix-x86_64-linux.tar.xz"
 _GITHUB_API = "https://api.github.com"
 # Filename written alongside the mkvmerge binary to record the installed release tag.
 _VERSION_FILE = "mkvmerge.version"
+
+
+def _get_platform_asset() -> tuple[str, str]:
+    """Return ``(asset_filename, binary_name)`` for the current OS and CPU architecture.
+
+    Supported platforms:
+
+    * **Linux x86_64** — ``mkvtoolnix-x86_64-linux.tar.xz`` / ``mkvmerge``
+    * **Windows x86_64** — ``mkvtoolnix-x86_64-win.zip`` / ``mkvmerge.exe``
+
+    Returns:
+        Tuple of ``(asset_filename, binary_name)``.
+
+    Raises:
+        RuntimeError: If the current platform has no pre-built binary available.
+    """
+    system = platform.system()
+    machine = platform.machine().lower()
+
+    if system == "Linux" and machine in ("x86_64", "amd64"):
+        return "mkvtoolnix-x86_64-linux.tar.xz", "mkvmerge"
+    if system == "Windows" and machine in ("amd64", "x86_64"):
+        return "mkvtoolnix-x86_64-win.zip", "mkvmerge.exe"
+
+    raise RuntimeError(
+        f"No pre-built mkvmerge binary is available for {system}/{platform.machine()}. "
+        "Install mkvmerge manually and specify its path with --mkvmerge-path."
+    )
+
+
+def _extract_from_tar(archive_path: Path, binary_name: str, tmp_dir: Path) -> Path:
+    """Extract *binary_name* from a ``.tar.xz`` archive and return its path."""
+    with tarfile.open(archive_path, "r:xz") as tar:
+        member = next(
+            (m for m in tar.getmembers() if Path(m.name).name == binary_name),
+            None,
+        )
+        if member is None:
+            raise RuntimeError(f"Could not find '{binary_name}' inside '{archive_path.name}'.")
+        tar.extract(member, path=tmp_dir, filter="data")
+    matches = list(tmp_dir.rglob(binary_name))
+    if not matches:
+        raise RuntimeError(f"Could not locate '{binary_name}' after extraction.")
+    return matches[0]
+
+
+def _extract_from_zip(archive_path: Path, binary_name: str, tmp_dir: Path) -> Path:
+    """Extract *binary_name* from a ``.zip`` archive and return its path."""
+    with zipfile.ZipFile(archive_path) as zf:
+        names = [n for n in zf.namelist() if Path(n).name == binary_name]
+        if not names:
+            raise RuntimeError(f"Could not find '{binary_name}' inside '{archive_path.name}'.")
+        zf.extract(names[0], path=tmp_dir)
+    matches = list(tmp_dir.rglob(binary_name))
+    if not matches:
+        raise RuntimeError(f"Could not locate '{binary_name}' after extraction.")
+    return matches[0]
 
 
 def _fetch_latest_release(repo: str) -> dict:
@@ -122,37 +190,41 @@ def get_installed_mkvmerge_tag(dest_dir: str | Path | None = None) -> str | None
 
 
 def download_mkvmerge(dest_dir: str | Path | None = None) -> Path:
-    """Download the latest statically compiled mkvmerge binary for Linux and install it.
+    """Download the latest statically compiled mkvmerge binary and install it.
 
-    Fetches the latest release from ``Jesseatgao/MKVToolNix-static-builds``,
-    downloads the ``mkvtoolnix-x86_64-linux.tar.xz`` archive, extracts the
-    ``mkvmerge`` binary and places it at ``<dest_dir>/mkvmerge``.
+    Detects the current OS and CPU architecture to select the correct asset from
+    ``Jesseatgao/MKVToolNix-static-builds``.  Supported platforms:
+
+    * **Linux x86_64** — ``.tar.xz`` archive, ELF binary
+    * **Windows x86_64** — ``.zip`` archive, PE binary
 
     Args:
-        dest_dir: Directory to place the ``mkvmerge`` binary in.  Defaults to
-            ``<app_data_dir>/bin``.
+        dest_dir: Directory to place the binary.  Defaults to ``<app_data_dir>/bin``.
 
     Returns:
-        :class:`~pathlib.Path` to the installed ``mkvmerge`` binary.
+        :class:`~pathlib.Path` to the installed mkvmerge binary.
 
     Raises:
-        RuntimeError: If the asset or binary cannot be located, or the extracted
-            file is not a valid ELF binary.
+        RuntimeError: If the platform is unsupported, the asset or binary cannot be
+            located, or the extracted file is not a valid executable.
         requests.HTTPError: On download failures.
     """
+    asset_name, binary_name = _get_platform_asset()
+    is_windows = platform.system() == "Windows"
+
     if dest_dir is None:
         dest_dir = get_app_data_dir() / "bin"
 
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_binary = dest_dir / "mkvmerge"
+    dest_binary = dest_dir / binary_name
 
     # Resolve latest download URL and release tag via GitHub API
-    download_url, release_tag = _get_latest_release_info(_MKVTOOLNIX_REPO, _MKVTOOLNIX_ASSET)
+    download_url, release_tag = _get_latest_release_info(_MKVTOOLNIX_REPO, asset_name)
 
-    # Download archive into a temp file
+    # Download archive into a temp directory
     with tempfile.TemporaryDirectory() as tmp:
-        archive_path = Path(tmp) / _MKVTOOLNIX_ASSET
+        archive_path = Path(tmp) / asset_name
 
         response = requests.get(download_url, stream=True, timeout=120)
         response.raise_for_status()
@@ -161,43 +233,36 @@ def download_mkvmerge(dest_dir: str | Path | None = None) -> Path:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-        # Extract mkvmerge from the archive
-        with tarfile.open(archive_path, "r:xz") as tar:
-            # Find the mkvmerge member (may be nested inside a subdirectory)
-            mkvmerge_member = next(
-                (m for m in tar.getmembers() if Path(m.name).name == "mkvmerge"),
-                None,
+        # Extract the mkvmerge binary from the archive
+        if is_windows:
+            extracted = _extract_from_zip(archive_path, binary_name, Path(tmp))
+        else:
+            extracted = _extract_from_tar(archive_path, binary_name, Path(tmp))
+
+        # Sanity-check: validate the binary header matches the expected format
+        expected_magic = _PE_MAGIC if is_windows else _ELF_MAGIC
+        binary_type = "PE" if is_windows else "ELF"
+        with extracted.open("rb") as fh:
+            magic = fh.read(4)
+        if not magic.startswith(expected_magic):
+            raise RuntimeError(
+                f"Downloaded '{binary_name}' does not appear to be a valid {binary_type} binary (magic={magic!r})."
             )
-            if mkvmerge_member is None:
-                raise RuntimeError(f"Could not find 'mkvmerge' binary inside '{_MKVTOOLNIX_ASSET}'.")
 
-            tar.extract(mkvmerge_member, path=tmp, filter="data")
-
-            # Use rglob to locate the extracted file regardless of nesting depth
-            matches = list(Path(tmp).rglob("mkvmerge"))
-            if not matches:
-                raise RuntimeError("Could not locate 'mkvmerge' after extraction.")
-            extracted = matches[0]
-
-            # Sanity-check: verify ELF magic bytes before installing
-            with extracted.open("rb") as fh:
-                magic = fh.read(4)
-            if magic != _ELF_MAGIC:
-                raise RuntimeError(f"Downloaded 'mkvmerge' does not appear to be a valid ELF binary (magic={magic!r}).")
-
-            # Atomically install the binary: write to a uniquely-named temp file in dest_dir,
-            # set permissions, then rename into place so concurrent readers never observe a
-            # partial write and concurrent trimarr processes do not clobber each other.
-            tmp_bin_fd, tmp_bin_str = tempfile.mkstemp(dir=dest_dir, prefix=".mkvmerge.bin.", suffix=".tmp")
-            os.close(tmp_bin_fd)
-            tmp_bin = Path(tmp_bin_str)
-            try:
-                tmp_bin.write_bytes(extracted.read_bytes())
+        # Atomically install the binary: write to a uniquely-named temp file in dest_dir,
+        # set permissions, then rename into place so concurrent readers never observe a
+        # partial write and concurrent trimarr processes do not clobber each other.
+        tmp_bin_fd, tmp_bin_str = tempfile.mkstemp(dir=dest_dir, prefix=".mkvmerge.bin.", suffix=".tmp")
+        os.close(tmp_bin_fd)
+        tmp_bin = Path(tmp_bin_str)
+        try:
+            tmp_bin.write_bytes(extracted.read_bytes())
+            if not is_windows:
                 tmp_bin.chmod(tmp_bin.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-                os.replace(tmp_bin, dest_binary)
-            except Exception:
-                tmp_bin.unlink(missing_ok=True)
-                raise
+            os.replace(tmp_bin, dest_binary)
+        except Exception:
+            tmp_bin.unlink(missing_ok=True)
+            raise
 
     # Atomically write the version file so the binary and version are never mismatched.
     # Use a unique temp name to prevent concurrent trimarr processes clobbering each other.

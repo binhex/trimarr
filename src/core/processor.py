@@ -397,7 +397,10 @@ def process_file(
             # os.replace / Path.replace is atomic on POSIX; overwrites the destination.
             tmp_path.replace(file_path)
         else:
-            file_path.rename(backup_path)
+            # Path.replace() overwrites an existing destination on all platforms.
+            # Path.rename() would raise FileExistsError on Windows if a .bak
+            # file already exists from a previous run.
+            file_path.replace(backup_path)
             try:
                 tmp_path.replace(file_path)
             except BaseException:

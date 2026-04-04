@@ -52,9 +52,9 @@ trimarr --help
 | ------ | ----------- | ------- | ------- | ---- |
 | `--language` ✱ | One or more ISO 639-2 language codes (comma-separated) for the audio/subtitle tracks to keep. See [ISO 639-2 codes](http://en.wikipedia.org/wiki/List_of_ISO_639-2_codes). | — | `eng` or `eng,fre` | `string` |
 | `--media-path` ✱ | Path to the directory containing media files to process (scanned recursively). | — | `/mnt/media/movies` | `path` |
-| `--mkvmerge-path` | Path to the mkvmerge executable. When omitted, trimarr manages its own binary and auto-updates it. | `~/.local/share/trimarr/bin/mkvmerge` | `/usr/bin/mkvmerge` | `path` |
-| `--database-path` | Path to the SQLite database file used for tracking processed files. | `~/.local/share/trimarr/db/trimarr.db` | `/var/lib/trimarr/trimarr.db` | `path` |
-| `--log-path` | Path to the log file for tracking application events. | `~/.local/share/trimarr/logs/trimarr.log` | `/var/log/trimarr.log` | `path` |
+| `--mkvmerge-path` | Path to the mkvmerge executable. When omitted, trimarr manages its own binary and auto-updates it. | Linux: `~/.local/share/trimarr/bin/mkvmerge`<br>Windows: `%LOCALAPPDATA%\trimarr\bin\mkvmerge.exe` | `/usr/bin/mkvmerge` | `path` |
+| `--database-path` | Path to the SQLite database file used for tracking processed files. | Linux: `~/.local/share/trimarr/db/trimarr.db`<br>Windows: `%LOCALAPPDATA%\trimarr\db\trimarr.db` | `/var/lib/trimarr/trimarr.db` | `path` |
+| `--log-path` | Path to the log file for tracking application events. | Linux: `~/.local/share/trimarr/logs/trimarr.log`<br>Windows: `%LOCALAPPDATA%\trimarr\logs\trimarr.log` | `/var/log/trimarr.log` | `path` |
 | `--log-level` | Logging level for console output. Choices: `DEBUG`, `INFO`, `SUCCESS`, `WARNING`, `ERROR`. | `INFO` | `DEBUG` | `choice` |
 | `--edit-metadata-title` | Update the container title metadata of each file to match its filename stem. Mutually exclusive with `--delete-metadata-title`. | `false` | — | `flag` |
 | `--delete-metadata-title` | Remove the container title metadata from each file. Mutually exclusive with `--edit-metadata-title`. | `false` | — | `flag` |
@@ -66,7 +66,7 @@ trimarr --help
 
 ✱ Required.
 
-> **Note:** All default paths respect `XDG_DATA_HOME`. If set to an absolute path, trimarr uses `$XDG_DATA_HOME/trimarr/` instead of `~/.local/share/trimarr/`.
+> **Note:** Default paths are platform-aware. On Linux, paths respect `XDG_DATA_HOME` (if set to an absolute path, trimarr uses `$XDG_DATA_HOME/trimarr/`). On Windows, `%LOCALAPPDATA%` is used (falling back to `%APPDATA%`).
 
 ## Development
 

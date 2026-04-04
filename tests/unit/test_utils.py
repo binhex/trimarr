@@ -8,35 +8,65 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests as req
 
-from utils.utils import get_app_data_dir, get_installed_mkvmerge_tag, get_latest_mkvmerge_tag
+from utils.utils import _get_platform_asset, get_app_data_dir, get_installed_mkvmerge_tag, get_latest_mkvmerge_tag
 
 
 class TestGetAppDataDir:
     """Tests for get_app_data_dir()."""
 
-    def test_default_path_when_xdg_not_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    # -- Linux / XDG tests ---------------------------------------------------
+
+    def test_linux_default_path_when_xdg_not_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("XDG_DATA_HOME", raising=False)
-        result = get_app_data_dir()
+        with patch("utils.utils.platform.system", return_value="Linux"):
+            result = get_app_data_dir()
         assert result == Path.home() / ".local" / "share" / "trimarr"
 
-    def test_respects_absolute_xdg_data_home(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_linux_respects_absolute_xdg_data_home(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
-        result = get_app_data_dir()
+        with patch("utils.utils.platform.system", return_value="Linux"):
+            result = get_app_data_dir()
         assert result == tmp_path / "trimarr"
 
-    def test_ignores_relative_xdg_data_home(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_linux_ignores_relative_xdg_data_home(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("XDG_DATA_HOME", "relative/path")
-        result = get_app_data_dir()
+        with patch("utils.utils.platform.system", return_value="Linux"):
+            result = get_app_data_dir()
         assert result == Path.home() / ".local" / "share" / "trimarr"
 
-    def test_ignores_empty_xdg_data_home(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_linux_ignores_empty_xdg_data_home(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("XDG_DATA_HOME", "")
-        result = get_app_data_dir()
+        with patch("utils.utils.platform.system", return_value="Linux"):
+            result = get_app_data_dir()
         assert result == Path.home() / ".local" / "share" / "trimarr"
+
+    # -- Windows tests -------------------------------------------------------
+
+    def test_windows_uses_localappdata(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\user\AppData\Local")
+        monkeypatch.setenv("APPDATA", r"C:\Users\user\AppData\Roaming")
+        with patch("utils.utils.platform.system", return_value="Windows"):
+            result = get_app_data_dir()
+        assert result == Path(r"C:\Users\user\AppData\Local") / "trimarr"
+
+    def test_windows_falls_back_to_appdata(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("LOCALAPPDATA", raising=False)
+        monkeypatch.setenv("APPDATA", r"C:\Users\user\AppData\Roaming")
+        with patch("utils.utils.platform.system", return_value="Windows"):
+            result = get_app_data_dir()
+        assert result == Path(r"C:\Users\user\AppData\Roaming") / "trimarr"
+
+    def test_windows_falls_back_to_home_when_env_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("LOCALAPPDATA", raising=False)
+        monkeypatch.delenv("APPDATA", raising=False)
+        with patch("utils.utils.platform.system", return_value="Windows"):
+            result = get_app_data_dir()
+        assert result == Path.home() / "AppData" / "Local" / "trimarr"
 
     def test_returns_path_instance(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("XDG_DATA_HOME", raising=False)
-        assert isinstance(get_app_data_dir(), Path)
+        with patch("utils.utils.platform.system", return_value="Linux"):
+            assert isinstance(get_app_data_dir(), Path)
 
 
 class TestGetInstalledMkvmergeTag:
@@ -59,15 +89,16 @@ class TestGetInstalledMkvmergeTag:
 
     def test_uses_default_dir_when_none_given(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
-        # No version file → None
-        assert get_installed_mkvmerge_tag() is None
+        with patch("utils.utils.platform.system", return_value="Linux"):
+            assert get_installed_mkvmerge_tag() is None
 
     def test_uses_default_dir_and_finds_tag(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
         bin_dir = tmp_path / "trimarr" / "bin"
         bin_dir.mkdir(parents=True)
         (bin_dir / "mkvmerge.version").write_text("v99.0.0-test", encoding="utf-8")
-        assert get_installed_mkvmerge_tag() == "v99.0.0-test"
+        with patch("utils.utils.platform.system", return_value="Linux"):
+            assert get_installed_mkvmerge_tag() == "v99.0.0-test"
 
 
 class TestGetLatestMkvmergeTag:
@@ -93,3 +124,49 @@ class TestGetLatestMkvmergeTag:
         mock_response.raise_for_status.side_effect = req.HTTPError("404")
         with patch("utils.utils.requests.get", return_value=mock_response), pytest.raises(req.HTTPError):
             get_latest_mkvmerge_tag()
+
+
+class TestGetPlatformAsset:
+    """Tests for _get_platform_asset() — platform detection logic."""
+
+    def test_linux_x86_64(self) -> None:
+        with (
+            patch("utils.utils.platform.system", return_value="Linux"),
+            patch("utils.utils.platform.machine", return_value="x86_64"),
+        ):
+            asset, binary = _get_platform_asset()
+            assert asset == "mkvtoolnix-x86_64-linux.tar.xz"
+            assert binary == "mkvmerge"
+
+    def test_windows_amd64(self) -> None:
+        with (
+            patch("utils.utils.platform.system", return_value="Windows"),
+            patch("utils.utils.platform.machine", return_value="AMD64"),
+        ):
+            asset, binary = _get_platform_asset()
+            assert asset == "mkvtoolnix-x86_64-win.zip"
+            assert binary == "mkvmerge.exe"
+
+    def test_linux_aarch64_raises(self) -> None:
+        with (
+            patch("utils.utils.platform.system", return_value="Linux"),
+            patch("utils.utils.platform.machine", return_value="aarch64"),
+            pytest.raises(RuntimeError, match="No pre-built mkvmerge binary"),
+        ):
+            _get_platform_asset()
+
+    def test_unsupported_os_raises(self) -> None:
+        with (
+            patch("utils.utils.platform.system", return_value="Darwin"),
+            patch("utils.utils.platform.machine", return_value="x86_64"),
+            pytest.raises(RuntimeError, match="No pre-built mkvmerge binary"),
+        ):
+            _get_platform_asset()
+
+    def test_error_message_includes_platform_info(self) -> None:
+        with (
+            patch("utils.utils.platform.system", return_value="Linux"),
+            patch("utils.utils.platform.machine", return_value="aarch64"),
+            pytest.raises(RuntimeError, match="--mkvmerge-path"),
+        ):
+            _get_platform_asset()
