@@ -17,6 +17,10 @@ import requests
 _ELF_MAGIC = b"\x7fELF"
 # PE magic bytes — first 2 bytes of any Windows PE binary (MZ header)
 _PE_MAGIC = b"MZ"
+# Minimum acceptable size for an extracted mkvmerge binary.
+# A real mkvmerge binary is several MiB; anything smaller indicates a
+# truncated or corrupt download.
+_MIN_BINARY_BYTES = 1024 * 1024  # 1 MiB
 
 
 def get_app_data_dir() -> Path:
@@ -247,6 +251,13 @@ def download_mkvmerge(dest_dir: str | Path | None = None) -> Path:
         if not magic.startswith(expected_magic):
             raise RuntimeError(
                 f"Downloaded '{binary_name}' does not appear to be a valid {binary_type} binary (magic={magic!r})."
+            )
+
+        extracted_size = extracted.stat().st_size
+        if extracted_size < _MIN_BINARY_BYTES:
+            raise RuntimeError(
+                f"Extracted '{binary_name}' is only {extracted_size} bytes; "
+                f"download appears truncated (expected >= {_MIN_BINARY_BYTES} bytes)."
             )
 
         # Atomically install the binary: write to a uniquely-named temp file in dest_dir,

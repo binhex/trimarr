@@ -210,6 +210,8 @@ def cli(
 
     # Parse comma-separated language codes into a normalised list.
     languages = [code.strip().lower() for code in language.split(",") if code.strip()]
+    if not languages:
+        raise click.UsageError("--language requires at least one non-empty language code, e.g. --language eng")
 
     # Logger format for consistent output styling
     log_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>"
