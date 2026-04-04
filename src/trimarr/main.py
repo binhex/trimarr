@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,6 +30,38 @@ def _fmt_bytes(n: int) -> str:
             return f"{value:.2f} {unit}"
         value /= 1024.0
     return f"{value:.2f} TB"
+
+
+def _build_profile_hash(
+    language: list[str],
+    keep_audio: bool,
+    keep_subtitles: bool,
+    edit_metadata_title: bool,
+    delete_metadata_title: bool,
+) -> str:
+    """Return a stable SHA-256 hex digest encoding the current processing profile.
+
+    Only parameters that affect *which tracks are kept or modified* are included.
+    Run-time options (``dry_run``, ``no_backup``, paths) are deliberately excluded.
+
+    Args:
+        language: Sorted list of ISO 639-2 language codes to retain.
+        keep_audio: Retain all audio tracks regardless of language.
+        keep_subtitles: Retain all subtitle tracks regardless of language.
+        edit_metadata_title: Set container title to filename stem.
+        delete_metadata_title: Clear container title.
+
+    Returns:
+        64-character lowercase hex string.
+    """
+    profile = {
+        "delete_metadata_title": delete_metadata_title,
+        "edit_metadata_title": edit_metadata_title,
+        "keep_audio": keep_audio,
+        "keep_subtitles": keep_subtitles,
+        "language": sorted(language),
+    }
+    return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
 
 
 def run(
@@ -86,6 +120,14 @@ def run(
             "<green>DRY-RUN</green>  | No files will be modified — logging planned changes only."
         )
 
+    profile_hash = _build_profile_hash(
+        language=language,
+        keep_audio=keep_audio,
+        keep_subtitles=keep_subtitles,
+        edit_metadata_title=edit_metadata_title,
+        delete_metadata_title=delete_metadata_title,
+    )
+
     total = len(mkv_files)
     counts: dict[str, int] = {"processed": 0, "skipped": 0, "failed": 0, "no_change": 0}
     session_bytes_saved: int = 0
@@ -95,8 +137,8 @@ def run(
         with Database(database_path) as db:
             for idx, file_path in enumerate(mkv_files, 1):
                 try:
-                    # Skip unchanged files
-                    if db.is_processed(file_path):
+                    # Skip unchanged files processed with the same profile
+                    if db.is_processed(file_path, profile_hash=profile_hash):
                         logger.debug(f"Already processed (unchanged): {file_path}")
                         counts["skipped"] += 1
                         continue
@@ -128,7 +170,7 @@ def run(
                     if cmd is None:
                         if not dry_run:
                             logger.info(f"No changes needed for '{file_path.name}' — marking as processed.")
-                            db.mark_processed(file_path, bytes_saved=0)
+                            db.mark_processed(file_path, profile_hash=profile_hash, bytes_saved=0)
                         else:
                             logger.info(f"No changes needed for '{file_path.name}'.")
                         counts["no_change"] += 1
@@ -156,7 +198,7 @@ def run(
                     if success:
                         bytes_saved = size_before - file_path.stat().st_size
                         session_bytes_saved += bytes_saved
-                        db.mark_processed(file_path, bytes_saved=bytes_saved)
+                        db.mark_processed(file_path, profile_hash=profile_hash, bytes_saved=bytes_saved)
                         logger.success(f"Processed: {file_path.name}")
                         counts["processed"] += 1
                     else:

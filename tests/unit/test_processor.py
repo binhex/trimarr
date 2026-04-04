@@ -635,3 +635,63 @@ class TestProcessFile:
         # The original MUST still exist — atomic replace never deletes first
         assert mkv.exists()
         assert mkv.read_bytes() == b"original"
+
+    def test_backup_mode_restores_original_when_replace_fails(self, tmp_path: Path) -> None:
+        """If tmp→original replace fails after original→.bak, rollback must restore original."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"original")
+        cmd = self._cmd(mkv, tmp_path / "out.mkv")
+        logger = self._make_logger()
+
+        def fake_run(args: list[str], **kwargs: object) -> MagicMock:
+            Path(args[2]).write_bytes(b"processed")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        replace_calls: list[str] = []
+
+        _real_replace = Path.replace
+
+        def selective_replace(self_path: Path, target: Path) -> None:
+            replace_calls.append(str(self_path))
+            # Allow original→.bak; fail on tmp→original
+            if str(self_path).endswith(".trimarr_tmp"):
+                raise OSError("simulated tmp→original failure")
+            _real_replace(self_path, target)
+
+        with patch("subprocess.run", side_effect=fake_run), patch.object(Path, "replace", selective_replace):
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=False, logger=logger)
+
+        assert result is False
+        # Original must be restored from backup
+        assert mkv.exists()
+        assert mkv.read_bytes() == b"original"
+        # Backup must be cleaned up by the rollback
+        backup = tmp_path / "movie.mkv.bak"
+        assert not backup.exists()
+
+    def test_backup_mode_logs_critical_when_rollback_also_fails(self, tmp_path: Path) -> None:
+        """When both replace and rollback fail, a CRITICAL error must be logged."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"original")
+        cmd = self._cmd(mkv, tmp_path / "out.mkv")
+        logger = self._make_logger()
+
+        def fake_run(args: list[str], **kwargs: object) -> MagicMock:
+            Path(args[2]).write_bytes(b"processed")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        _real_replace = Path.replace
+
+        def always_fail_replace(self_path: Path, target: Path) -> None:
+            # Allow original→.bak only; fail everything else
+            if str(target).endswith(".bak"):
+                _real_replace(self_path, target)
+            else:
+                raise OSError("simulated failure")
+
+        with patch("subprocess.run", side_effect=fake_run), patch.object(Path, "replace", always_fail_replace):
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=False, logger=logger)
+
+        assert result is False
+        error_calls = " ".join(str(c) for c in logger.error.call_args_list)
+        assert "CRITICAL" in error_calls

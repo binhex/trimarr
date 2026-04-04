@@ -404,14 +404,13 @@ def process_file(
             try:
                 tmp_path.replace(file_path)
             except BaseException:
-                # Roll back: restore original from backup — but only if the replace did not
-                # complete.  os.rename() is atomic on POSIX, so file_path either exists (replace
-                # succeeded) or doesn't (replace was not reached / was interrupted before the
-                # syscall returned).  Catching BaseException here ensures KeyboardInterrupt is
-                # also covered.
-                if not file_path.exists():
+                # Always attempt rollback when the backup exists.  The original
+                # condition (`if not file_path.exists()`) was unsafe on Windows where
+                # a partial write can leave a corrupt file at file_path.  Using
+                # Path.replace() (not rename) overwrites any partial file atomically.
+                if backup_path.exists():
                     try:
-                        backup_path.rename(file_path)
+                        backup_path.replace(file_path)
                     except Exception as restore_exc:
                         logger.error(
                             f"CRITICAL: Could not restore original from backup '{backup_path}': {restore_exc}. "

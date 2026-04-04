@@ -2,13 +2,59 @@
 
 from __future__ import annotations
 
+import io
+import tarfile
+import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 import requests as req
 
-from utils.utils import _get_platform_asset, get_app_data_dir, get_installed_mkvmerge_tag, get_latest_mkvmerge_tag
+from utils.utils import (
+    _extract_from_tar,
+    _extract_from_zip,
+    _get_latest_release_info,
+    _get_platform_asset,
+    download_mkvmerge,
+    get_app_data_dir,
+    get_installed_mkvmerge_tag,
+    get_latest_mkvmerge_tag,
+)
+
+# ---------------------------------------------------------------------------
+# Archive helpers for download tests
+# ---------------------------------------------------------------------------
+
+_ELF_CONTENT = b"\x7fELF" + b"\x00" * 200
+_PE_CONTENT = b"MZ" + b"\x00" * 200
+_BAD_CONTENT = b"BADMAGIC" + b"\x00" * 200
+
+
+def _make_tar_xz(filename: str, content: bytes) -> bytes:
+    """Return bytes of a .tar.xz archive containing *filename* with *content*."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:xz") as tar:
+        info = tarfile.TarInfo(name=f"mkvtoolnix/{filename}")
+        info.size = len(content)
+        tar.addfile(info, io.BytesIO(content))
+    return buf.getvalue()
+
+
+def _make_zip(filename: str, content: bytes) -> bytes:
+    """Return bytes of a .zip archive containing *filename* with *content*."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(f"mkvtoolnix/{filename}", content)
+    return buf.getvalue()
+
+
+def _streaming_response(data: bytes) -> MagicMock:
+    """Return a mock requests.Response that streams *data* via iter_content."""
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.iter_content = MagicMock(return_value=iter([data]))
+    return resp
 
 
 class TestGetAppDataDir:
@@ -170,3 +216,200 @@ class TestGetPlatformAsset:
             pytest.raises(RuntimeError, match="--mkvmerge-path"),
         ):
             _get_platform_asset()
+
+
+# ---------------------------------------------------------------------------
+# _extract_from_tar
+# ---------------------------------------------------------------------------
+
+
+class TestExtractFromTar:
+    """Tests for _extract_from_tar()."""
+
+    def test_extracts_binary_from_archive(self, tmp_path: Path) -> None:
+        archive = tmp_path / "test.tar.xz"
+        archive.write_bytes(_make_tar_xz("mkvmerge", _ELF_CONTENT))
+        extracted = _extract_from_tar(archive, "mkvmerge", tmp_path / "out")
+        assert extracted.read_bytes() == _ELF_CONTENT
+
+    def test_raises_when_binary_not_in_archive(self, tmp_path: Path) -> None:
+        archive = tmp_path / "test.tar.xz"
+        archive.write_bytes(_make_tar_xz("other_binary", _ELF_CONTENT))
+        with pytest.raises(RuntimeError, match="Could not find 'mkvmerge'"):
+            _extract_from_tar(archive, "mkvmerge", tmp_path / "out")
+
+
+# ---------------------------------------------------------------------------
+# _extract_from_zip
+# ---------------------------------------------------------------------------
+
+
+class TestExtractFromZip:
+    """Tests for _extract_from_zip()."""
+
+    def test_extracts_binary_from_archive(self, tmp_path: Path) -> None:
+        archive = tmp_path / "test.zip"
+        archive.write_bytes(_make_zip("mkvmerge.exe", _PE_CONTENT))
+        extracted = _extract_from_zip(archive, "mkvmerge.exe", tmp_path / "out")
+        assert extracted.read_bytes() == _PE_CONTENT
+
+    def test_raises_when_binary_not_in_archive(self, tmp_path: Path) -> None:
+        archive = tmp_path / "test.zip"
+        archive.write_bytes(_make_zip("other.exe", _PE_CONTENT))
+        with pytest.raises(RuntimeError, match="Could not find 'mkvmerge.exe'"):
+            _extract_from_zip(archive, "mkvmerge.exe", tmp_path / "out")
+
+
+# ---------------------------------------------------------------------------
+# _get_latest_release_info — URL trust validation
+# ---------------------------------------------------------------------------
+
+
+class TestGetLatestReleaseInfo:
+    """Tests for _get_latest_release_info() URL trust enforcement."""
+
+    def _release(self, url: str) -> dict:
+        return {"tag_name": "v1.0", "assets": [{"name": "asset.tar.xz", "browser_download_url": url}]}
+
+    def test_accepts_github_https_url(self) -> None:
+        release = self._release("https://github.com/owner/repo/releases/download/v1.0/asset.tar.xz")
+        with patch("utils.utils._fetch_latest_release", return_value=release):
+            url, tag = _get_latest_release_info("owner/repo", "asset.tar.xz")
+        assert url.startswith("https://github.com")
+        assert tag == "v1.0"
+
+    def test_accepts_objects_githubusercontent_url(self) -> None:
+        release = self._release("https://objects.githubusercontent.com/releases/asset.tar.xz")
+        with patch("utils.utils._fetch_latest_release", return_value=release):
+            url, tag = _get_latest_release_info("owner/repo", "asset.tar.xz")
+        assert "githubusercontent.com" in url
+
+    def test_rejects_http_url(self) -> None:
+        release = self._release("http://github.com/owner/repo/releases/asset.tar.xz")
+        with (
+            patch("utils.utils._fetch_latest_release", return_value=release),
+            pytest.raises(RuntimeError, match="trusted GitHub domain"),
+        ):
+            _get_latest_release_info("owner/repo", "asset.tar.xz")
+
+    def test_rejects_non_github_https_url(self) -> None:
+        release = self._release("https://evil.com/mkvmerge.tar.xz")
+        with (
+            patch("utils.utils._fetch_latest_release", return_value=release),
+            pytest.raises(RuntimeError, match="trusted GitHub domain"),
+        ):
+            _get_latest_release_info("owner/repo", "asset.tar.xz")
+
+    def test_raises_when_asset_not_found(self) -> None:
+        release = {"tag_name": "v1.0", "assets": []}
+        with (
+            patch("utils.utils._fetch_latest_release", return_value=release),
+            pytest.raises(RuntimeError, match="Asset 'asset.tar.xz' not found"),
+        ):
+            _get_latest_release_info("owner/repo", "asset.tar.xz")
+
+
+# ---------------------------------------------------------------------------
+# download_mkvmerge
+# ---------------------------------------------------------------------------
+
+
+class TestDownloadMkvmerge:
+    """Tests for download_mkvmerge() — extraction, validation, atomic install."""
+
+    def _linux_patches(self, archive_bytes: bytes) -> tuple:
+        return (
+            patch("utils.utils.platform.system", return_value="Linux"),
+            patch("utils.utils.platform.machine", return_value="x86_64"),
+            patch(
+                "utils.utils._get_latest_release_info",
+                return_value=("https://github.com/fake/asset.tar.xz", "v58.0.0"),
+            ),
+            patch("utils.utils.requests.get", return_value=_streaming_response(archive_bytes)),
+        )
+
+    def test_happy_path_linux_installs_binary_and_version_file(self, tmp_path: Path) -> None:
+        archive_bytes = _make_tar_xz("mkvmerge", _ELF_CONTENT)
+        with (
+            patch("utils.utils.platform.system", return_value="Linux"),
+            patch("utils.utils.platform.machine", return_value="x86_64"),
+            patch(
+                "utils.utils._get_latest_release_info",
+                return_value=("https://github.com/fake/asset.tar.xz", "v58.0.0"),
+            ),
+            patch("utils.utils.requests.get", return_value=_streaming_response(archive_bytes)),
+        ):
+            result = download_mkvmerge(dest_dir=tmp_path)
+
+        assert result == tmp_path / "mkvmerge"
+        assert result.read_bytes() == _ELF_CONTENT
+        assert (tmp_path / "mkvmerge.version").read_text(encoding="utf-8") == "v58.0.0"
+        assert not list(tmp_path.glob(".mkvmerge.bin.*.tmp"))
+
+    def test_happy_path_windows_installs_binary_and_version_file(self, tmp_path: Path) -> None:
+        archive_bytes = _make_zip("mkvmerge.exe", _PE_CONTENT)
+        with (
+            patch("utils.utils.platform.system", return_value="Windows"),
+            patch("utils.utils.platform.machine", return_value="AMD64"),
+            patch(
+                "utils.utils._get_latest_release_info",
+                return_value=("https://github.com/fake/asset.zip", "v58.0.0"),
+            ),
+            patch("utils.utils.requests.get", return_value=_streaming_response(archive_bytes)),
+        ):
+            result = download_mkvmerge(dest_dir=tmp_path)
+
+        assert result == tmp_path / "mkvmerge.exe"
+        assert result.read_bytes() == _PE_CONTENT
+        assert (tmp_path / "mkvmerge.version").read_text(encoding="utf-8") == "v58.0.0"
+
+    def test_wrong_magic_bytes_raises_and_no_binary_installed(self, tmp_path: Path) -> None:
+        """A binary with wrong magic bytes must raise RuntimeError; nothing installed."""
+        archive_bytes = _make_tar_xz("mkvmerge", _BAD_CONTENT)
+        with (
+            patch("utils.utils.platform.system", return_value="Linux"),
+            patch("utils.utils.platform.machine", return_value="x86_64"),
+            patch(
+                "utils.utils._get_latest_release_info",
+                return_value=("https://github.com/fake/asset.tar.xz", "v58.0.0"),
+            ),
+            patch("utils.utils.requests.get", return_value=_streaming_response(archive_bytes)),
+            pytest.raises(RuntimeError, match="valid ELF binary"),
+        ):
+            download_mkvmerge(dest_dir=tmp_path)
+
+        assert not (tmp_path / "mkvmerge").exists()
+        assert not list(tmp_path.glob(".mkvmerge.bin.*.tmp"))
+
+    def test_temp_binary_cleaned_up_when_atomic_replace_fails(self, tmp_path: Path) -> None:
+        """If os.replace raises during install, no .tmp file must be left behind."""
+        archive_bytes = _make_tar_xz("mkvmerge", _ELF_CONTENT)
+        with (
+            patch("utils.utils.platform.system", return_value="Linux"),
+            patch("utils.utils.platform.machine", return_value="x86_64"),
+            patch(
+                "utils.utils._get_latest_release_info",
+                return_value=("https://github.com/fake/asset.tar.xz", "v58.0.0"),
+            ),
+            patch("utils.utils.requests.get", return_value=_streaming_response(archive_bytes)),
+            patch("utils.utils.os.replace", side_effect=OSError("simulated replace failure")),
+            pytest.raises(OSError),
+        ):
+            download_mkvmerge(dest_dir=tmp_path)
+
+        assert not list(tmp_path.glob(".mkvmerge.bin.*.tmp"))
+
+    def test_missing_binary_in_archive_raises(self, tmp_path: Path) -> None:
+        """Archive that doesn't contain mkvmerge must raise RuntimeError."""
+        archive_bytes = _make_tar_xz("not_mkvmerge", _ELF_CONTENT)
+        with (
+            patch("utils.utils.platform.system", return_value="Linux"),
+            patch("utils.utils.platform.machine", return_value="x86_64"),
+            patch(
+                "utils.utils._get_latest_release_info",
+                return_value=("https://github.com/fake/asset.tar.xz", "v58.0.0"),
+            ),
+            patch("utils.utils.requests.get", return_value=_streaming_response(archive_bytes)),
+            pytest.raises(RuntimeError, match="Could not find 'mkvmerge'"),
+        ):
+            download_mkvmerge(dest_dir=tmp_path)

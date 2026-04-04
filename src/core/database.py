@@ -16,15 +16,18 @@ _PARTIAL_HASH_BYTES = 65_536
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS processed_files (
-    file_path   TEXT    NOT NULL PRIMARY KEY,
-    file_hash   TEXT    NOT NULL,
-    bytes_saved INTEGER NOT NULL DEFAULT 0,
+    file_path    TEXT    NOT NULL PRIMARY KEY,
+    file_hash    TEXT    NOT NULL,
+    profile_hash TEXT,
+    bytes_saved  INTEGER NOT NULL DEFAULT 0,
     processed_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 """
 
 # Migration: add bytes_saved to databases created before this column existed.
 _MIGRATE_ADD_BYTES_SAVED = "ALTER TABLE processed_files ADD COLUMN bytes_saved INTEGER NOT NULL DEFAULT 0"
+# Migration: add profile_hash to databases created before processing-profile tracking.
+_MIGRATE_ADD_PROFILE_HASH = "ALTER TABLE processed_files ADD COLUMN profile_hash TEXT"
 
 
 def fingerprint(path: Path) -> str:
@@ -103,6 +106,9 @@ class Database:
         if "bytes_saved" not in existing_cols:
             self._conn.execute(_MIGRATE_ADD_BYTES_SAVED)
             self._conn.commit()
+        if "profile_hash" not in existing_cols:
+            self._conn.execute(_MIGRATE_ADD_PROFILE_HASH)
+            self._conn.commit()
 
     def close(self) -> None:
         """Close the database connection."""
@@ -114,35 +120,40 @@ class Database:
     # Public API
     # ------------------------------------------------------------------
 
-    def is_processed(self, path: Path) -> bool:
-        """Return *True* if *path* has already been processed with its current content.
+    def is_processed(self, path: Path, *, profile_hash: str) -> bool:
+        """Return *True* if *path* has already been processed with its current content
+        **and** the same processing profile.
 
-        A file is considered processed only when **both** its path **and** its
-        current fingerprint match what was recorded.  If the file has changed
-        since it was last processed this returns *False*.
+        A file is considered processed only when **both** its fingerprint **and** the
+        processing profile (language codes, keep flags, metadata actions) match what was
+        recorded.  If either has changed this returns *False*, ensuring that changing
+        ``--language`` or other options causes files to be reprocessed.
 
         Args:
             path: Absolute or relative path to the MKV file.
+            profile_hash: SHA-256 hex digest of the current processing configuration
+                (see :func:`trimarr.main._build_profile_hash`).
 
         Returns:
-            ``True`` if the file has been processed and its content is
-            unchanged; ``False`` otherwise.
+            ``True`` if the file has been processed with the same content and the same
+            profile; ``False`` otherwise.
         """
         conn = self._require_connection()
         current_hash = fingerprint(path)
         row = conn.execute(
-            "SELECT file_hash FROM processed_files WHERE file_path = ?",
+            "SELECT file_hash, profile_hash FROM processed_files WHERE file_path = ?",
             (str(path),),
         ).fetchone()
-        return row is not None and row[0] == current_hash
+        return row is not None and row[0] == current_hash and row[1] == profile_hash
 
-    def mark_processed(self, path: Path, bytes_saved: int = 0) -> None:
-        """Record *path* as processed with its current fingerprint.
+    def mark_processed(self, path: Path, *, profile_hash: str, bytes_saved: int = 0) -> None:
+        """Record *path* as processed with its current fingerprint and processing profile.
 
         Performs an upsert so repeated calls are idempotent.
 
         Args:
             path: Absolute or relative path to the MKV file.
+            profile_hash: SHA-256 hex digest of the processing configuration used.
             bytes_saved: Bytes removed from the file (original size minus new
                 size).  Pass ``0`` when no remux was performed (e.g. the file
                 already had the correct tracks).
@@ -151,14 +162,15 @@ class Database:
         current_hash = fingerprint(path)
         conn.execute(
             """
-            INSERT INTO processed_files (file_path, file_hash, bytes_saved)
-            VALUES (?, ?, ?)
+            INSERT INTO processed_files (file_path, file_hash, profile_hash, bytes_saved)
+            VALUES (?, ?, ?, ?)
             ON CONFLICT(file_path) DO UPDATE SET
                 file_hash    = excluded.file_hash,
+                profile_hash = excluded.profile_hash,
                 bytes_saved  = processed_files.bytes_saved + excluded.bytes_saved,
                 processed_at = CURRENT_TIMESTAMP
             """,
-            (str(path), current_hash, bytes_saved),
+            (str(path), current_hash, profile_hash, bytes_saved),
         )
         conn.commit()
 

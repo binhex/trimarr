@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -96,7 +96,7 @@ class TestDryRunDoesNotRecordToDatabase:
         ):
             run(**_run_kwargs(tmp_path, dry_run=False, db_path=db_path))
 
-        mock_mark.assert_called_once_with(mkv, bytes_saved=0)
+        mock_mark.assert_called_once_with(mkv, profile_hash=ANY, bytes_saved=0)
 
     def test_non_dry_run_marks_processed_after_successful_processing(self, tmp_path: Path) -> None:
         """Control: without dry_run, a successfully processed file IS marked processed."""
@@ -114,7 +114,7 @@ class TestDryRunDoesNotRecordToDatabase:
         ):
             run(**_run_kwargs(tmp_path, dry_run=False, db_path=db_path))
 
-        mock_mark.assert_called_once_with(mkv, bytes_saved=0)
+        mock_mark.assert_called_once_with(mkv, profile_hash=ANY, bytes_saved=0)
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +257,7 @@ class TestPerFileOsErrorResilience:
 
         call_count = 0
 
-        def is_processed_side_effect(path):
+        def is_processed_side_effect(path: object, *, profile_hash: str) -> bool:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
