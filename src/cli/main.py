@@ -20,8 +20,8 @@ except PackageNotFoundError:
 _APP_DATA_DIR = get_app_data_dir()
 _MKVMERGE_BIN = "mkvmerge.exe" if platform.system() == "Windows" else "mkvmerge"
 _DEFAULT_MKVMERGE_PATH = str(_APP_DATA_DIR / "bin" / _MKVMERGE_BIN)
-_DEFAULT_DB_PATH = f"{_APP_DATA_DIR}/db/trimarr.db"
-_DEFAULT_LOGS_PATH = f"{_APP_DATA_DIR}/logs/trimarr.log"
+_DEFAULT_DB_PATH = str(_APP_DATA_DIR / "db" / "trimarr.db")
+_DEFAULT_LOGS_PATH = str(_APP_DATA_DIR / "logs" / "trimarr.log")
 
 
 class _CliCommand(click.Command):

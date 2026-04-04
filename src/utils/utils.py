@@ -20,12 +20,20 @@ _PE_MAGIC = b"MZ"
 
 
 def get_app_data_dir() -> Path:
-    """Return the application data directory, honouring XDG_DATA_HOME.
+    """Return the platform-appropriate application data directory.
 
-    Returns ``$XDG_DATA_HOME/trimarr`` when the env var is set to an absolute
-    path, otherwise ``~/.local/share/trimarr``.  Relative values and unexpanded
-    tildes are ignored per the XDG Base Directory Specification.
+    * **Windows** — ``%LOCALAPPDATA%\\trimarr`` (falls back to ``%APPDATA%``,
+      then ``~\\AppData\\Local``).
+    * **Linux / other** — ``$XDG_DATA_HOME/trimarr`` when *XDG_DATA_HOME* is set
+      to an absolute path, otherwise ``~/.local/share/trimarr``.
     """
+    if platform.system() == "Windows":
+        app_data = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        if app_data:
+            return Path(app_data) / "trimarr"
+        return Path.home() / "AppData" / "Local" / "trimarr"
+
+    # Linux / other POSIX: honour XDG Base Directory Specification.
     xdg = os.environ.get("XDG_DATA_HOME", "")
     if xdg:
         xdg_path = Path(xdg)
