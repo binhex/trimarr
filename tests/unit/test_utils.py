@@ -26,9 +26,11 @@ from utils.utils import (
 # Archive helpers for download tests
 # ---------------------------------------------------------------------------
 
-_ELF_CONTENT = b"\x7fELF" + b"\x00" * 200
-_PE_CONTENT = b"MZ" + b"\x00" * 200
+_ELF_CONTENT = b"\x7fELF" + b"\x00" * (1024 * 1024)
+_PE_CONTENT = b"MZ" + b"\x00" * (1024 * 1024)
 _BAD_CONTENT = b"BADMAGIC" + b"\x00" * 200
+# Small ELF — valid magic but below _MIN_BINARY_BYTES; used to test the size guard.
+_SMALL_ELF_CONTENT = b"\x7fELF" + b"\x00" * 100
 
 
 def _make_tar_xz(filename: str, content: bytes) -> bytes:
@@ -411,5 +413,20 @@ class TestDownloadMkvmerge:
             ),
             patch("utils.utils.requests.get", return_value=_streaming_response(archive_bytes)),
             pytest.raises(RuntimeError, match="Could not find 'mkvmerge'"),
+        ):
+            download_mkvmerge(dest_dir=tmp_path)
+
+    def test_truncated_binary_below_min_size_raises(self, tmp_path: Path) -> None:
+        """A binary that passes magic-bytes check but is below 1 MiB must raise."""
+        archive_bytes = _make_tar_xz("mkvmerge", _SMALL_ELF_CONTENT)
+        with (
+            patch("utils.utils.platform.system", return_value="Linux"),
+            patch("utils.utils.platform.machine", return_value="x86_64"),
+            patch(
+                "utils.utils._get_latest_release_info",
+                return_value=("https://github.com/fake/asset.tar.xz", "v58.0.0"),
+            ),
+            patch("utils.utils.requests.get", return_value=_streaming_response(archive_bytes)),
+            pytest.raises(RuntimeError, match="appears truncated"),
         ):
             download_mkvmerge(dest_dir=tmp_path)

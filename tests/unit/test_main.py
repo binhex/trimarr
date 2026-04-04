@@ -25,6 +25,16 @@ def _make_logger() -> MagicMock:
     return logger
 
 
+def _logged_messages(mock_fn: MagicMock) -> list[str]:
+    """Extract the first positional argument from each call to *mock_fn*.
+
+    Using ``str(call)`` to match substrings is fragile because it includes the
+    function name and argument repr — a more precise extraction checks the
+    actual argument value.
+    """
+    return [c.args[0] for c in mock_fn.call_args_list if c.args]
+
+
 def _run_kwargs(tmp_path: Path, *, dry_run: bool, db_path: str) -> dict:
     return {
         "language": ["eng"],
@@ -116,6 +126,28 @@ class TestDryRunDoesNotRecordToDatabase:
 
         mock_mark.assert_called_once_with(mkv, profile_hash=ANY, bytes_saved=0)
 
+    def test_non_dry_run_records_bytes_saved_accurately(self, tmp_path: Path) -> None:
+        """bytes_saved passed to mark_processed must reflect the actual file size reduction."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"A" * 2000)  # 2000-byte original
+        db_path = str(tmp_path / "trimarr.db")
+        fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), str(mkv)]
+
+        def fake_process_file(*_args: object, file_path: object = None, **_kwargs: object) -> bool:
+            assert hasattr(file_path, "write_bytes")
+            file_path.write_bytes(b"B" * 500)  # noqa: PGH003
+            return True
+
+        with (
+            patch("trimarr.main.probe_file", return_value=[]),
+            patch("trimarr.main.build_mkvmerge_command", return_value=fake_cmd),
+            patch("trimarr.main.process_file", side_effect=fake_process_file),
+            patch("core.database.Database.mark_processed") as mock_mark,
+        ):
+            run(**_run_kwargs(tmp_path, dry_run=False, db_path=db_path))
+
+        mock_mark.assert_called_once_with(mkv, profile_hash=ANY, bytes_saved=1500)
+
 
 # ---------------------------------------------------------------------------
 # KeyboardInterrupt handling
@@ -153,8 +185,8 @@ class TestKeyboardInterruptHandling:
         ):
             run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
 
-        warning_calls = [str(c) for c in logger.warning.call_args_list]
-        assert any("nterrupted" in msg for msg in warning_calls)
+        warning_msgs = _logged_messages(logger.warning)
+        assert any("nterrupted" in msg for msg in warning_msgs)
 
     def test_interrupt_after_partial_processing_shows_summary(self, tmp_path: Path) -> None:
         """Files processed before the interrupt should appear in the session summary."""
@@ -184,8 +216,8 @@ class TestKeyboardInterruptHandling:
             run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
 
         # The summary (counts line) must mention "Interrupted"
-        info_calls = [str(c) for c in logger.info.call_args_list]
-        assert any("nterrupted" in msg for msg in info_calls)
+        info_msgs = _logged_messages(logger.info)
+        assert any("nterrupted" in msg for msg in info_msgs)
 
     def test_interrupt_in_dry_run_exits_130(self, tmp_path: Path) -> None:
         """Ctrl+C in dry-run mode must also exit 130."""
@@ -220,8 +252,8 @@ class TestMediaPathValidation:
             "logger": logger,
         }
         run(**kwargs)
-        error_calls = [str(c) for c in logger.error.call_args_list]
-        assert any("does not exist" in msg for msg in error_calls)
+        error_msgs = _logged_messages(logger.error)
+        assert any("does not exist" in msg for msg in error_msgs)
 
     def test_file_path_given_instead_of_directory_logs_error(self, tmp_path: Path) -> None:
         """Passing a file path where a directory is expected should log an error."""
@@ -234,8 +266,8 @@ class TestMediaPathValidation:
             "logger": logger,
         }
         run(**kwargs)
-        error_calls = [str(c) for c in logger.error.call_args_list]
-        assert any("not a directory" in msg for msg in error_calls)
+        error_msgs = _logged_messages(logger.error)
+        assert any("not a directory" in msg for msg in error_msgs)
 
 
 # ---------------------------------------------------------------------------
@@ -273,8 +305,8 @@ class TestPerFileOsErrorResilience:
             run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
 
         # Error must have been logged for the vanished file
-        error_calls = [str(c) for c in logger.error.call_args_list]
-        assert any("File system error" in msg for msg in error_calls)
+        error_msgs = _logged_messages(logger.error)
+        assert any("File system error" in msg for msg in error_msgs)
         # The second file must still have been attempted — loop continued past the OSError
-        info_calls = " ".join(str(c) for c in logger.info.call_args_list)
-        assert "b.mkv" in info_calls
+        info_msgs = " ".join(_logged_messages(logger.info))
+        assert "b.mkv" in info_msgs

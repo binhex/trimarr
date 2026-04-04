@@ -695,3 +695,243 @@ class TestProcessFile:
         assert result is False
         error_calls = " ".join(str(c) for c in logger.error.call_args_list)
         assert "CRITICAL" in error_calls
+
+
+# ---------------------------------------------------------------------------
+# I1: Truncated output rejection
+# ---------------------------------------------------------------------------
+
+
+class TestTruncatedOutputRejection:
+    """Verify that process_file rejects suspiciously small mkvmerge output."""
+
+    def _make_logger(self) -> MagicMock:
+        log = MagicMock()
+        for attr in ("debug", "info", "warning", "error", "success"):
+            setattr(log, attr, MagicMock())
+        return log
+
+    def _cmd(self, input_path: Path, output_path: Path) -> list[str]:
+        return [MKVMERGE, "-o", str(output_path), str(input_path)]
+
+    def test_rejects_empty_output(self, tmp_path: Path) -> None:
+        """Zero-byte output must be rejected and return False."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"A" * 10_000)
+        cmd = self._cmd(mkv, tmp_path / "out.mkv")
+
+        def fake_run(args: list[str], **kwargs: object) -> MagicMock:
+            Path(args[2]).write_bytes(b"")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=self._make_logger())
+
+        assert result is False
+        assert mkv.read_bytes() == b"A" * 10_000
+
+    def test_rejects_suspiciously_small_output(self, tmp_path: Path) -> None:
+        """Output that is < 0.1 % of the source must be rejected."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"A" * 200_000)  # 200 KB input
+        cmd = self._cmd(mkv, tmp_path / "out.mkv")
+
+        def fake_run(args: list[str], **kwargs: object) -> MagicMock:
+            Path(args[2]).write_bytes(b"X")  # 1 byte — well below 0.1 % of 200 KB
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        logger = self._make_logger()
+        with patch("subprocess.run", side_effect=fake_run):
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=logger)
+
+        assert result is False
+        assert mkv.read_bytes() == b"A" * 200_000
+        logger.error.assert_called()
+
+    def test_accepts_output_at_threshold(self, tmp_path: Path) -> None:
+        """Output at or above the 0.1 % threshold must be accepted."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"A" * 10_000)  # 10 KB input → threshold = 10 bytes
+        cmd = self._cmd(mkv, tmp_path / "out.mkv")
+        min_ok = max(1, 10_000 // 1000)  # = 10 bytes
+
+        def fake_run(args: list[str], **kwargs: object) -> MagicMock:
+            Path(args[2]).write_bytes(b"B" * min_ok)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=self._make_logger())
+
+        assert result is True
+
+
+# ---------------------------------------------------------------------------
+# I7: None-language track filtering
+# ---------------------------------------------------------------------------
+
+
+class TestNoneLanguageTrackFiltering:
+    """Verify that tracks with language=None are handled correctly."""
+
+    def _build(
+        self,
+        tracks: list[MkvTrack],
+        language: list[str] = ENG,
+        logger: MagicMock | None = None,
+    ) -> list[str] | None:
+        return build_mkvmerge_command(
+            mkvmerge_path=MKVMERGE,
+            input_path=Path("/media/Movie.mkv"),
+            output_path=Path("/media/Movie.mkv.tmp"),
+            tracks=tracks,
+            language=language,
+            keep_audio=False,
+            keep_subtitles=False,
+            edit_metadata_title=False,
+            delete_metadata_title=False,
+            logger=logger,
+        )
+
+    def test_none_language_audio_is_dropped_when_filtering(self) -> None:
+        """An audio track with language=None does not match any language code — must be dropped."""
+        tracks = _make_tracks(audio_langs=["eng", None], sub_langs=[])
+        cmd = self._build(tracks, language=["eng"])
+        assert cmd is not None
+        # eng track (id=1) kept; None-language track (id=2) dropped
+        idx = cmd.index("--audio-tracks") + 1
+        assert "1" in cmd[idx]
+        assert "2" not in cmd[idx]
+
+    def test_none_language_subtitle_is_dropped_when_filtering(self) -> None:
+        """A subtitle track with language=None does not match — must be dropped."""
+        tracks = _make_tracks(audio_langs=["eng"], sub_langs=[None, "eng"])
+        cmd = self._build(tracks, language=["eng"])
+        assert cmd is not None
+        # None-language sub (id=2) dropped; eng sub (id=3) kept
+        idx = cmd.index("--subtitle-tracks") + 1
+        assert "3" in cmd[idx]
+        assert "2" not in cmd[idx]
+
+    def test_all_none_language_audio_triggers_safety_fallback(self) -> None:
+        """When every audio track has language=None and no track matches, fallback keeps all."""
+        tracks = _make_tracks(audio_langs=[None, None], sub_langs=[])
+        logger = MagicMock()
+        result = self._build(tracks, language=["eng"], logger=logger)
+        # Safety fallback: keeps all audio — no other changes → returns None
+        assert result is None
+        logger.warning.assert_called_once()
+
+    def test_all_none_language_subtitles_triggers_safety_fallback(self) -> None:
+        """When every subtitle track has language=None and no track matches, fallback keeps all."""
+        tracks = _make_tracks(audio_langs=["eng"], sub_langs=[None, None])
+        logger = MagicMock()
+        result = self._build(tracks, language=["eng"], logger=logger)
+        assert result is None
+        logger.warning.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# I5: Audio safety fallback fires while subtitles still need trimming
+# ---------------------------------------------------------------------------
+
+
+class TestFallbackWithSubtitleTrimming:
+    """Verify the safety fallback keeps all audio while still trimming subtitles."""
+
+    def test_audio_fallback_fires_subtitles_still_trimmed(self) -> None:
+        """No audio matches language → keep all audio; foreign subtitle still dropped."""
+        tracks = _make_tracks(audio_langs=["fre", "ger"], sub_langs=["eng", "fre"])
+        cmd = build_mkvmerge_command(
+            mkvmerge_path=MKVMERGE,
+            input_path=Path("/media/Movie.mkv"),
+            output_path=Path("/media/Movie.mkv.tmp"),
+            tracks=tracks,
+            language=["eng"],
+            keep_audio=False,
+            keep_subtitles=False,
+            edit_metadata_title=False,
+            delete_metadata_title=False,
+            logger=MagicMock(),
+        )
+        # Subtitle trimming must still happen even though audio fallback fired
+        assert cmd is not None
+        assert "--subtitle-tracks" in cmd
+        sub_idx = cmd.index("--subtitle-tracks") + 1
+        # eng subtitle (id=3) kept; fre subtitle (id=4) dropped
+        assert "3" in cmd[sub_idx]
+        assert "4" not in cmd[sub_idx]
+        # Audio must NOT have a --audio-tracks filter (kept all via fallback)
+        assert "--audio-tracks" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# I9: OS-level failure modes in process_file
+# ---------------------------------------------------------------------------
+
+
+class TestProcessFileOsFailures:
+    """Verify process_file handles OS-level failures cleanly."""
+
+    def _make_logger(self) -> MagicMock:
+        log = MagicMock()
+        for attr in ("debug", "info", "warning", "error", "success"):
+            setattr(log, attr, MagicMock())
+        return log
+
+    def _cmd(self, input_path: Path, output_path: Path) -> list[str]:
+        return [MKVMERGE, "-o", str(output_path), str(input_path)]
+
+    def test_timeout_expired_returns_false_and_cleans_up(self, tmp_path: Path) -> None:
+        """subprocess.TimeoutExpired must cause False return and no leftover tmp files."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"original")
+        cmd = self._cmd(mkv, tmp_path / "out.mkv")
+
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd, 3600)):
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=self._make_logger())
+
+        assert result is False
+        assert mkv.read_bytes() == b"original"
+        assert list(tmp_path.glob("*.trimarr_tmp")) == []
+
+    def test_oserror_from_subprocess_returns_false_and_cleans_up(self, tmp_path: Path) -> None:
+        """OSError from subprocess.run must cause False return and no leftover tmp files."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"original")
+        cmd = self._cmd(mkv, tmp_path / "out.mkv")
+
+        with patch("subprocess.run", side_effect=OSError("disk full")):
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=self._make_logger())
+
+        assert result is False
+        assert mkv.read_bytes() == b"original"
+        assert list(tmp_path.glob("*.trimarr_tmp")) == []
+
+    def test_tmp_file_cleaned_up_when_mkvmerge_raises_mid_write(self, tmp_path: Path) -> None:
+        """Temp file written by mkvmerge must be deleted even if subprocess raises unexpectedly."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"original")
+        cmd = self._cmd(mkv, tmp_path / "out.mkv")
+
+        def fake_run_with_partial_write(args: list[str], **kwargs: object) -> None:
+            Path(args[2]).write_bytes(b"partial output")
+            raise RuntimeError("unexpected crash after partial write")
+
+        with patch("subprocess.run", side_effect=fake_run_with_partial_write):
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=self._make_logger())
+
+        assert result is False
+        assert mkv.read_bytes() == b"original"
+        assert list(tmp_path.glob("*.trimarr_tmp")) == []
+
+    def test_mkstemp_failure_returns_false(self, tmp_path: Path) -> None:
+        """If tempfile.mkstemp raises, process_file must return False gracefully."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"original")
+        cmd = self._cmd(mkv, tmp_path / "out.mkv")
+
+        with patch("core.processor.tempfile.mkstemp", side_effect=OSError("no space left on device")):
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=self._make_logger())
+
+        assert result is False
+        assert mkv.read_bytes() == b"original"

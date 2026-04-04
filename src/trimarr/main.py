@@ -64,6 +64,54 @@ def _build_profile_hash(
     return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
 
 
+def _print_summary(
+    counts: dict[str, int],
+    session_bytes_saved: int,
+    dry_run: bool,
+    interrupted: bool,
+    database_path: str,
+    logger: Logger,
+) -> None:
+    """Log the run summary.
+
+    Centralises the summary message so both the normal and interrupted exit paths
+    produce consistent output and adding a new counter only requires one change.
+
+    Args:
+        counts: Dict with keys ``processed``, ``no_change``, ``skipped``, ``failed``.
+        session_bytes_saved: Bytes reclaimed during this run (real mode only).
+        dry_run: Whether the run was in dry-run mode.
+        interrupted: Whether the run was cut short by :exc:`KeyboardInterrupt`.
+        database_path: Path to the tracking DB (used to query all-time savings).
+        logger: Loguru logger instance.
+    """
+    status = "Interrupted after" if interrupted else "Done —"
+    if dry_run:
+        prefix = "<green>DRY-RUN</green>  | "
+        suffix = "Interrupted — no files were modified." if interrupted else "Complete — no files were modified."
+        logger.opt(colors=True).info(
+            f"{prefix}{suffix} "
+            f"Would have processed: {counts['processed']}, "
+            f"no change needed: {counts['no_change']}, "
+            f"skipped (already done): {counts['skipped']}, "
+            f"failed: {counts['failed']}."
+        )
+    else:
+        logger.info(
+            f"{status} processed: {counts['processed']}, "
+            f"no change needed: {counts['no_change']}, "
+            f"skipped (already done): {counts['skipped']}, "
+            f"failed: {counts['failed']}."
+        )
+        if counts["processed"] > 0:
+            logger.info(
+                f"Space saved this session: {_fmt_bytes(session_bytes_saved)} ({counts['processed']} file(s) remuxed)."
+            )
+        with Database(database_path) as db_summary:
+            all_time_saved = db_summary.total_bytes_saved()
+        logger.info(f"Space saved (all sessions): {_fmt_bytes(all_time_saved)}.")
+
+
 def run(
     language: list[str],
     edit_metadata_title: bool,
@@ -212,31 +260,7 @@ def run(
         interrupted = True
         logger.warning("Interrupted — showing partial results.")
 
-    status = "Interrupted after" if interrupted else "Done —"
-    if dry_run:
-        prefix = "<green>DRY-RUN</green>  | "
-        suffix = "Interrupted — no files were modified." if interrupted else "Complete — no files were modified."
-        logger.opt(colors=True).info(
-            f"{prefix}{suffix} "
-            f"Would have processed: {counts['processed']}, "
-            f"no change needed: {counts['no_change']}, "
-            f"skipped (already done): {counts['skipped']}, "
-            f"failed: {counts['failed']}."
-        )
-    else:
-        logger.info(
-            f"{status} processed: {counts['processed']}, "
-            f"no change needed: {counts['no_change']}, "
-            f"skipped (already done): {counts['skipped']}, "
-            f"failed: {counts['failed']}."
-        )
-        if counts["processed"] > 0:
-            logger.info(
-                f"Space saved this session: {_fmt_bytes(session_bytes_saved)} ({counts['processed']} file(s) remuxed)."
-            )
-        with Database(database_path) as db_summary:
-            all_time_saved = db_summary.total_bytes_saved()
-        logger.info(f"Space saved (all sessions): {_fmt_bytes(all_time_saved)}.")
+    _print_summary(counts, session_bytes_saved, dry_run, interrupted, database_path, logger)
 
     if interrupted:
         sys.exit(130)

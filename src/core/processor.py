@@ -50,6 +50,12 @@ class MkvTrack:
 # surrounding words/numerics, e.g. "Commentary 1", "Director Commentary").
 _COMMENTARY_RE: re.Pattern[str] = re.compile(r"commentary", re.IGNORECASE)
 
+# Minimum acceptable output-to-input size ratio.  A legitimate remux strips
+# audio/subtitle tracks but the video stream (the bulk of any MKV) is always
+# retained, so the output should never be less than 0.1 % of the source.
+# This guards against silently accepting a truncated/corrupt mkvmerge write.
+_MIN_OUTPUT_RATIO: float = 0.001
+
 
 def _is_commentary(name: str | None) -> bool:
     """Return *True* if *name* looks like a commentary track."""
@@ -354,6 +360,8 @@ def process_file(
     """
     tmp_path: Path | None = None
     try:
+        input_size = file_path.stat().st_size
+
         # Write temp file next to the original so the rename is atomic on most filesystems.
         tmp_fd, tmp_str = tempfile.mkstemp(dir=file_path.parent, suffix=".trimarr_tmp")
         os.close(tmp_fd)
@@ -383,9 +391,18 @@ def process_file(
                 f"{result.stderr.strip() or result.stdout.strip()}"
             )
 
-        # Validate output file
-        if not tmp_path.exists() or tmp_path.stat().st_size == 0:
-            logger.error(f"mkvmerge produced an empty or missing output for '{file_path}'.")
+        # Validate output file: must exist, be non-empty, and not suspiciously small.
+        # A zero-size or heavily truncated file indicates a crashed/partial write.
+        if not tmp_path.exists():
+            logger.error(f"mkvmerge produced no output file for '{file_path}'.")
+            return False
+        output_size = tmp_path.stat().st_size
+        min_acceptable = max(1, int(input_size * _MIN_OUTPUT_RATIO))
+        if output_size < min_acceptable:
+            logger.error(
+                f"mkvmerge output for '{file_path}' is suspiciously small "
+                f"({output_size} B vs {input_size} B input); rejecting to avoid data loss."
+            )
             return False
 
         # Replace original atomically.
