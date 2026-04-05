@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 from typing import TYPE_CHECKING
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from loguru import logger as _real_loguru_logger
 
+from core.processor import MkvTrack
 from trimarr.main import run
 
 if TYPE_CHECKING:
@@ -49,6 +51,7 @@ def _run_kwargs(tmp_path: Path, *, dry_run: bool, db_path: str) -> dict:
         "no_backup": True,
         "dry_run": dry_run,
         "logger": _make_logger(),
+        "strip_lower_channels": False,
     }
 
 
@@ -178,6 +181,29 @@ class TestDryRunDoesNotRecordToDatabase:
             run(**_run_kwargs(tmp_path, dry_run=False, db_path=db_path))
 
         mock_mark.assert_called_once_with(mkv, profile_hash=ANY, bytes_saved=1500)
+
+    def test_bytes_saved_clamped_to_zero_when_output_larger(self, tmp_path: Path) -> None:
+        """I1: bytes_saved must never be negative; if remux produces a larger file,
+        bytes_saved should be clamped to 0 rather than storing a negative value."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"A" * 500)  # 500-byte original
+        db_path = str(tmp_path / "trimarr.db")
+        fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), str(mkv)]
+
+        def fake_process_file(*_args: object, file_path: object = None, **_kwargs: object) -> bool:
+            assert hasattr(file_path, "write_bytes")
+            file_path.write_bytes(b"B" * 2000)  # output larger than input  # noqa: PGH003
+            return True
+
+        with (
+            patch("trimarr.main.probe_file", return_value=[]),
+            patch("trimarr.main.build_mkvmerge_command", return_value=fake_cmd),
+            patch("trimarr.main.process_file", side_effect=fake_process_file),
+            patch("core.database.Database.mark_processed") as mock_mark,
+        ):
+            run(**_run_kwargs(tmp_path, dry_run=False, db_path=db_path))
+
+        mock_mark.assert_called_once_with(mkv, profile_hash=ANY, bytes_saved=0)
 
 
 # ---------------------------------------------------------------------------
@@ -341,3 +367,133 @@ class TestPerFileOsErrorResilience:
         # The second file must still have been attempted — loop continued past the OSError
         info_msgs = " ".join(_logged_messages(logger.info))
         assert "b.mkv" in info_msgs
+
+
+# ---------------------------------------------------------------------------
+# SQLite error handling (I3)
+# ---------------------------------------------------------------------------
+
+
+class TestSQLiteErrorHandling:
+    """sqlite3.Error in the run() loop must not crash the entire batch."""
+
+    def test_db_operational_error_on_mark_processed_logs_and_continues(self, tmp_path: Path) -> None:
+        """If mark_processed raises sqlite3.OperationalError, the loop continues."""
+        import sqlite3
+
+        mkv_a = tmp_path / "a.mkv"
+        mkv_b = tmp_path / "b.mkv"
+        mkv_a.write_bytes(b"fake")
+        mkv_b.write_bytes(b"fake")
+        db_path = str(tmp_path / "trimarr.db")
+        logger = _make_logger()
+
+        tracks_no_change = [MkvTrack(id=0, type="video", language=None)]
+
+        call_count = 0
+
+        def probe_side_effect(*_args, **_kwargs):
+            nonlocal call_count
+            call_count += 1
+            return tracks_no_change
+
+        def mark_side_effect(*_args, **_kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        with (
+            patch("trimarr.main.probe_file", side_effect=probe_side_effect),
+            patch("trimarr.main.build_mkvmerge_command", return_value=None),
+            patch("core.database.Database.mark_processed", side_effect=mark_side_effect),
+        ):
+            # Must not raise — should log the error and continue
+            run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
+
+        # Both files were probed despite the DB error on the first
+        assert call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# _print_summary DB failure after KeyboardInterrupt (I5)
+# ---------------------------------------------------------------------------
+
+
+class TestPrintSummaryDBFailure:
+    """_print_summary() DB failure must not crash after KeyboardInterrupt."""
+
+    def test_db_failure_in_summary_does_not_propagate(self, tmp_path: Path) -> None:
+        """If the DB can't be opened in _print_summary(), a warning is logged, not a crash."""
+        import sqlite3
+
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake")
+        db_path = str(tmp_path / "trimarr.db")
+        logger = _make_logger()
+
+        # The main run() opens Database once (for the loop) then _print_summary opens
+        # it again (for all-time savings).  The first call must succeed; the second
+        # must raise so we can verify the error is swallowed gracefully.
+        real_db_calls: list[int] = [0]
+
+        def database_side_effect(path: str) -> MagicMock:
+            real_db_calls[0] += 1
+            if real_db_calls[0] == 1:
+                # First call: main loop DB — succeed with a context-manager mock
+                cm = MagicMock()
+                cm.__enter__ = MagicMock(return_value=cm)
+                cm.__exit__ = MagicMock(return_value=False)
+                cm.is_processed.return_value = False
+                return cm
+            # Second call: summary DB — fail
+            raise sqlite3.OperationalError("disk I/O error")
+
+        with (
+            patch("trimarr.main.probe_file", side_effect=KeyboardInterrupt),
+            patch("trimarr.main.Database", side_effect=database_side_effect),
+            contextlib.suppress(SystemExit),
+        ):
+            run(
+                **{
+                    **_run_kwargs(tmp_path, dry_run=False, db_path=db_path),
+                    "logger": logger,
+                }
+            )
+
+        # A warning must have been logged about the DB failure — not a crash
+        warning_messages = [c.args[0] for c in logger.warning.call_args_list if c.args]
+        assert any("database" in m.lower() or "savings" in m.lower() for m in warning_messages), (
+            "Expected a warning about DB failure in summary, got: " + str(warning_messages)
+        )
+
+
+# ---------------------------------------------------------------------------
+# strip_lower_channels wiring through run() (I4)
+# ---------------------------------------------------------------------------
+
+
+class TestStripLowerChannelsWiring:
+    """Verify --strip-lower-channels is passed through run() to build_mkvmerge_command()."""
+
+    def test_strip_lower_channels_true_reaches_build_mkvmerge_command(self, tmp_path: Path) -> None:
+        """run(strip_lower_channels=True) must call build_mkvmerge_command with that flag."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake")
+        db_path = str(tmp_path / "trimarr.db")
+
+        dummy_track = MkvTrack(id=0, type="video", language=None)
+
+        with (
+            patch("trimarr.main.probe_file", return_value=[dummy_track]),
+            patch("trimarr.main.build_mkvmerge_command", return_value=None) as mock_build,
+        ):
+            run(
+                **{
+                    **_run_kwargs(tmp_path, dry_run=False, db_path=db_path),
+                    "strip_lower_channels": True,
+                }
+            )
+
+        assert mock_build.called
+        _, kwargs = mock_build.call_args
+        assert kwargs.get("strip_lower_channels") is True, (
+            "strip_lower_channels=True was not forwarded to build_mkvmerge_command()"
+        )

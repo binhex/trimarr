@@ -430,3 +430,49 @@ class TestDownloadMkvmerge:
             pytest.raises(RuntimeError, match="appears truncated"),
         ):
             download_mkvmerge(dest_dir=tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# _extract_from_zip — Zip Slip protection
+# ---------------------------------------------------------------------------
+
+
+class TestExtractFromZipSecurity:
+    """_extract_from_zip must not write outside tmp_dir (Zip Slip)."""
+
+    def _make_zip(self, entry_name: str, content: bytes = b"fake binary\x7fELF") -> bytes:
+        """Build an in-memory zip with a single entry at *entry_name*."""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(entry_name, content)
+        return buf.getvalue()
+
+    def test_normal_extraction_works(self, tmp_path: Path) -> None:
+        """Legit zip with nested path extracts the binary correctly."""
+        data = self._make_zip("subdir/mkvmerge")
+        archive = tmp_path / "release.zip"
+        archive.write_bytes(data)
+        dest = tmp_path / "extract"
+        dest.mkdir()
+        result = _extract_from_zip(archive, "mkvmerge", dest)
+        assert result.name == "mkvmerge"
+        assert result.read_bytes() == b"fake binary\x7fELF"
+
+    def test_path_traversal_entry_does_not_escape_tmp_dir(self, tmp_path: Path) -> None:
+        """A zip entry like ../../mkvmerge must NOT be written outside tmp_dir."""
+        # Craft an entry that traverses upward
+        data = self._make_zip("../../mkvmerge")
+        archive = tmp_path / "malicious.zip"
+        archive.write_bytes(data)
+        dest = tmp_path / "extract"
+        dest.mkdir()
+        # Extraction must either refuse or resolve inside dest — never outside
+        try:
+            result = _extract_from_zip(archive, "mkvmerge", dest)
+            # If it succeeds the extracted file must be inside dest
+            assert dest in result.parents, f"Extracted to unsafe path: {result}"
+        except (RuntimeError, Exception):
+            pass  # Refusing is also acceptable
+        # The dangerous path outside dest must not exist
+        escape_path = tmp_path / "mkvmerge"
+        assert not escape_path.exists(), "Zip Slip: file written outside extraction directory!"

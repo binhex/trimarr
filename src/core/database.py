@@ -98,6 +98,9 @@ class Database:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self._db_path))
         self._conn.execute("PRAGMA journal_mode=WAL;")
+        # Wait up to 5 s before raising "database is locked" so concurrent
+        # trimarr processes do not immediately crash each other's DB writes.
+        self._conn.execute("PRAGMA busy_timeout=5000;")
         self._conn.executescript(_SCHEMA)
         # Migrate existing databases that pre-date the bytes_saved column.
         # Use PRAGMA rather than catching OperationalError so disk I/O and locking

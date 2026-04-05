@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -38,6 +39,7 @@ def _build_profile_hash(
     keep_subtitles: bool,
     edit_metadata_title: bool,
     delete_metadata_title: bool,
+    strip_lower_channels: bool,
 ) -> str:
     """Return a stable SHA-256 hex digest encoding the current processing profile.
 
@@ -50,6 +52,7 @@ def _build_profile_hash(
         keep_subtitles: Retain all subtitle tracks regardless of language.
         edit_metadata_title: Set container title to filename stem.
         delete_metadata_title: Clear container title.
+        strip_lower_channels: Drop audio tracks below the max channel count.
 
     Returns:
         64-character lowercase hex string.
@@ -60,6 +63,7 @@ def _build_profile_hash(
         "keep_audio": keep_audio,
         "keep_subtitles": keep_subtitles,
         "language": sorted(language),
+        "strip_lower_channels": strip_lower_channels,
     }
     return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
 
@@ -107,9 +111,12 @@ def _print_summary(
             logger.info(
                 f"Space saved this session: {_fmt_bytes(session_bytes_saved)} ({counts['processed']} file(s) remuxed)."
             )
-        with Database(database_path) as db_summary:
-            all_time_saved = db_summary.total_bytes_saved()
-        logger.info(f"Space saved (all sessions): {_fmt_bytes(all_time_saved)}.")
+        try:
+            with Database(database_path) as db_summary:
+                all_time_saved = db_summary.total_bytes_saved()
+            logger.info(f"Space saved (all sessions): {_fmt_bytes(all_time_saved)}.")
+        except sqlite3.Error as exc:
+            logger.warning(f"Could not retrieve all-time savings from database: {exc}")
 
 
 def run(
@@ -124,6 +131,7 @@ def run(
     no_backup: bool,
     dry_run: bool,
     logger: Logger,
+    strip_lower_channels: bool = False,
 ) -> None:
     """Scan *media_path* and trim unwanted tracks from every MKV file found.
 
@@ -145,6 +153,9 @@ def run(
             ``<name>.bak`` before replacing it with the processed copy.
         dry_run: When *True*, log planned changes without modifying any files.
         logger: Loguru logger instance.
+        strip_lower_channels: When *True*, after language filtering, drop any
+            audio tracks with a channel count below the maximum among surviving
+            audio tracks.
     """
     root = Path(media_path)
 
@@ -174,6 +185,7 @@ def run(
         keep_subtitles=keep_subtitles,
         edit_metadata_title=edit_metadata_title,
         delete_metadata_title=delete_metadata_title,
+        strip_lower_channels=strip_lower_channels,
     )
 
     total = len(mkv_files)
@@ -213,6 +225,7 @@ def run(
                         edit_metadata_title=edit_metadata_title,
                         delete_metadata_title=delete_metadata_title,
                         logger=logger,
+                        strip_lower_channels=strip_lower_channels,
                     )
 
                     if cmd is None:
@@ -236,8 +249,6 @@ def run(
                         logger.opt(colors=True).info(f"<green>DRY-RUN</green>  | Would run: {cmd_str}")
                         counts["processed"] += 1
                         continue
-                        counts["processed"] += 1
-                        continue
 
                     # Process the file
                     size_before = file_path.stat().st_size
@@ -249,7 +260,7 @@ def run(
                         logger=logger,
                     )
                     if success:
-                        bytes_saved = size_before - file_path.stat().st_size
+                        bytes_saved = max(0, size_before - file_path.stat().st_size)
                         session_bytes_saved += bytes_saved
                         db.mark_processed(file_path, profile_hash=profile_hash, bytes_saved=bytes_saved)
                         logger.success(f"Processed: {file_path.name}")
@@ -259,6 +270,9 @@ def run(
 
                 except OSError as exc:
                     logger.error(f"File system error processing '{file_path}': {exc}")
+                    counts["failed"] += 1
+                except sqlite3.Error as exc:
+                    logger.error(f"Database error processing '{file_path}': {exc}")
                     counts["failed"] += 1
 
     except KeyboardInterrupt:

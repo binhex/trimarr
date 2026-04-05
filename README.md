@@ -62,6 +62,7 @@ trimarr --help
 | `--keep-audio` | Keep all audio tracks regardless of language. | `false` | — | `flag` |
 | `--no-backup` | Delete the original file after successful processing instead of renaming it to `<name>.bak`. By default a backup is always created. | `false` | — | `flag` |
 | `--no-update-check` | Skip the automatic check for a newer mkvmerge version. Has no effect when `--mkvmerge-path` is supplied (user-managed binaries are never auto-updated). | `false` | — | `flag` |
+| `--strip-lower-channels` | After language filtering, drop any audio tracks whose channel count is strictly below the highest channel count among the surviving audio tracks. For example, given English tracks at 8ch, 8ch, and 2ch, the 2ch track is removed. Tracks with an unknown channel count are always kept. Has no effect when `--keep-audio` is set. **Disabled by default** — enable only when you are confident lower-channel duplicates are not needed. | `false` | — | `flag` |
 | `--dry-run` | Log planned changes without modifying any files. Processed files are not recorded to the database in this mode. | `false` | — | `flag` |
 
 ✱ Required.
@@ -85,9 +86,14 @@ flowchart TD
     F -- Yes --> G([⚠️ Keep all\ncommentary-only audio])
     F -- No --> H[Drop non-matching tracks]
     H --> I{Commentary track\nholds default flag?}
-    I -- No --> J([✅ Apply changes])
+    I -- No --> L{--strip-lower-channels?}
     I -- Yes --> K[Promote non-commentary\nto default · demote commentary]
-    K --> J
+    K --> L
+    L -- No --> J([✅ Apply changes])
+    L -- Yes --> M{All surviving tracks\nsame channel count?}
+    M -- Yes --> J
+    M -- No --> N[Drop tracks below\nmax channel count]
+    N --> J
 ```
 
 ### Subtitle tracks

@@ -21,10 +21,8 @@ classifiers = [
 ]
 
 dependencies = [
-    "backoff",
     "click",
     "loguru",
-    "apprise",
     "requests",
     "urllib3",
 ]
@@ -106,7 +104,7 @@ addopts = """
     -ra
     --strict-markers
     --strict-config
-    --cov=src/Trimarr
+    --cov=src
     --cov-report=term-missing
     --cov-report=html
     --cov-report=xml
