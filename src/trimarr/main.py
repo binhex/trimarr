@@ -38,6 +38,7 @@ def _build_profile_hash(
     keep_subtitles: bool,
     edit_metadata_title: bool,
     delete_metadata_title: bool,
+    strip_lower_channels: bool,
 ) -> str:
     """Return a stable SHA-256 hex digest encoding the current processing profile.
 
@@ -50,6 +51,7 @@ def _build_profile_hash(
         keep_subtitles: Retain all subtitle tracks regardless of language.
         edit_metadata_title: Set container title to filename stem.
         delete_metadata_title: Clear container title.
+        strip_lower_channels: Drop audio tracks below the max channel count.
 
     Returns:
         64-character lowercase hex string.
@@ -60,6 +62,7 @@ def _build_profile_hash(
         "keep_audio": keep_audio,
         "keep_subtitles": keep_subtitles,
         "language": sorted(language),
+        "strip_lower_channels": strip_lower_channels,
     }
     return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
 
@@ -124,6 +127,7 @@ def run(
     no_backup: bool,
     dry_run: bool,
     logger: Logger,
+    strip_lower_channels: bool = False,
 ) -> None:
     """Scan *media_path* and trim unwanted tracks from every MKV file found.
 
@@ -145,6 +149,9 @@ def run(
             ``<name>.bak`` before replacing it with the processed copy.
         dry_run: When *True*, log planned changes without modifying any files.
         logger: Loguru logger instance.
+        strip_lower_channels: When *True*, after language filtering, drop any
+            audio tracks with a channel count below the maximum among surviving
+            audio tracks.
     """
     root = Path(media_path)
 
@@ -174,6 +181,7 @@ def run(
         keep_subtitles=keep_subtitles,
         edit_metadata_title=edit_metadata_title,
         delete_metadata_title=delete_metadata_title,
+        strip_lower_channels=strip_lower_channels,
     )
 
     total = len(mkv_files)
@@ -213,6 +221,7 @@ def run(
                         edit_metadata_title=edit_metadata_title,
                         delete_metadata_title=delete_metadata_title,
                         logger=logger,
+                        strip_lower_channels=strip_lower_channels,
                     )
 
                     if cmd is None:

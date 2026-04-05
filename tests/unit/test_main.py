@@ -49,6 +49,7 @@ def _run_kwargs(tmp_path: Path, *, dry_run: bool, db_path: str) -> dict:
         "no_backup": True,
         "dry_run": dry_run,
         "logger": _make_logger(),
+        "strip_lower_channels": False,
     }
 
 

@@ -183,6 +183,19 @@ Examples:
         " Has no effect when --mkvmerge-path is specified (user-managed binaries are never auto-updated)."
     ),
 )
+@click.option(
+    "--strip-lower-channels",
+    is_flag=True,
+    default=False,
+    show_default=True,
+    help=(
+        "If specified, after language filtering, audio tracks with a channel count strictly below"
+        " the maximum channel count among the surviving audio tracks will be removed."
+        " For example, if a file has both 8-channel and 2-channel English audio, the 2-channel track"
+        " is dropped.  Tracks with an unknown channel count are always preserved."
+        " Has no effect when --keep-audio is set.  Disabled by default."
+    ),
+)
 @click.version_option(version=_VERSION, prog_name="Trimarr")
 def cli(
     language: str,
@@ -198,6 +211,7 @@ def cli(
     no_backup: bool,
     dry_run: bool,
     no_update_check: bool,
+    strip_lower_channels: bool,
 ) -> None:
     """Trimarr - Removes (trims) unwanted audio and subtitles from matroska container format video files.
 
@@ -266,6 +280,7 @@ def cli(
         no_backup=no_backup,
         dry_run=dry_run,
         logger=logger,
+        strip_lower_channels=strip_lower_channels,
     )
 
 

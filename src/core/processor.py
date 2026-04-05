@@ -44,6 +44,7 @@ class MkvTrack:
     language: str | None
     name: str | None = field(default=None)
     default_track: bool = field(default=False)
+    channels: int | None = field(default=None)
 
 
 # Matches track names containing "commentary" (any case, with or without
@@ -73,6 +74,8 @@ def _fmt_track(t: MkvTrack) -> str:
     parts = [f"ID {t.id}"]
     if t.language:
         parts.append(f"[{t.language}]")
+    if t.channels is not None:
+        parts.append(f"{t.channels}ch")
     if t.name:
         safe_name = "".join(c for c in t.name if c.isprintable())
         parts.append(f"'{safe_name}'")
@@ -155,6 +158,7 @@ def probe_file(mkvmerge_path: str, file_path: Path) -> list[MkvTrack]:
                 language=lang,
                 name=props.get("track_name") or None,
                 default_track=bool(props.get("default_track", False)),
+                channels=props.get("audio_channels") if raw["type"] == "audio" else None,
             )
         )
     return tracks
@@ -171,6 +175,7 @@ def build_mkvmerge_command(
     edit_metadata_title: bool,
     delete_metadata_title: bool,
     logger: Logger | None = None,
+    strip_lower_channels: bool = False,
 ) -> list[str] | None:
     """Build the mkvmerge argv needed to produce a trimmed copy of *input_path*.
 
@@ -201,6 +206,11 @@ def build_mkvmerge_command(
         delete_metadata_title: When *True*, clear the container title.
         logger: Optional loguru logger; used to emit warnings when the safety
             fallback is triggered (no tracks match the language filter).
+        strip_lower_channels: When *True*, after all other filtering, drop any
+            audio tracks whose channel count is strictly below the maximum
+            channel count of the surviving audio tracks.  Tracks with unknown
+            channel counts (``channels=None``) are always preserved.  Skipped
+            when *keep_audio* is *True*.
 
     Returns:
         A list of strings suitable for :func:`subprocess.run`, or *None* if
@@ -257,6 +267,26 @@ def build_mkvmerge_command(
                 f"No subtitle tracks match language {lang_desc} in '{input_path.name}' — keeping all subtitles."
             )
         sub_drop.clear()
+
+    # Channel-count filtering: run AFTER all language/safety fallbacks so we
+    # only evaluate tracks that have already survived the language filter.
+    # Skipped when keep_audio is True or the flag is off.
+    if strip_lower_channels and not keep_audio and audio_keep:
+        keep_set = set(audio_keep)
+        surviving = [t for t in tracks if t.type == "audio" and t.id in keep_set]
+        known_channels = [t.channels for t in surviving if t.channels is not None]
+        if known_channels:
+            max_ch = max(known_channels)
+            # Only act when there is meaningful variation to remove.
+            if any(ch < max_ch for ch in known_channels):
+                channel_drop = [t.id for t in surviving if t.channels is not None and t.channels < max_ch]
+                for tid in channel_drop:
+                    audio_keep.remove(tid)
+                    audio_drop.append(tid)
+                if logger is not None:
+                    descs = ", ".join(_fmt_track(t) for t in surviving if t.id in set(channel_drop))
+                    logger.info(f"  Dropping {len(channel_drop)} audio track(s) with fewer than {max_ch} channels.")
+                    logger.debug(f"  Dropping lower-channel audio track(s): {descs}")
 
     needs_audio_change = bool(audio_drop)
     needs_sub_change = bool(sub_drop)

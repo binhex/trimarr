@@ -28,6 +28,7 @@ def _make_tracks(
     sub_names: list[str | None] | None = None,
     audio_defaults: list[bool] | None = None,
     sub_defaults: list[bool] | None = None,
+    audio_channels: list[int | None] | None = None,
 ) -> list[MkvTrack]:
     """Build a minimal track list for testing."""
     tracks: list[MkvTrack] = []
@@ -38,7 +39,8 @@ def _make_tracks(
     for i, lang in enumerate(audio_langs):
         name = audio_names[i] if audio_names else None
         default = audio_defaults[i] if audio_defaults else False
-        tracks.append(MkvTrack(id=tid, type="audio", language=lang, name=name, default_track=default))
+        ch = audio_channels[i] if audio_channels else None
+        tracks.append(MkvTrack(id=tid, type="audio", language=lang, name=name, default_track=default, channels=ch))
         tid += 1
     for i, lang in enumerate(sub_langs):
         name = sub_names[i] if sub_names else None
@@ -163,6 +165,7 @@ class TestBuildMkvmergeCommand:
         input_path: Path | None = None,
         output_path: Path | None = None,
         logger: MagicMock | None = None,
+        strip_lower_channels: bool = False,
     ) -> list[str] | None:
         inp = input_path or Path("/media/Movie.Name.mkv")
         out = output_path or Path("/media/Movie.Name.mkv.tmp")
@@ -177,6 +180,7 @@ class TestBuildMkvmergeCommand:
             edit_metadata_title=edit_metadata_title,
             delete_metadata_title=delete_metadata_title,
             logger=logger,
+            strip_lower_channels=strip_lower_channels,
         )
 
     def test_returns_none_when_no_changes_needed(self) -> None:
@@ -1064,3 +1068,194 @@ class TestProcessFileOsFailures:
 
         assert result is False
         assert mkv.read_bytes() == b"original"
+
+
+# ---------------------------------------------------------------------------
+# MkvTrack.channels field
+# ---------------------------------------------------------------------------
+
+
+class TestMkvTrackChannels:
+    """MkvTrack must carry a channels field for audio channel count."""
+
+    def test_channels_defaults_to_none(self) -> None:
+        t = MkvTrack(id=0, type="audio", language="eng")
+        assert t.channels is None
+
+    def test_channels_can_be_set(self) -> None:
+        t = MkvTrack(id=0, type="audio", language="eng", channels=8)
+        assert t.channels == 8
+
+    def test_channels_included_in_equality(self) -> None:
+        a = MkvTrack(id=0, type="audio", language="eng", channels=8)
+        b = MkvTrack(id=0, type="audio", language="eng", channels=6)
+        assert a != b
+
+    def test_audio_channels_in_probe_output(self, tmp_path: Path) -> None:
+        """probe_file() must populate channels for audio tracks from audio_channels property."""
+        raw_tracks = [
+            {"id": 0, "type": "audio", "properties": {"language": "eng", "audio_channels": 8}},
+            {"id": 1, "type": "subtitles", "properties": {"language": "eng"}},
+        ]
+        mkv = tmp_path / "movie.mkv"
+        mkv.touch()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=json.dumps({"tracks": raw_tracks}),
+                stderr="",
+            )
+            result = probe_file(MKVMERGE, mkv)
+        assert result[0].channels == 8  # audio track
+        assert result[1].channels is None  # subtitle track — no channels
+
+    def test_missing_audio_channels_property_gives_none(self, tmp_path: Path) -> None:
+        """Audio track without audio_channels in JSON results in channels=None."""
+        raw_tracks = [{"id": 0, "type": "audio", "properties": {"language": "eng"}}]
+        mkv = tmp_path / "movie.mkv"
+        mkv.touch()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=json.dumps({"tracks": raw_tracks}),
+                stderr="",
+            )
+            result = probe_file(MKVMERGE, mkv)
+        assert result[0].channels is None
+
+
+# ---------------------------------------------------------------------------
+# Channel filtering in build_mkvmerge_command()
+# ---------------------------------------------------------------------------
+
+
+class TestChannelFiltering:
+    """Verify strip_lower_channels behaviour in build_mkvmerge_command()."""
+
+    def _build(
+        self,
+        tracks: list[MkvTrack],
+        strip_lower_channels: bool = True,
+        keep_audio: bool = False,
+        language: list[str] = ENG,
+        logger: MagicMock | None = None,
+    ) -> list[str] | None:
+        return build_mkvmerge_command(
+            mkvmerge_path=MKVMERGE,
+            input_path=Path("/media/Movie.mkv"),
+            output_path=Path("/media/Movie.mkv.tmp"),
+            tracks=tracks,
+            language=language,
+            keep_audio=keep_audio,
+            keep_subtitles=False,
+            edit_metadata_title=False,
+            delete_metadata_title=False,
+            strip_lower_channels=strip_lower_channels,
+            logger=logger,
+        )
+
+    def test_drops_tracks_below_max_channel_count(self) -> None:
+        """8ch tracks kept; 6ch and 2ch tracks dropped."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", channels=8),
+            MkvTrack(id=2, type="audio", language="eng", channels=8),
+            MkvTrack(id=3, type="audio", language="eng", channels=6),
+            MkvTrack(id=4, type="audio", language="eng", channels=2),
+        ]
+        cmd = self._build(tracks)
+        assert cmd is not None
+        idx = cmd.index("--audio-tracks") + 1
+        kept = cmd[idx].split(",")
+        assert "1" in kept
+        assert "2" in kept
+        assert "3" not in kept
+        assert "4" not in kept
+
+    def test_all_equal_channels_returns_none(self) -> None:
+        """When all tracks share the same channel count, nothing is dropped."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", channels=6),
+            MkvTrack(id=2, type="audio", language="eng", channels=6),
+        ]
+        assert self._build(tracks) is None
+
+    def test_all_none_channels_returns_none(self) -> None:
+        """When channel count is unknown for all tracks, nothing is dropped."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", channels=None),
+            MkvTrack(id=2, type="audio", language="eng", channels=None),
+        ]
+        assert self._build(tracks) is None
+
+    def test_flag_off_does_not_filter_channels(self) -> None:
+        """strip_lower_channels=False must leave lower-channel tracks untouched."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", channels=8),
+            MkvTrack(id=2, type="audio", language="eng", channels=2),
+        ]
+        assert self._build(tracks, strip_lower_channels=False) is None
+
+    def test_keep_audio_bypasses_channel_filtering(self) -> None:
+        """--keep-audio disables channel filtering entirely."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", channels=8),
+            MkvTrack(id=2, type="audio", language="eng", channels=2),
+        ]
+        assert self._build(tracks, keep_audio=True) is None
+
+    def test_unknown_channel_tracks_preserved_alongside_known(self) -> None:
+        """Tracks with channels=None are never dropped — only known-inferior tracks go."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", channels=8),
+            MkvTrack(id=2, type="audio", language="eng", channels=None),  # unknown → keep
+            MkvTrack(id=3, type="audio", language="eng", channels=2),  # inferior → drop
+        ]
+        cmd = self._build(tracks)
+        assert cmd is not None
+        idx = cmd.index("--audio-tracks") + 1
+        kept = cmd[idx].split(",")
+        assert "1" in kept
+        assert "2" in kept
+        assert "3" not in kept
+
+    def test_single_audio_track_not_dropped(self) -> None:
+        """A single surviving audio track is always the max — must never be dropped."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", channels=2),
+        ]
+        assert self._build(tracks) is None
+
+    def test_runs_after_language_filter(self) -> None:
+        """Channel filtering applies to tracks surviving the language filter, not all tracks."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="fre", channels=6),  # language-dropped first
+            MkvTrack(id=2, type="audio", language="eng", channels=8),  # kept
+            MkvTrack(id=3, type="audio", language="eng", channels=2),  # channel-dropped
+        ]
+        cmd = self._build(tracks, language=["eng"])
+        assert cmd is not None
+        idx = cmd.index("--audio-tracks") + 1
+        kept = cmd[idx].split(",")
+        assert "2" in kept
+        assert "1" not in kept
+        assert "3" not in kept
+
+    def test_logs_info_when_dropping_lower_channel_tracks(self) -> None:
+        """An INFO log must be emitted for each batch of dropped lower-channel tracks."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", channels=8),
+            MkvTrack(id=2, type="audio", language="eng", channels=2),
+        ]
+        logger = MagicMock()
+        self._build(tracks, logger=logger)
+        messages = [c.args[0] for c in logger.info.call_args_list if c.args]
+        assert any("channel" in m.lower() for m in messages)
