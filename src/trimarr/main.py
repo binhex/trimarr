@@ -229,7 +229,7 @@ def run(
                         # execution strategy; mkvmerge refuses input == output, so showing the raw
                         # command (where placeholder output_path == input_path) would be misleading.
                         display_cmd = list(cmd)
-                        display_cmd[display_cmd.index("-o") + 1] = "<tmpfile>"
+                        display_cmd[display_cmd.index("-o") + 1] = "[tmpfile]"
                         logger.opt(colors=True).info(f"<green>DRY-RUN</green>  | Would run: {' '.join(display_cmd)}")
                         counts["processed"] += 1
                         continue
