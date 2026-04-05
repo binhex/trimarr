@@ -310,6 +310,10 @@ def build_mkvmerge_command(
 
     # Safety fallback: if filtering would drop ALL audio tracks (none match the
     # language), keep everything rather than produce a silent file.
+    # Channel-strip is also skipped when a fallback fires — when we're already
+    # in a "best effort, keep everything" state there is no benefit in pruning
+    # further by channel count.
+    audio_fallback_fired = False
     if audio_drop and not audio_keep:
         if logger is not None:
             lang_desc = f"'{language[0]}'" if len(language) == 1 else str(language)
@@ -318,6 +322,7 @@ def build_mkvmerge_command(
                 f"— keeping all audio to prevent silent data loss."
             )
         audio_drop.clear()
+        audio_fallback_fired = True
     elif audio_drop:
         # Secondary fallback: every audio track that *does* match the language is
         # commentary.  Stripping the other tracks would leave the viewer with only
@@ -331,14 +336,8 @@ def build_mkvmerge_command(
                     f"All audio tracks matching language {lang_desc} in '{input_path.name}' are commentary "
                     f"— keeping all audio to avoid commentary-only audio."
                 )
-            # Expand audio_keep to ALL audio tracks (not just language-matching
-            # ones) so that any subsequent channel-strip pass sees the full set.
-            # Merely clearing audio_drop is insufficient: foreign tracks that
-            # were already in audio_drop would not appear in audio_keep, so the
-            # final --audio-tracks argument would silently exclude them.
-            all_audio_ids = [t.id for t in tracks if t.type == "audio"]
-            audio_keep[:] = all_audio_ids
             audio_drop.clear()
+            audio_fallback_fired = True
 
     # Same safety fallback for subtitles.
     if sub_drop and not sub_keep:
@@ -351,10 +350,12 @@ def build_mkvmerge_command(
 
     # Channel-count filtering: run AFTER all language/safety fallbacks so we
     # only evaluate tracks that have already survived the language filter.
-    # Skipped when keep_audio is True or the flag is off.
+    # Skipped when keep_audio is True, the flag is off, or a safety fallback
+    # fired — pruning by channel count is pointless when we're already in
+    # "keep everything" mode.
     # Filtering is applied per-language-group so that a track from one language
     # is never dropped because a different language has a higher channel count.
-    if strip_lower_channels and not keep_audio and audio_keep:
+    if strip_lower_channels and not keep_audio and audio_keep and not audio_fallback_fired:
         keep_set = set(audio_keep)
         surviving = [t for t in tracks if t.type == "audio" and t.id in keep_set]
         # Group surviving tracks by language (None treated as its own group).
