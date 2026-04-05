@@ -308,6 +308,13 @@ def build_mkvmerge_command(
                 sub_drop.append(track.id)
         # Video tracks are always kept; no action needed.
 
+    # Snapshot the language-filtered drops before fallbacks or channel-strip can
+    # modify audio_drop.  The final summary log uses this to report only the
+    # tracks genuinely dropped for language reasons — channel-strip drops are
+    # logged separately by the channel-strip block below.
+    language_audio_drop_ids: set[int] = set(audio_drop)
+    language_sub_drop_ids: set[int] = set(sub_drop)
+
     # Safety fallback: if filtering would drop ALL audio tracks (none match the
     # language), keep everything rather than produce a silent file.
     # Channel-strip is also skipped when a fallback fires — when we're already
@@ -393,16 +400,14 @@ def build_mkvmerge_command(
 
     # Log what is being changed and why, so the user has full visibility.
     if logger is not None:
-        audio_drop_set = set(audio_drop)
-        sub_drop_set = set(sub_drop)
         lang_filter = f"≠ '{language[0]}'" if len(language) == 1 else f"not in {language}"
-        if audio_drop:
-            logger.info(f"  Dropping {len(audio_drop)} audio track(s) (language {lang_filter}).")
-            descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "audio" and t.id in audio_drop_set)
+        if language_audio_drop_ids:
+            logger.info(f"  Dropping {len(language_audio_drop_ids)} audio track(s) (language {lang_filter}).")
+            descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "audio" and t.id in language_audio_drop_ids)
             logger.debug(f"  Dropping audio track(s): {descs}")
-        if sub_drop:
-            logger.info(f"  Dropping {len(sub_drop)} subtitle track(s) (language {lang_filter}).")
-            descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "subtitles" and t.id in sub_drop_set)
+        if language_sub_drop_ids:
+            logger.info(f"  Dropping {len(language_sub_drop_ids)} subtitle track(s) (language {lang_filter}).")
+            descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "subtitles" and t.id in language_sub_drop_ids)
             logger.debug(f"  Dropping subtitle track(s): {descs}")
         if edit_metadata_title:
             logger.info(f"  Metadata: setting title to '{input_path.stem}'")
