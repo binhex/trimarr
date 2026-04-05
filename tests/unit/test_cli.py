@@ -144,19 +144,11 @@ class TestFlagsForwardedToRun:
         _, kwargs = mock_run.call_args
         assert kwargs["strip_lower_channels"] is True
 
-    def test_strip_lower_channels_default_is_false(self, tmp_path: Path) -> None:
+    def test_boolean_flags_default_to_false(self, tmp_path: Path) -> None:
         mock_run = self._invoke_with_flags(tmp_path, [])
         _, kwargs = mock_run.call_args
         assert kwargs["strip_lower_channels"] is False
-
-    def test_keep_audio_default_is_false(self, tmp_path: Path) -> None:
-        mock_run = self._invoke_with_flags(tmp_path, [])
-        _, kwargs = mock_run.call_args
         assert kwargs["keep_audio"] is False
-
-    def test_dry_run_default_is_false(self, tmp_path: Path) -> None:
-        mock_run = self._invoke_with_flags(tmp_path, [])
-        _, kwargs = mock_run.call_args
         assert kwargs["dry_run"] is False
 
 

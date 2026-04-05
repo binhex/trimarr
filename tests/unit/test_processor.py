@@ -50,6 +50,47 @@ def _make_tracks(
     return tracks
 
 
+def _build_cmd(
+    tracks: list[MkvTrack],
+    language: list[str] = ENG,
+    keep_audio: bool = False,
+    keep_subtitles: bool = False,
+    edit_metadata_title: bool = False,
+    delete_metadata_title: bool = False,
+    input_path: Path | None = None,
+    output_path: Path | None = None,
+    logger: MagicMock | None = None,
+    strip_lower_channels: bool = False,
+) -> list[str] | None:
+    """Thin wrapper around build_mkvmerge_command with test-friendly defaults."""
+    return build_mkvmerge_command(
+        mkvmerge_path=MKVMERGE,
+        input_path=input_path or Path("/media/Movie.mkv"),
+        output_path=output_path or Path("/media/Movie.mkv.tmp"),
+        tracks=tracks,
+        language=language,
+        keep_audio=keep_audio,
+        keep_subtitles=keep_subtitles,
+        edit_metadata_title=edit_metadata_title,
+        delete_metadata_title=delete_metadata_title,
+        logger=logger,
+        strip_lower_channels=strip_lower_channels,
+    )
+
+
+def _proc_logger() -> MagicMock:
+    """Return a MagicMock logger with individual method mocks for process_file tests."""
+    log = MagicMock()
+    for attr in ("debug", "info", "warning", "error", "success"):
+        setattr(log, attr, MagicMock())
+    return log
+
+
+def _proc_cmd(input_path: Path, output_path: Path) -> list[str]:
+    """Build a minimal mkvmerge command for process_file tests."""
+    return [MKVMERGE, "-o", str(output_path), str(input_path)]
+
+
 # ---------------------------------------------------------------------------
 # probe_file()
 # ---------------------------------------------------------------------------
@@ -154,46 +195,17 @@ class TestProbeFile:
 class TestBuildMkvmergeCommand:
     """Tests for build_mkvmerge_command() — pure function, no subprocess."""
 
-    def _build(
-        self,
-        tracks: list[MkvTrack],
-        language: list[str] = ENG,
-        keep_audio: bool = False,
-        keep_subtitles: bool = False,
-        edit_metadata_title: bool = False,
-        delete_metadata_title: bool = False,
-        input_path: Path | None = None,
-        output_path: Path | None = None,
-        logger: MagicMock | None = None,
-        strip_lower_channels: bool = False,
-    ) -> list[str] | None:
-        inp = input_path or Path("/media/Movie.Name.mkv")
-        out = output_path or Path("/media/Movie.Name.mkv.tmp")
-        return build_mkvmerge_command(
-            mkvmerge_path=MKVMERGE,
-            input_path=inp,
-            output_path=out,
-            tracks=tracks,
-            language=language,
-            keep_audio=keep_audio,
-            keep_subtitles=keep_subtitles,
-            edit_metadata_title=edit_metadata_title,
-            delete_metadata_title=delete_metadata_title,
-            logger=logger,
-            strip_lower_channels=strip_lower_channels,
-        )
-
     def test_returns_none_when_no_changes_needed(self) -> None:
         tracks = _make_tracks(audio_langs=["eng"], sub_langs=["eng"])
-        assert self._build(tracks, language=["eng"]) is None
+        assert _build_cmd(tracks, language=["eng"]) is None
 
     def test_returns_none_with_no_tracks_to_remove_and_no_metadata(self) -> None:
         tracks = _make_tracks(audio_langs=[], sub_langs=[])
-        assert self._build(tracks) is None
+        assert _build_cmd(tracks) is None
 
     def test_drops_foreign_audio(self) -> None:
         tracks = _make_tracks(audio_langs=["eng", "fre", "ger"], sub_langs=[])
-        cmd = self._build(tracks, language=["eng"])
+        cmd = _build_cmd(tracks, language=["eng"])
         assert cmd is not None
         assert "--audio-tracks" in cmd
         # Only track 1 (eng) should be kept
@@ -206,19 +218,19 @@ class TestBuildMkvmergeCommand:
         """Safety fallback: when NO audio tracks match, keep all — returns None and logs a warning."""
         tracks = _make_tracks(audio_langs=["fre", "ger"], sub_langs=[])
         logger = MagicMock()
-        result = self._build(tracks, language=["eng"], logger=logger)
+        result = _build_cmd(tracks, language=["eng"], logger=logger)
         assert result is None  # No other changes → nothing to do
         logger.warning.assert_called_once()
         assert "eng" in logger.warning.call_args[0][0]
 
     def test_keep_audio_overrides_language_filter(self) -> None:
         tracks = _make_tracks(audio_langs=["fre", "ger"], sub_langs=[])
-        result = self._build(tracks, language=["eng"], keep_audio=True)
+        result = _build_cmd(tracks, language=["eng"], keep_audio=True)
         assert result is None  # Nothing to do
 
     def test_drops_foreign_subtitles(self) -> None:
         tracks = _make_tracks(audio_langs=[], sub_langs=["eng", "fre"])
-        cmd = self._build(tracks, language=["eng"])
+        cmd = _build_cmd(tracks, language=["eng"])
         assert cmd is not None
         assert "--subtitle-tracks" in cmd
 
@@ -226,19 +238,19 @@ class TestBuildMkvmergeCommand:
         """Safety fallback: when NO subtitle tracks match, keep all — returns None and logs a warning."""
         tracks = _make_tracks(audio_langs=[], sub_langs=["fre"])
         logger = MagicMock()
-        result = self._build(tracks, language=["eng"], logger=logger)
+        result = _build_cmd(tracks, language=["eng"], logger=logger)
         assert result is None  # No other changes → nothing to do
         logger.warning.assert_called_once()
 
     def test_keep_subtitles_overrides_language_filter(self) -> None:
         tracks = _make_tracks(audio_langs=[], sub_langs=["fre"])
-        result = self._build(tracks, language=["eng"], keep_subtitles=True)
+        result = _build_cmd(tracks, language=["eng"], keep_subtitles=True)
         assert result is None
 
     def test_multi_language_keeps_all_matching_tracks(self) -> None:
         """Multiple language codes: tracks in any listed language are retained."""
         tracks = _make_tracks(audio_langs=["eng", "fre", "ger"], sub_langs=["eng", "fre", "jpn"])
-        cmd = self._build(tracks, language=["eng", "fre"])
+        cmd = _build_cmd(tracks, language=["eng", "fre"])
         assert cmd is not None
         # eng(id=1) and fre(id=2) audio kept; ger(id=3) dropped
         idx = cmd.index("--audio-tracks") + 1
@@ -254,12 +266,12 @@ class TestBuildMkvmergeCommand:
     def test_multi_language_no_drop_needed_returns_none(self) -> None:
         """When all tracks match one of the listed languages, no changes are needed."""
         tracks = _make_tracks(audio_langs=["eng", "fre"], sub_langs=["eng"])
-        assert self._build(tracks, language=["eng", "fre"]) is None
+        assert _build_cmd(tracks, language=["eng", "fre"]) is None
 
     def test_edit_metadata_title_included(self) -> None:
         tracks = _make_tracks(audio_langs=["eng"], sub_langs=[])
         inp = Path("/media/My.Movie.mkv")
-        cmd = self._build(tracks, edit_metadata_title=True, input_path=inp)
+        cmd = _build_cmd(tracks, edit_metadata_title=True, input_path=inp)
         assert cmd is not None
         assert "--title" in cmd
         idx = cmd.index("--title") + 1
@@ -267,7 +279,7 @@ class TestBuildMkvmergeCommand:
 
     def test_delete_metadata_title_sets_empty_string(self) -> None:
         tracks = _make_tracks(audio_langs=["eng"], sub_langs=[])
-        cmd = self._build(tracks, delete_metadata_title=True)
+        cmd = _build_cmd(tracks, delete_metadata_title=True)
         assert cmd is not None
         assert "--title" in cmd
         idx = cmd.index("--title") + 1
@@ -277,7 +289,7 @@ class TestBuildMkvmergeCommand:
         # Use a mixed-language track list so there IS something to drop
         tracks = _make_tracks(audio_langs=["eng", "fre"], sub_langs=[])
         out = Path("/tmp/out.mkv")
-        cmd = self._build(tracks, output_path=out)
+        cmd = _build_cmd(tracks, output_path=out)
         assert cmd is not None
         assert cmd[0] == MKVMERGE
         assert cmd[1] == "-o"
@@ -287,7 +299,7 @@ class TestBuildMkvmergeCommand:
         # Use a mixed-language track list so there IS something to drop
         tracks = _make_tracks(audio_langs=["eng", "fre"], sub_langs=[])
         inp = Path("/media/test.mkv")
-        cmd = self._build(tracks, input_path=inp)
+        cmd = _build_cmd(tracks, input_path=inp)
         assert cmd is not None
         assert cmd[-1] == str(inp)
 
@@ -300,25 +312,6 @@ class TestBuildMkvmergeCommand:
 class TestAudioCommentaryFallback:
     """Verify the secondary audio safety fallback: all-commentary matches → keep all."""
 
-    def _build(
-        self,
-        tracks: list[MkvTrack],
-        language: list[str] = ENG,
-        logger: MagicMock | None = None,
-    ) -> list[str] | None:
-        return build_mkvmerge_command(
-            mkvmerge_path=MKVMERGE,
-            input_path=Path("/media/Movie.mkv"),
-            output_path=Path("/media/Movie.mkv.tmp"),
-            tracks=tracks,
-            language=language,
-            keep_audio=False,
-            keep_subtitles=False,
-            edit_metadata_title=False,
-            delete_metadata_title=False,
-            logger=logger,
-        )
-
     def test_all_matching_audio_commentary_triggers_fallback(self) -> None:
         """When the only language-matching audio track is commentary, keep all audio."""
         tracks = [
@@ -327,7 +320,7 @@ class TestAudioCommentaryFallback:
             MkvTrack(id=2, type="audio", language="eng", name="Director's Commentary"),
         ]
         logger = MagicMock()
-        result = self._build(tracks, language=["eng"], logger=logger)
+        result = _build_cmd(tracks, language=["eng"], logger=logger)
         # No audio change applied (fallback fired); no subtitle work either
         assert result is None
         logger.warning.assert_called_once()
@@ -344,7 +337,7 @@ class TestAudioCommentaryFallback:
             MkvTrack(id=4, type="subtitles", language="fre"),  # to be dropped
         ]
         logger = MagicMock()
-        cmd = self._build(tracks, language=["eng"], logger=logger)
+        cmd = _build_cmd(tracks, language=["eng"], logger=logger)
         # Subtitle trimming must still apply
         assert cmd is not None
         assert "--subtitle-tracks" in cmd
@@ -361,7 +354,7 @@ class TestAudioCommentaryFallback:
             MkvTrack(id=3, type="audio", language="eng", name="Main"),  # kept
         ]
         logger = MagicMock()
-        cmd = self._build(tracks, language=["eng"], logger=logger)
+        cmd = _build_cmd(tracks, language=["eng"], logger=logger)
         assert cmd is not None
         # French track dropped; both eng tracks kept — no fallback warning
         assert "--audio-tracks" in cmd
@@ -378,7 +371,7 @@ class TestAudioCommentaryFallback:
             MkvTrack(id=1, type="audio", language="eng", name="Commentary"),
         ]
         logger = MagicMock()
-        result = self._build(tracks, language=["eng"], logger=logger)
+        result = _build_cmd(tracks, language=["eng"], logger=logger)
         assert result is None
         logger.warning.assert_not_called()
 
@@ -391,7 +384,7 @@ class TestAudioCommentaryFallback:
             MkvTrack(id=3, type="audio", language="fre", name="Commentary 2"),
         ]
         logger = MagicMock()
-        result = self._build(tracks, language=["eng", "fre"], logger=logger)
+        result = _build_cmd(tracks, language=["eng", "fre"], logger=logger)
         assert result is None
         logger.warning.assert_called_once()
 
@@ -402,17 +395,7 @@ class TestAudioCommentaryFallback:
             MkvTrack(id=1, type="audio", language="fre"),
             MkvTrack(id=2, type="audio", language="eng", name="Commentary"),
         ]
-        result = build_mkvmerge_command(
-            mkvmerge_path=MKVMERGE,
-            input_path=Path("/media/Movie.mkv"),
-            output_path=Path("/media/Movie.mkv.tmp"),
-            tracks=tracks,
-            language=["eng"],
-            keep_audio=True,
-            keep_subtitles=False,
-            edit_metadata_title=False,
-            delete_metadata_title=False,
-        )
+        result = _build_cmd(tracks, language=["eng"], keep_audio=True)
         assert result is None  # Nothing to do; no warning
 
 
@@ -424,25 +407,6 @@ class TestAudioCommentaryFallback:
 class TestCommentaryDefaultTrack:
     """Tests for the commentary --default-track reassignment logic."""
 
-    def _build(
-        self,
-        tracks: list[MkvTrack],
-        language: list[str] = ENG,
-        logger: MagicMock | None = None,
-    ) -> list[str] | None:
-        return build_mkvmerge_command(
-            mkvmerge_path=MKVMERGE,
-            input_path=Path("/media/Movie.mkv"),
-            output_path=Path("/media/Movie.mkv.tmp"),
-            tracks=tracks,
-            language=language,
-            keep_audio=False,
-            keep_subtitles=False,
-            edit_metadata_title=False,
-            delete_metadata_title=False,
-            logger=logger,
-        )
-
     def test_audio_commentary_default_reassigned_to_non_commentary(self) -> None:
         """Commentary track with default=True is demoted; non-commentary promoted."""
         # tid 0: video, tid 1: eng commentary (default), tid 2: eng normal, tid 3: fre (dropped)
@@ -452,7 +416,7 @@ class TestCommentaryDefaultTrack:
             MkvTrack(id=2, type="audio", language="eng", name="Main Audio", default_track=False),
             MkvTrack(id=3, type="audio", language="fre"),
         ]
-        cmd = self._build(tracks)
+        cmd = _build_cmd(tracks)
         assert cmd is not None
         assert "--default-track" in cmd
         assert "1:0" in cmd  # commentary tid demoted
@@ -466,7 +430,7 @@ class TestCommentaryDefaultTrack:
             MkvTrack(id=2, type="audio", language="eng", name="Main Audio", default_track=True),
             MkvTrack(id=3, type="audio", language="fre"),
         ]
-        cmd = self._build(tracks)
+        cmd = _build_cmd(tracks)
         assert cmd is not None
         # Non-commentary already holds default — no reassignment needed
         assert "--default-track" not in cmd
@@ -484,7 +448,7 @@ class TestCommentaryDefaultTrack:
             MkvTrack(id=2, type="audio", language="fre"),  # would have been dropped
         ]
         logger = MagicMock()
-        result = self._build(tracks, logger=logger)
+        result = _build_cmd(tracks, logger=logger)
         # Fallback fires → no audio change → no other changes → None
         assert result is None
         # Warning must mention commentary and the language
@@ -501,7 +465,7 @@ class TestCommentaryDefaultTrack:
             MkvTrack(id=2, type="audio", language="eng", name="Main Audio", default_track=False),
         ]
         # Nothing to remove → returns None
-        result = self._build(tracks)
+        result = _build_cmd(tracks)
         assert result is None
 
     def test_subtitle_commentary_default_reassigned_to_non_commentary(self) -> None:
@@ -513,7 +477,7 @@ class TestCommentaryDefaultTrack:
             MkvTrack(id=3, type="subtitles", language="eng", name="SDH", default_track=False),
             MkvTrack(id=4, type="subtitles", language="fre"),  # dropped
         ]
-        cmd = self._build(tracks)
+        cmd = _build_cmd(tracks)
         assert cmd is not None
         assert "--default-track" in cmd
         assert "2:0" in cmd
@@ -533,7 +497,7 @@ class TestCommentaryDefaultTrack:
             MkvTrack(id=6, type="audio", language="eng", name="Eng", default_track=False),
             MkvTrack(id=7, type="audio", language="fre"),  # dropped
         ]
-        cmd = self._build(tracks)
+        cmd = _build_cmd(tracks)
         assert cmd is not None
         assert "--default-track" in cmd
         assert "6:1" in cmd  # non-commentary promoted
@@ -550,7 +514,7 @@ class TestCommentaryDefaultTrack:
             MkvTrack(id=5, type="subtitles", language="eng", name="Commentary 2", default_track=False),
             MkvTrack(id=8, type="subtitles", language="fre"),  # dropped
         ]
-        cmd = self._build(tracks)
+        cmd = _build_cmd(tracks)
         assert cmd is not None
         assert "--default-track" in cmd
         assert "2:1" in cmd  # English subtitle promoted
@@ -566,7 +530,7 @@ class TestCommentaryDefaultTrack:
             MkvTrack(id=3, type="subtitles", language="eng", name="SDH", default_track=True),
             MkvTrack(id=4, type="subtitles", language="fre"),  # dropped
         ]
-        cmd = self._build(tracks)
+        cmd = _build_cmd(tracks)
         assert cmd is not None
         assert "--default-track" not in cmd
 
@@ -579,7 +543,7 @@ class TestCommentaryDefaultTrack:
             MkvTrack(id=3, type="subtitles", language="fre"),  # dropped
         ]
         logger = MagicMock()
-        cmd = self._build(tracks, logger=logger)
+        cmd = _build_cmd(tracks, logger=logger)
         assert cmd is not None
         assert "--default-track" in cmd
         assert "2:0" in cmd
@@ -592,7 +556,7 @@ class TestCommentaryDefaultTrack:
             MkvTrack(id=1, type="audio", language="eng"),
             MkvTrack(id=2, type="subtitles", language="eng", name="Commentary", default_track=True),
         ]
-        result = self._build(tracks)
+        result = _build_cmd(tracks)
         assert result is None
 
     def test_commentary_name_case_insensitive(self) -> None:
@@ -604,7 +568,7 @@ class TestCommentaryDefaultTrack:
                 MkvTrack(id=2, type="audio", language="eng", name="Main", default_track=False),
                 MkvTrack(id=3, type="audio", language="fre"),
             ]
-            cmd = self._build(tracks)
+            cmd = _build_cmd(tracks)
             assert cmd is not None, f"Expected command for name={name!r}"
             assert "--default-track" in cmd, f"Expected flags for name={name!r}"
             assert "1:0" in cmd
@@ -619,23 +583,11 @@ class TestCommentaryDefaultTrack:
 class TestProcessFile:
     """Tests for process_file()."""
 
-    def _make_logger(self) -> MagicMock:
-        log = MagicMock()
-        log.debug = MagicMock()
-        log.info = MagicMock()
-        log.warning = MagicMock()
-        log.error = MagicMock()
-        log.success = MagicMock()
-        return log
-
-    def _cmd(self, input_path: Path, output_path: Path) -> list[str]:
-        return [MKVMERGE, "-o", str(output_path), str(input_path)]
-
     def test_success_with_backup(self, tmp_path: Path) -> None:
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"original")
         out_placeholder = tmp_path / "out.mkv"
-        cmd = self._cmd(mkv, out_placeholder)
+        cmd = _proc_cmd(mkv, out_placeholder)
 
         def fake_run(args: list[str], **kwargs: object) -> MagicMock:
             # Write to the actual temp path (patched into cmd by process_file)
@@ -644,7 +596,7 @@ class TestProcessFile:
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch("subprocess.run", side_effect=fake_run):
-            result = process_file(MKVMERGE, mkv, cmd, no_backup=False, logger=self._make_logger())
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=False, logger=_proc_logger())
 
         assert result is True
         assert mkv.read_bytes() == b"processed"
@@ -655,14 +607,14 @@ class TestProcessFile:
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"original")
         out_placeholder = tmp_path / "out.mkv"
-        cmd = self._cmd(mkv, out_placeholder)
+        cmd = _proc_cmd(mkv, out_placeholder)
 
         def fake_run(args: list[str], **kwargs: object) -> MagicMock:
             Path(args[2]).write_bytes(b"processed")
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch("subprocess.run", side_effect=fake_run):
-            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=self._make_logger())
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
 
         assert result is True
         assert mkv.read_bytes() == b"processed"
@@ -672,8 +624,8 @@ class TestProcessFile:
         """mkvmerge exit 1 means 'completed with warnings' — output is still valid."""
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"original")
-        cmd = self._cmd(mkv, tmp_path / "out.mkv")
-        logger = self._make_logger()
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
+        logger = _proc_logger()
 
         def fake_run(args: list[str], **kwargs: object) -> MagicMock:
             Path(args[2]).write_bytes(b"processed")
@@ -690,8 +642,8 @@ class TestProcessFile:
         """mkvmerge exit 1 with an empty/missing output is still a failure."""
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"original")
-        cmd = self._cmd(mkv, tmp_path / "out.mkv")
-        logger = self._make_logger()
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
+        logger = _proc_logger()
 
         def fake_run(args: list[str], **kwargs: object) -> MagicMock:
             Path(args[2]).write_bytes(b"")  # Empty — not usable
@@ -707,8 +659,8 @@ class TestProcessFile:
         """mkvmerge exit ≥2 is a hard failure: returns False, logs an error, and removes the temp file."""
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"original")
-        cmd = self._cmd(mkv, tmp_path / "out.mkv")
-        logger = self._make_logger()
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
+        logger = _proc_logger()
 
         def fake_run(args: list[str], **kwargs: object) -> MagicMock:
             Path(args[2]).write_bytes(b"partial")
@@ -724,14 +676,14 @@ class TestProcessFile:
     def test_empty_output_treated_as_failure(self, tmp_path: Path) -> None:
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"original")
-        cmd = self._cmd(mkv, tmp_path / "out.mkv")
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
 
         def fake_run(args: list[str], **kwargs: object) -> MagicMock:
             Path(args[2]).write_bytes(b"")  # Empty file
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch("subprocess.run", side_effect=fake_run):
-            result = process_file(MKVMERGE, mkv, cmd, no_backup=False, logger=self._make_logger())
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=False, logger=_proc_logger())
 
         assert result is False
         assert mkv.read_bytes() == b"original"
@@ -746,8 +698,8 @@ class TestProcessFile:
         """
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"original")
-        cmd = self._cmd(mkv, tmp_path / "out.mkv")
-        logger = self._make_logger()
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
+        logger = _proc_logger()
 
         def fake_run(args: list[str], **kwargs: object) -> MagicMock:
             Path(args[2]).write_bytes(b"processed")
@@ -773,8 +725,8 @@ class TestProcessFile:
         """If tmp→original replace fails after original→.bak, rollback must restore original."""
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"original")
-        cmd = self._cmd(mkv, tmp_path / "out.mkv")
-        logger = self._make_logger()
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
+        logger = _proc_logger()
 
         def fake_run(args: list[str], **kwargs: object) -> MagicMock:
             Path(args[2]).write_bytes(b"processed")
@@ -806,8 +758,8 @@ class TestProcessFile:
         """When both replace and rollback fail, a CRITICAL error must be logged."""
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"original")
-        cmd = self._cmd(mkv, tmp_path / "out.mkv")
-        logger = self._make_logger()
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
+        logger = _proc_logger()
 
         def fake_run(args: list[str], **kwargs: object) -> MagicMock:
             Path(args[2]).write_bytes(b"processed")
@@ -838,27 +790,18 @@ class TestProcessFile:
 class TestTruncatedOutputRejection:
     """Verify that process_file rejects suspiciously small mkvmerge output."""
 
-    def _make_logger(self) -> MagicMock:
-        log = MagicMock()
-        for attr in ("debug", "info", "warning", "error", "success"):
-            setattr(log, attr, MagicMock())
-        return log
-
-    def _cmd(self, input_path: Path, output_path: Path) -> list[str]:
-        return [MKVMERGE, "-o", str(output_path), str(input_path)]
-
     def test_rejects_empty_output(self, tmp_path: Path) -> None:
         """Zero-byte output must be rejected and return False."""
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"A" * 10_000)
-        cmd = self._cmd(mkv, tmp_path / "out.mkv")
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
 
         def fake_run(args: list[str], **kwargs: object) -> MagicMock:
             Path(args[2]).write_bytes(b"")
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch("subprocess.run", side_effect=fake_run):
-            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=self._make_logger())
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
 
         assert result is False
         assert mkv.read_bytes() == b"A" * 10_000
@@ -867,13 +810,13 @@ class TestTruncatedOutputRejection:
         """Output that is < 0.1 % of the source must be rejected."""
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"A" * 200_000)  # 200 KB input
-        cmd = self._cmd(mkv, tmp_path / "out.mkv")
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
 
         def fake_run(args: list[str], **kwargs: object) -> MagicMock:
             Path(args[2]).write_bytes(b"X")  # 1 byte — well below 0.1 % of 200 KB
             return MagicMock(returncode=0, stdout="", stderr="")
 
-        logger = self._make_logger()
+        logger = _proc_logger()
         with patch("subprocess.run", side_effect=fake_run):
             result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=logger)
 
@@ -885,7 +828,7 @@ class TestTruncatedOutputRejection:
         """Output at or above the 0.1 % threshold must be accepted."""
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"A" * 10_000)  # 10 KB input → threshold = 10 bytes
-        cmd = self._cmd(mkv, tmp_path / "out.mkv")
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
         min_ok = max(1, 10_000 // 1000)  # = 10 bytes
 
         def fake_run(args: list[str], **kwargs: object) -> MagicMock:
@@ -893,7 +836,7 @@ class TestTruncatedOutputRejection:
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch("subprocess.run", side_effect=fake_run):
-            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=self._make_logger())
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
 
         assert result is True
 
@@ -906,29 +849,10 @@ class TestTruncatedOutputRejection:
 class TestNoneLanguageTrackFiltering:
     """Verify that tracks with language=None are handled correctly."""
 
-    def _build(
-        self,
-        tracks: list[MkvTrack],
-        language: list[str] = ENG,
-        logger: MagicMock | None = None,
-    ) -> list[str] | None:
-        return build_mkvmerge_command(
-            mkvmerge_path=MKVMERGE,
-            input_path=Path("/media/Movie.mkv"),
-            output_path=Path("/media/Movie.mkv.tmp"),
-            tracks=tracks,
-            language=language,
-            keep_audio=False,
-            keep_subtitles=False,
-            edit_metadata_title=False,
-            delete_metadata_title=False,
-            logger=logger,
-        )
-
     def test_none_language_audio_is_dropped_when_filtering(self) -> None:
         """An audio track with language=None does not match any language code — must be dropped."""
         tracks = _make_tracks(audio_langs=["eng", None], sub_langs=[])
-        cmd = self._build(tracks, language=["eng"])
+        cmd = _build_cmd(tracks, language=["eng"])
         assert cmd is not None
         # eng track (id=1) kept; None-language track (id=2) dropped
         idx = cmd.index("--audio-tracks") + 1
@@ -938,7 +862,7 @@ class TestNoneLanguageTrackFiltering:
     def test_none_language_subtitle_is_dropped_when_filtering(self) -> None:
         """A subtitle track with language=None does not match — must be dropped."""
         tracks = _make_tracks(audio_langs=["eng"], sub_langs=[None, "eng"])
-        cmd = self._build(tracks, language=["eng"])
+        cmd = _build_cmd(tracks, language=["eng"])
         assert cmd is not None
         # None-language sub (id=2) dropped; eng sub (id=3) kept
         idx = cmd.index("--subtitle-tracks") + 1
@@ -949,7 +873,7 @@ class TestNoneLanguageTrackFiltering:
         """When every audio track has language=None and no track matches, fallback keeps all."""
         tracks = _make_tracks(audio_langs=[None, None], sub_langs=[])
         logger = MagicMock()
-        result = self._build(tracks, language=["eng"], logger=logger)
+        result = _build_cmd(tracks, language=["eng"], logger=logger)
         # Safety fallback: keeps all audio — no other changes → returns None
         assert result is None
         logger.warning.assert_called_once()
@@ -958,7 +882,7 @@ class TestNoneLanguageTrackFiltering:
         """When every subtitle track has language=None and no track matches, fallback keeps all."""
         tracks = _make_tracks(audio_langs=["eng"], sub_langs=[None, None])
         logger = MagicMock()
-        result = self._build(tracks, language=["eng"], logger=logger)
+        result = _build_cmd(tracks, language=["eng"], logger=logger)
         assert result is None
         logger.warning.assert_called_once()
 
@@ -974,18 +898,7 @@ class TestFallbackWithSubtitleTrimming:
     def test_audio_fallback_fires_subtitles_still_trimmed(self) -> None:
         """No audio matches language → keep all audio; foreign subtitle still dropped."""
         tracks = _make_tracks(audio_langs=["fre", "ger"], sub_langs=["eng", "fre"])
-        cmd = build_mkvmerge_command(
-            mkvmerge_path=MKVMERGE,
-            input_path=Path("/media/Movie.mkv"),
-            output_path=Path("/media/Movie.mkv.tmp"),
-            tracks=tracks,
-            language=["eng"],
-            keep_audio=False,
-            keep_subtitles=False,
-            edit_metadata_title=False,
-            delete_metadata_title=False,
-            logger=MagicMock(),
-        )
+        cmd = _build_cmd(tracks, language=["eng"], logger=MagicMock())
         # Subtitle trimming must still happen even though audio fallback fired
         assert cmd is not None
         assert "--subtitle-tracks" in cmd
@@ -1005,23 +918,14 @@ class TestFallbackWithSubtitleTrimming:
 class TestProcessFileOsFailures:
     """Verify process_file handles OS-level failures cleanly."""
 
-    def _make_logger(self) -> MagicMock:
-        log = MagicMock()
-        for attr in ("debug", "info", "warning", "error", "success"):
-            setattr(log, attr, MagicMock())
-        return log
-
-    def _cmd(self, input_path: Path, output_path: Path) -> list[str]:
-        return [MKVMERGE, "-o", str(output_path), str(input_path)]
-
     def test_timeout_expired_returns_false_and_cleans_up(self, tmp_path: Path) -> None:
         """subprocess.TimeoutExpired must cause False return and no leftover tmp files."""
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"original")
-        cmd = self._cmd(mkv, tmp_path / "out.mkv")
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
 
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd, 3600)):
-            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=self._make_logger())
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
 
         assert result is False
         assert mkv.read_bytes() == b"original"
@@ -1031,10 +935,10 @@ class TestProcessFileOsFailures:
         """OSError from subprocess.run must cause False return and no leftover tmp files."""
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"original")
-        cmd = self._cmd(mkv, tmp_path / "out.mkv")
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
 
         with patch("subprocess.run", side_effect=OSError("disk full")):
-            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=self._make_logger())
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
 
         assert result is False
         assert mkv.read_bytes() == b"original"
@@ -1044,14 +948,14 @@ class TestProcessFileOsFailures:
         """Temp file written by mkvmerge must be deleted even if subprocess raises unexpectedly."""
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"original")
-        cmd = self._cmd(mkv, tmp_path / "out.mkv")
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
 
         def fake_run_with_partial_write(args: list[str], **kwargs: object) -> None:
             Path(args[2]).write_bytes(b"partial output")
             raise RuntimeError("unexpected crash after partial write")
 
         with patch("subprocess.run", side_effect=fake_run_with_partial_write):
-            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=self._make_logger())
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
 
         assert result is False
         assert mkv.read_bytes() == b"original"
@@ -1061,10 +965,10 @@ class TestProcessFileOsFailures:
         """If tempfile.mkstemp raises, process_file must return False gracefully."""
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"original")
-        cmd = self._cmd(mkv, tmp_path / "out.mkv")
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
 
         with patch("core.processor.tempfile.mkstemp", side_effect=OSError("no space left on device")):
-            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=self._make_logger())
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
 
         assert result is False
         assert mkv.read_bytes() == b"original"
@@ -1132,28 +1036,6 @@ class TestMkvTrackChannels:
 class TestChannelFiltering:
     """Verify strip_lower_channels behaviour in build_mkvmerge_command()."""
 
-    def _build(
-        self,
-        tracks: list[MkvTrack],
-        strip_lower_channels: bool = True,
-        keep_audio: bool = False,
-        language: list[str] = ENG,
-        logger: MagicMock | None = None,
-    ) -> list[str] | None:
-        return build_mkvmerge_command(
-            mkvmerge_path=MKVMERGE,
-            input_path=Path("/media/Movie.mkv"),
-            output_path=Path("/media/Movie.mkv.tmp"),
-            tracks=tracks,
-            language=language,
-            keep_audio=keep_audio,
-            keep_subtitles=False,
-            edit_metadata_title=False,
-            delete_metadata_title=False,
-            strip_lower_channels=strip_lower_channels,
-            logger=logger,
-        )
-
     def test_drops_tracks_below_max_channel_count(self) -> None:
         """8ch tracks kept; 6ch and 2ch tracks dropped."""
         tracks = [
@@ -1163,7 +1045,7 @@ class TestChannelFiltering:
             MkvTrack(id=3, type="audio", language="eng", channels=6),
             MkvTrack(id=4, type="audio", language="eng", channels=2),
         ]
-        cmd = self._build(tracks)
+        cmd = _build_cmd(tracks, strip_lower_channels=True)
         assert cmd is not None
         idx = cmd.index("--audio-tracks") + 1
         kept = cmd[idx].split(",")
@@ -1179,7 +1061,7 @@ class TestChannelFiltering:
             MkvTrack(id=1, type="audio", language="eng", channels=6),
             MkvTrack(id=2, type="audio", language="eng", channels=6),
         ]
-        assert self._build(tracks) is None
+        assert _build_cmd(tracks, strip_lower_channels=True) is None
 
     def test_all_none_channels_returns_none(self) -> None:
         """When channel count is unknown for all tracks, nothing is dropped."""
@@ -1188,7 +1070,7 @@ class TestChannelFiltering:
             MkvTrack(id=1, type="audio", language="eng", channels=None),
             MkvTrack(id=2, type="audio", language="eng", channels=None),
         ]
-        assert self._build(tracks) is None
+        assert _build_cmd(tracks, strip_lower_channels=True) is None
 
     def test_flag_off_does_not_filter_channels(self) -> None:
         """strip_lower_channels=False must leave lower-channel tracks untouched."""
@@ -1197,7 +1079,7 @@ class TestChannelFiltering:
             MkvTrack(id=1, type="audio", language="eng", channels=8),
             MkvTrack(id=2, type="audio", language="eng", channels=2),
         ]
-        assert self._build(tracks, strip_lower_channels=False) is None
+        assert _build_cmd(tracks, strip_lower_channels=False) is None
 
     def test_keep_audio_bypasses_channel_filtering(self) -> None:
         """--keep-audio disables channel filtering entirely."""
@@ -1206,7 +1088,7 @@ class TestChannelFiltering:
             MkvTrack(id=1, type="audio", language="eng", channels=8),
             MkvTrack(id=2, type="audio", language="eng", channels=2),
         ]
-        assert self._build(tracks, keep_audio=True) is None
+        assert _build_cmd(tracks, keep_audio=True, strip_lower_channels=True) is None
 
     def test_unknown_channel_tracks_preserved_alongside_known(self) -> None:
         """Tracks with channels=None are never dropped — only known-inferior tracks go."""
@@ -1216,7 +1098,7 @@ class TestChannelFiltering:
             MkvTrack(id=2, type="audio", language="eng", channels=None),  # unknown → keep
             MkvTrack(id=3, type="audio", language="eng", channels=2),  # inferior → drop
         ]
-        cmd = self._build(tracks)
+        cmd = _build_cmd(tracks, strip_lower_channels=True)
         assert cmd is not None
         idx = cmd.index("--audio-tracks") + 1
         kept = cmd[idx].split(",")
@@ -1230,7 +1112,7 @@ class TestChannelFiltering:
             MkvTrack(id=0, type="video", language=None),
             MkvTrack(id=1, type="audio", language="eng", channels=2),
         ]
-        assert self._build(tracks) is None
+        assert _build_cmd(tracks, strip_lower_channels=True) is None
 
     def test_runs_after_language_filter(self) -> None:
         """Channel filtering applies to tracks surviving the language filter, not all tracks."""
@@ -1240,7 +1122,7 @@ class TestChannelFiltering:
             MkvTrack(id=2, type="audio", language="eng", channels=8),  # kept
             MkvTrack(id=3, type="audio", language="eng", channels=2),  # channel-dropped
         ]
-        cmd = self._build(tracks, language=["eng"])
+        cmd = _build_cmd(tracks, language=["eng"], strip_lower_channels=True)
         assert cmd is not None
         idx = cmd.index("--audio-tracks") + 1
         kept = cmd[idx].split(",")
@@ -1256,7 +1138,7 @@ class TestChannelFiltering:
             MkvTrack(id=2, type="audio", language="eng", channels=2),
         ]
         logger = MagicMock()
-        self._build(tracks, logger=logger)
+        _build_cmd(tracks, logger=logger, strip_lower_channels=True)
         messages = [c.args[0] for c in logger.info.call_args_list if c.args]
         assert any("channel" in m.lower() for m in messages)
 
@@ -1268,25 +1150,6 @@ class TestChannelFiltering:
 
 class TestChannelFilteringMultiLanguage:
     """strip_lower_channels must not drop tracks from other language groups."""
-
-    def _build(
-        self,
-        tracks: list[MkvTrack],
-        language: list[str],
-        strip_lower_channels: bool = True,
-    ) -> list[str] | None:
-        return build_mkvmerge_command(
-            mkvmerge_path=MKVMERGE,
-            input_path=Path("/media/Movie.mkv"),
-            output_path=Path("/media/Movie.mkv.tmp"),
-            tracks=tracks,
-            language=language,
-            keep_audio=False,
-            keep_subtitles=False,
-            edit_metadata_title=False,
-            delete_metadata_title=False,
-            strip_lower_channels=strip_lower_channels,
-        )
 
     def test_lower_channel_track_in_other_language_is_not_dropped(self) -> None:
         """English 8ch + French 2ch, language=[eng,fre] → French must NOT be dropped.
@@ -1300,7 +1163,7 @@ class TestChannelFilteringMultiLanguage:
             MkvTrack(id=2, type="audio", language="fre", channels=2),
         ]
         # Both eng and fre are in language list; fre 2ch must survive
-        cmd = self._build(tracks, language=["eng", "fre"])
+        cmd = _build_cmd(tracks, language=["eng", "fre"], strip_lower_channels=True)
         # No tracks to drop → should return None (no change needed)
         assert cmd is None, "French 2ch audio was incorrectly dropped even though 'fre' is in --language list"
 
@@ -1311,7 +1174,7 @@ class TestChannelFilteringMultiLanguage:
             MkvTrack(id=1, type="audio", language="eng", channels=8),
             MkvTrack(id=2, type="audio", language="eng", channels=2),
         ]
-        cmd = self._build(tracks, language=["eng"])
+        cmd = _build_cmd(tracks, language=["eng"], strip_lower_channels=True)
         assert cmd is not None
         idx = cmd.index("--audio-tracks") + 1
         kept = cmd[idx].split(",")
@@ -1330,7 +1193,7 @@ class TestChannelFilteringMultiLanguage:
             MkvTrack(id=2, type="audio", language="fre", channels=6),
             MkvTrack(id=3, type="audio", language="fre", channels=2),
         ]
-        cmd = self._build(tracks, language=["eng", "fre"])
+        cmd = _build_cmd(tracks, language=["eng", "fre"], strip_lower_channels=True)
         assert cmd is not None
         idx = cmd.index("--audio-tracks") + 1
         kept = cmd[idx].split(",")
@@ -1346,25 +1209,6 @@ class TestChannelFilteringMultiLanguage:
 
 class TestCommentaryFallbackChannelStripInteraction:
     """Channel-strip must behave correctly when commentary fallback has fired."""
-
-    def _build(
-        self,
-        tracks: list[MkvTrack],
-        language: list[str] = ENG,
-        strip_lower_channels: bool = True,
-    ) -> list[str] | None:
-        return build_mkvmerge_command(
-            mkvmerge_path=MKVMERGE,
-            input_path=Path("/media/Movie.mkv"),
-            output_path=Path("/media/Movie.mkv.tmp"),
-            tracks=tracks,
-            language=language,
-            keep_audio=False,
-            keep_subtitles=False,
-            edit_metadata_title=False,
-            delete_metadata_title=False,
-            strip_lower_channels=strip_lower_channels,
-        )
 
     def test_commentary_fallback_then_no_channel_drop(self) -> None:
         """When commentary fallback fires (all matching audio is commentary), channel-strip
@@ -1387,7 +1231,7 @@ class TestCommentaryFallbackChannelStripInteraction:
         # With channel-strip, the 6ch track is below max(8), but since commentary
         # fallback fired, audio_keep includes ALL tracks (eng 6ch + fre 8ch).
         # The 6ch eng track is in the commentary fallback "keep all" group.
-        cmd = self._build(tracks, language=["eng"])
+        cmd = _build_cmd(tracks, language=["eng"], strip_lower_channels=True)
         # No audio should be dropped — the commentary fallback keeps everything
         # and channel-strip should still apply to the keep set
         # (this documents the current behaviour: channel-strip CAN still fire
@@ -1397,18 +1241,3 @@ class TestCommentaryFallbackChannelStripInteraction:
         # Channel-strip: max_ch=8, eng-group max=6, fre-group max=8 → no drop within group
         # (per-language group: eng has only 6ch, fre has only 8ch — no drops)
         assert cmd is None  # No changes needed (no sub drops, no metadata changes)
-
-    def test_single_language_commentary_fallback_no_channel_strip_within_group(self) -> None:
-        """Commentary fallback fires, all audio kept. Channel-strip then runs per-language.
-        With only one track per language group, channel-strip does nothing.
-        """
-        tracks = [
-            MkvTrack(id=0, type="video", language=None),
-            MkvTrack(id=1, type="audio", language="eng", name="Director Commentary", channels=2),
-            MkvTrack(id=2, type="audio", language="fre", channels=8),
-        ]
-        # Commentary fallback for eng keeps everything
-        # Channel-strip: per-language max: eng max=2 (only one track), fre max=8 (only one)
-        # → no drops within any group
-        cmd = self._build(tracks, language=["eng"])
-        assert cmd is None
