@@ -8,11 +8,51 @@ Removes (trims) unwanted audio and subtitles from matroska container format vide
 - **Smart skip** — tracks processed files in SQLite using a fingerprint (size + mtime + partial hash); only reprocesses a file if its content has changed.
 - **Commentary track safety** — if the default audio or subtitle track is a commentary track, trimarr automatically demotes it and promotes the first non-commentary track to be the new default.
 - **Multi-language support** — keep tracks in any combination of languages with a single comma-separated value, e.g. `--language eng,fre` retains both English and French.
-- **Language safety fallback** — if *no* audio (or subtitle) tracks match the target language(s), all tracks are kept to prevent accidentally silencing a file. A warning is logged.
+- **Language safety fallbacks** — if *no* audio (or subtitle) tracks match the target language(s), all tracks of that type are kept to prevent accidentally silencing a file. Additionally, if all language-matching audio tracks are commentary (e.g. Director's Commentary on a foreign-language film), audio filtering is also skipped. A warning is logged in both cases.
 - **Auto-managed mkvmerge** — downloads the mkvmerge binary from MKVToolNix GitHub releases on first run and keeps it up to date automatically (disable with `--no-update-check`).
 - **Space savings summary** — reports bytes reclaimed at the end of each run and a cumulative all-time total across all sessions.
 - **Graceful interrupt** — Ctrl+C shows a partial summary before exiting with code 130.
 - **Safe file replacement** — output is written to a temp file first, then atomically renamed over the original so a failed remux never corrupts the source.
+
+## How it works
+
+Trimarr evaluates audio and subtitle tracks independently for each file.
+
+### Audio tracks
+
+```mermaid
+flowchart TD
+    A([Start]) --> B{--keep-audio?}
+    B -- Yes --> Z([Keep all audio])
+    B -- No --> C[Filter by --language]
+    C --> D{Any track\nmatches language?}
+    D -- No --> E([⚠️ Keep all\nno language match])
+    D -- Yes --> F{All matches\nare commentary?}
+    F -- Yes --> G([⚠️ Keep all\ncommentary-only audio])
+    F -- No --> H[Drop non-matching tracks]
+    H --> I{Commentary track\nholds default flag?}
+    I -- No --> J([✅ Apply changes])
+    I -- Yes --> K[Promote non-commentary\nto default · demote commentary]
+    K --> J
+```
+
+### Subtitle tracks
+
+```mermaid
+flowchart TD
+    A([Start]) --> B{--keep-subtitles?}
+    B -- Yes --> Z([Keep all subtitles])
+    B -- No --> C[Filter by --language]
+    C --> D{Any track\nmatches language?}
+    D -- No --> E([⚠️ Keep all\nno language match])
+    D -- Yes --> H[Drop non-matching tracks]
+    H --> I{Commentary subtitle\nholds default flag?}
+    I -- No --> J([✅ Apply changes])
+    I -- Yes --> K[Promote non-commentary\nto default · demote commentary]
+    K --> J
+```
+
+> If a file needs no changes (all tracks already match, no metadata to edit), it is marked as processed in the database and skipped on all future runs — unless the file content or processing profile changes.
 
 ## Prerequisites
 
