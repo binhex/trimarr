@@ -230,7 +230,12 @@ def run(
                         # command (where placeholder output_path == input_path) would be misleading.
                         display_cmd = list(cmd)
                         display_cmd[display_cmd.index("-o") + 1] = "[tmpfile]"
-                        logger.opt(colors=True).info(f"<green>DRY-RUN</green>  | Would run: {' '.join(display_cmd)}")
+                        # Escape angle brackets in dynamic content (file paths, titles) so loguru's
+                        # colour parser does not mistake them for markup tags.
+                        cmd_str = " ".join(display_cmd).replace("<", r"\<").replace(">", r"\>")
+                        logger.opt(colors=True).info(f"<green>DRY-RUN</green>  | Would run: {cmd_str}")
+                        counts["processed"] += 1
+                        continue
                         counts["processed"] += 1
                         continue
 
