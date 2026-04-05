@@ -289,6 +289,130 @@ class TestBuildMkvmergeCommand:
 
 
 # ---------------------------------------------------------------------------
+# Audio commentary-only fallback tests
+# ---------------------------------------------------------------------------
+
+
+class TestAudioCommentaryFallback:
+    """Verify the secondary audio safety fallback: all-commentary matches → keep all."""
+
+    def _build(
+        self,
+        tracks: list[MkvTrack],
+        language: list[str] = ENG,
+        logger: MagicMock | None = None,
+    ) -> list[str] | None:
+        return build_mkvmerge_command(
+            mkvmerge_path=MKVMERGE,
+            input_path=Path("/media/Movie.mkv"),
+            output_path=Path("/media/Movie.mkv.tmp"),
+            tracks=tracks,
+            language=language,
+            keep_audio=False,
+            keep_subtitles=False,
+            edit_metadata_title=False,
+            delete_metadata_title=False,
+            logger=logger,
+        )
+
+    def test_all_matching_audio_commentary_triggers_fallback(self) -> None:
+        """When the only language-matching audio track is commentary, keep all audio."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="fre"),  # foreign main
+            MkvTrack(id=2, type="audio", language="eng", name="Director's Commentary"),
+        ]
+        logger = MagicMock()
+        result = self._build(tracks, language=["eng"], logger=logger)
+        # No audio change applied (fallback fired); no subtitle work either
+        assert result is None
+        logger.warning.assert_called_once()
+        assert "commentary" in logger.warning.call_args[0][0].lower()
+        assert "eng" in logger.warning.call_args[0][0]
+
+    def test_all_matching_audio_commentary_no_audio_filter_in_cmd(self) -> None:
+        """When fallback fires alongside subtitle changes, no --audio-tracks in the command."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="fre"),  # foreign main
+            MkvTrack(id=2, type="audio", language="eng", name="Commentary"),
+            MkvTrack(id=3, type="subtitles", language="eng"),
+            MkvTrack(id=4, type="subtitles", language="fre"),  # to be dropped
+        ]
+        logger = MagicMock()
+        cmd = self._build(tracks, language=["eng"], logger=logger)
+        # Subtitle trimming must still apply
+        assert cmd is not None
+        assert "--subtitle-tracks" in cmd
+        # Audio must NOT be filtered
+        assert "--audio-tracks" not in cmd
+        assert "--no-audio" not in cmd
+
+    def test_mix_of_commentary_and_real_does_not_trigger_fallback(self) -> None:
+        """When at least one non-commentary track matches, normal filtering applies."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="fre"),  # dropped
+            MkvTrack(id=2, type="audio", language="eng", name="Commentary"),  # kept
+            MkvTrack(id=3, type="audio", language="eng", name="Main"),  # kept
+        ]
+        logger = MagicMock()
+        cmd = self._build(tracks, language=["eng"], logger=logger)
+        assert cmd is not None
+        # French track dropped; both eng tracks kept — no fallback warning
+        assert "--audio-tracks" in cmd
+        idx = cmd.index("--audio-tracks") + 1
+        assert "1" not in cmd[idx]
+        assert "2" in cmd[idx]
+        assert "3" in cmd[idx]
+        logger.warning.assert_not_called()
+
+    def test_no_tracks_to_drop_does_not_trigger_fallback(self) -> None:
+        """If there is nothing to drop, the fallback must not fire."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name="Commentary"),
+        ]
+        logger = MagicMock()
+        result = self._build(tracks, language=["eng"], logger=logger)
+        assert result is None
+        logger.warning.assert_not_called()
+
+    def test_multi_language_commentary_only_triggers_fallback(self) -> None:
+        """Multi-language filter: fallback fires when every match across all languages is commentary."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="ger"),  # dropped
+            MkvTrack(id=2, type="audio", language="eng", name="Director Commentary"),
+            MkvTrack(id=3, type="audio", language="fre", name="Commentary 2"),
+        ]
+        logger = MagicMock()
+        result = self._build(tracks, language=["eng", "fre"], logger=logger)
+        assert result is None
+        logger.warning.assert_called_once()
+
+    def test_keep_audio_bypasses_fallback(self) -> None:
+        """keep_audio=True means no tracks are dropped so fallback is irrelevant."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="fre"),
+            MkvTrack(id=2, type="audio", language="eng", name="Commentary"),
+        ]
+        result = build_mkvmerge_command(
+            mkvmerge_path=MKVMERGE,
+            input_path=Path("/media/Movie.mkv"),
+            output_path=Path("/media/Movie.mkv.tmp"),
+            tracks=tracks,
+            language=["eng"],
+            keep_audio=True,
+            keep_subtitles=False,
+            edit_metadata_title=False,
+            delete_metadata_title=False,
+        )
+        assert result is None  # Nothing to do; no warning
+
+
+# ---------------------------------------------------------------------------
 # Commentary default-track reassignment tests
 # ---------------------------------------------------------------------------
 
@@ -343,21 +467,26 @@ class TestCommentaryDefaultTrack:
         # Non-commentary already holds default — no reassignment needed
         assert "--default-track" not in cmd
 
-    def test_audio_all_kept_commentary_warns_and_demotes_default(self) -> None:
-        """All remaining audio tracks are commentary — demote default, log warning."""
+    def test_audio_all_matching_commentary_triggers_fallback_not_default_demote(self) -> None:
+        """When all matching audio is commentary, the new fallback fires (keep all audio).
+
+        Old behaviour: filter audio, then demote the commentary default-track flag.
+        New behaviour: skip audio filtering entirely — stripping the foreign track would
+        leave only commentary audio, which is almost always wrong.
+        """
         tracks = [
             MkvTrack(id=0, type="video", language=None),
             MkvTrack(id=1, type="audio", language="eng", name="Commentary 1", default_track=True),
-            MkvTrack(id=2, type="audio", language="fre"),  # dropped
+            MkvTrack(id=2, type="audio", language="fre"),  # would have been dropped
         ]
         logger = MagicMock()
-        cmd = self._build(tracks, logger=logger)
-        assert cmd is not None
-        # Commentary default must still be unset even though there's nothing to promote
-        assert "--default-track" in cmd
-        assert "1:0" in cmd
-        logger.warning.assert_called()
+        result = self._build(tracks, logger=logger)
+        # Fallback fires → no audio change → no other changes → None
+        assert result is None
+        # Warning must mention commentary and the language
+        logger.warning.assert_called_once()
         assert "commentary" in logger.warning.call_args[0][0].lower()
+        assert "eng" in logger.warning.call_args[0][0]
 
     def test_audio_not_removing_tracks_no_flags_emitted(self) -> None:
         """No audio tracks dropped — commentary default-track logic must not fire."""

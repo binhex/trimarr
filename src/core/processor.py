@@ -183,6 +183,9 @@ def build_mkvmerge_command(
     dropped, unless the ``keep_audio`` / ``keep_subtitles`` overrides are set.
     If filtering would remove **all** tracks of a given type (i.e. no track
     matches the language), that type is left untouched and a warning is logged.
+    Audio filtering is also left untouched when every matching audio track is a
+    commentary track — stripping non-commentary audio in that case would leave
+    the viewer with only director's commentary, which is almost always wrong.
     Video tracks are always kept.
 
     Args:
@@ -231,6 +234,20 @@ def build_mkvmerge_command(
                 f"— keeping all audio to prevent silent data loss."
             )
         audio_drop.clear()
+    elif audio_drop:
+        # Secondary fallback: every audio track that *does* match the language is
+        # commentary.  Stripping the other tracks would leave the viewer with only
+        # director's commentary (typical for a foreign-language film where the
+        # preferred-language audio is the commentary track, not the main dub).
+        audio_commentary_ids = {t.id for t in tracks if t.type == "audio" and _is_commentary(t.name)}
+        if all(tid in audio_commentary_ids for tid in audio_keep):
+            if logger is not None:
+                lang_desc = f"'{language[0]}'" if len(language) == 1 else str(language)
+                logger.warning(
+                    f"All audio tracks matching language {lang_desc} in '{input_path.name}' are commentary "
+                    f"— keeping all audio to avoid commentary-only audio."
+                )
+            audio_drop.clear()
 
     # Same safety fallback for subtitles.
     if sub_drop and not sub_keep:
