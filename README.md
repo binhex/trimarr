@@ -14,46 +14,6 @@ Removes (trims) unwanted audio and subtitles from matroska container format vide
 - **Graceful interrupt** — Ctrl+C shows a partial summary before exiting with code 130.
 - **Safe file replacement** — output is written to a temp file first, then atomically renamed over the original so a failed remux never corrupts the source.
 
-## How it works
-
-Trimarr evaluates audio and subtitle tracks independently for each file.
-
-### Audio tracks
-
-```mermaid
-flowchart TD
-    A([Start]) --> B{--keep-audio?}
-    B -- Yes --> Z([Keep all audio])
-    B -- No --> C[Filter by --language]
-    C --> D{Any track\nmatches language?}
-    D -- No --> E([⚠️ Keep all\nno language match])
-    D -- Yes --> F{All matches\nare commentary?}
-    F -- Yes --> G([⚠️ Keep all\ncommentary-only audio])
-    F -- No --> H[Drop non-matching tracks]
-    H --> I{Commentary track\nholds default flag?}
-    I -- No --> J([✅ Apply changes])
-    I -- Yes --> K[Promote non-commentary\nto default · demote commentary]
-    K --> J
-```
-
-### Subtitle tracks
-
-```mermaid
-flowchart TD
-    A([Start]) --> B{--keep-subtitles?}
-    B -- Yes --> Z([Keep all subtitles])
-    B -- No --> C[Filter by --language]
-    C --> D{Any track\nmatches language?}
-    D -- No --> E([⚠️ Keep all\nno language match])
-    D -- Yes --> H[Drop non-matching tracks]
-    H --> I{Commentary subtitle\nholds default flag?}
-    I -- No --> J([✅ Apply changes])
-    I -- Yes --> K[Promote non-commentary\nto default · demote commentary]
-    K --> J
-```
-
-> If a file needs no changes (all tracks already match, no metadata to edit), it is marked as processed in the database and skipped on all future runs — unless the file content or processing profile changes.
-
 ## Prerequisites
 
 - [Python 3.12+](https://www.python.org/downloads/)
@@ -107,6 +67,46 @@ trimarr --help
 ✱ Required.
 
 > **Note:** Default paths are platform-aware. On Linux, paths respect `XDG_DATA_HOME` (if set to an absolute path, trimarr uses `$XDG_DATA_HOME/trimarr/`). On Windows, `%LOCALAPPDATA%` is used (falling back to `%APPDATA%`).
+
+## How it works
+
+Trimarr evaluates audio and subtitle tracks independently for each file.
+
+### Audio tracks
+
+```mermaid
+flowchart TD
+    A([Start]) --> B{--keep-audio?}
+    B -- Yes --> Z([Keep all audio])
+    B -- No --> C[Filter by --language]
+    C --> D{Any track\nmatches language?}
+    D -- No --> E([⚠️ Keep all\nno language match])
+    D -- Yes --> F{All matches\nare commentary?}
+    F -- Yes --> G([⚠️ Keep all\ncommentary-only audio])
+    F -- No --> H[Drop non-matching tracks]
+    H --> I{Commentary track\nholds default flag?}
+    I -- No --> J([✅ Apply changes])
+    I -- Yes --> K[Promote non-commentary\nto default · demote commentary]
+    K --> J
+```
+
+### Subtitle tracks
+
+```mermaid
+flowchart TD
+    A([Start]) --> B{--keep-subtitles?}
+    B -- Yes --> Z([Keep all subtitles])
+    B -- No --> C[Filter by --language]
+    C --> D{Any track\nmatches language?}
+    D -- No --> E([⚠️ Keep all\nno language match])
+    D -- Yes --> H[Drop non-matching tracks]
+    H --> I{Commentary subtitle\nholds default flag?}
+    I -- No --> J([✅ Apply changes])
+    I -- Yes --> K[Promote non-commentary\nto default · demote commentary]
+    K --> J
+```
+
+> If a file needs no changes (all tracks already match, no metadata to edit), it is marked as processed in the database and skipped on all future runs — unless the file content or processing profile changes.
 
 ## Development
 
