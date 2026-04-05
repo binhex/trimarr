@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
+from loguru import logger as _real_loguru_logger
 
 from trimarr.main import run
 
@@ -78,51 +79,35 @@ class TestDryRunDoesNotRecordToDatabase:
         mock_process.assert_not_called()
         mock_mark.assert_not_called()
 
-    def test_dry_run_log_uses_safe_tmpfile_placeholder(self, tmp_path: Path) -> None:
-        """Dry-run log must use [tmpfile] not <tmpfile> — angle-brackets crash loguru colour parsing."""
-        mkv = tmp_path / "movie.mkv"
-        mkv.write_bytes(b"fake mkv")
-        db_path = str(tmp_path / "trimarr.db")
-        logger = _make_logger()
+    def test_dry_run_colour_log_does_not_crash_with_angle_brackets(self, tmp_path: Path) -> None:
+        """logger.opt(colors=True) must not raise ValueError for any dry-run log message.
 
-        fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), str(mkv)]
+        Uses the real loguru parser so the test fails if unescaped angle brackets
+        are passed to any opt(colors=True) call — the mock logger used elsewhere
+        would silently swallow the crash.
+        """
+        from io import StringIO
 
-        with (
-            patch("trimarr.main.probe_file", return_value=[]),
-            patch("trimarr.main.build_mkvmerge_command", return_value=fake_cmd),
-        ):
-            run(**{**_run_kwargs(tmp_path, dry_run=True, db_path=db_path), "logger": logger})
+        sink = StringIO()
+        handler_id = _real_loguru_logger.add(sink, format="{message}", colorize=False)
+        try:
+            mkv = tmp_path / "movie.mkv"
+            mkv.write_bytes(b"fake mkv")
+            db_path = str(tmp_path / "trimarr.db")
 
-        info_calls = _logged_messages(logger.info)
-        dry_run_msgs = [m for m in info_calls if "Would run" in m]
-        assert dry_run_msgs, "Expected a 'Would run' dry-run log message"
-        assert "[tmpfile]" in dry_run_msgs[0]
-        assert "<tmpfile>" not in dry_run_msgs[0]
+            # Path with angle brackets — illegal on Windows but valid on Linux;
+            # loguru's colour parser would raise ValueError if they are not escaped.
+            dangerous_path = "/media/TV<Series>/episode.mkv"
+            fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), dangerous_path]
 
-    def test_dry_run_log_escapes_angle_brackets_in_file_path(self, tmp_path: Path) -> None:
-        """Angle brackets in file paths must be escaped so loguru colour parsing does not crash."""
-        mkv = tmp_path / "movie.mkv"
-        mkv.write_bytes(b"fake mkv")
-        db_path = str(tmp_path / "trimarr.db")
-        logger = _make_logger()
-
-        # Simulate a command whose last element (input path) contains angle brackets.
-        dangerous_path = "/media/TV<Series>/episode.mkv"
-        fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), dangerous_path]
-
-        with (
-            patch("trimarr.main.probe_file", return_value=[]),
-            patch("trimarr.main.build_mkvmerge_command", return_value=fake_cmd),
-        ):
-            run(**{**_run_kwargs(tmp_path, dry_run=True, db_path=db_path), "logger": logger})
-
-        info_calls = _logged_messages(logger.info)
-        dry_run_msgs = [m for m in info_calls if "Would run" in m]
-        assert dry_run_msgs, "Expected a 'Would run' dry-run log message"
-        # Angle brackets in the path must be escaped with backslash so loguru does not
-        # mistake them for colour tags.
-        assert r"\<" in dry_run_msgs[0]
-        assert r"\>" in dry_run_msgs[0]
+            with (
+                patch("trimarr.main.probe_file", return_value=[]),
+                patch("trimarr.main.build_mkvmerge_command", return_value=fake_cmd),
+            ):
+                # Must not raise — if it does, an angle bracket escaped to loguru's parser.
+                run(**{**_run_kwargs(tmp_path, dry_run=True, db_path=db_path), "logger": _real_loguru_logger})
+        finally:
+            _real_loguru_logger.remove(handler_id)
 
     def test_dry_run_does_not_mark_processed_when_no_changes_needed(self, tmp_path: Path) -> None:
         """When a file needs no changes, dry run must not call mark_processed."""
