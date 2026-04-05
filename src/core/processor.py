@@ -271,22 +271,36 @@ def build_mkvmerge_command(
     # Channel-count filtering: run AFTER all language/safety fallbacks so we
     # only evaluate tracks that have already survived the language filter.
     # Skipped when keep_audio is True or the flag is off.
+    # Filtering is applied per-language-group so that a track from one language
+    # is never dropped because a different language has a higher channel count.
     if strip_lower_channels and not keep_audio and audio_keep:
         keep_set = set(audio_keep)
         surviving = [t for t in tracks if t.type == "audio" and t.id in keep_set]
-        known_channels = [t.channels for t in surviving if t.channels is not None]
-        if known_channels:
-            max_ch = max(known_channels)
-            # Only act when there is meaningful variation to remove.
-            if any(ch < max_ch for ch in known_channels):
-                channel_drop = [t.id for t in surviving if t.channels is not None and t.channels < max_ch]
-                for tid in channel_drop:
-                    audio_keep.remove(tid)
-                    audio_drop.append(tid)
-                if logger is not None:
-                    descs = ", ".join(_fmt_track(t) for t in surviving if t.id in set(channel_drop))
-                    logger.info(f"  Dropping {len(channel_drop)} audio track(s) with fewer than {max_ch} channels.")
-                    logger.debug(f"  Dropping lower-channel audio track(s): {descs}")
+        # Group surviving tracks by language (None treated as its own group).
+        lang_groups: dict[str | None, list[MkvTrack]] = {}
+        for t in surviving:
+            lang_groups.setdefault(t.language, []).append(t)
+
+        channel_drop: list[int] = []
+        for group_tracks in lang_groups.values():
+            known = [t.channels for t in group_tracks if t.channels is not None]
+            if not known:
+                continue
+            max_ch = max(known)
+            if any(ch < max_ch for ch in known):
+                channel_drop.extend(t.id for t in group_tracks if t.channels is not None and t.channels < max_ch)
+
+        if channel_drop:
+            channel_drop_set = set(channel_drop)
+            for tid in channel_drop:
+                audio_keep.remove(tid)
+                audio_drop.append(tid)
+            if logger is not None:
+                descs = ", ".join(_fmt_track(t) for t in surviving if t.id in channel_drop_set)
+                logger.info(
+                    f"  Dropping {len(channel_drop)} audio track(s) with fewer channels than the per-language maximum."
+                )
+                logger.debug(f"  Dropping lower-channel audio track(s): {descs}")
 
     needs_audio_change = bool(audio_drop)
     needs_sub_change = bool(sub_drop)

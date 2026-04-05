@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -110,9 +111,12 @@ def _print_summary(
             logger.info(
                 f"Space saved this session: {_fmt_bytes(session_bytes_saved)} ({counts['processed']} file(s) remuxed)."
             )
-        with Database(database_path) as db_summary:
-            all_time_saved = db_summary.total_bytes_saved()
-        logger.info(f"Space saved (all sessions): {_fmt_bytes(all_time_saved)}.")
+        try:
+            with Database(database_path) as db_summary:
+                all_time_saved = db_summary.total_bytes_saved()
+            logger.info(f"Space saved (all sessions): {_fmt_bytes(all_time_saved)}.")
+        except sqlite3.Error as exc:
+            logger.warning(f"Could not retrieve all-time savings from database: {exc}")
 
 
 def run(
@@ -245,8 +249,6 @@ def run(
                         logger.opt(colors=True).info(f"<green>DRY-RUN</green>  | Would run: {cmd_str}")
                         counts["processed"] += 1
                         continue
-                        counts["processed"] += 1
-                        continue
 
                     # Process the file
                     size_before = file_path.stat().st_size
@@ -268,6 +270,9 @@ def run(
 
                 except OSError as exc:
                     logger.error(f"File system error processing '{file_path}': {exc}")
+                    counts["failed"] += 1
+                except sqlite3.Error as exc:
+                    logger.error(f"Database error processing '{file_path}': {exc}")
                     counts["failed"] += 1
 
     except KeyboardInterrupt:

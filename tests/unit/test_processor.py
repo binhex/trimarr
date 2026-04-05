@@ -1259,3 +1259,156 @@ class TestChannelFiltering:
         self._build(tracks, logger=logger)
         messages = [c.args[0] for c in logger.info.call_args_list if c.args]
         assert any("channel" in m.lower() for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# Multi-language + channel strip (I1 regression)
+# ---------------------------------------------------------------------------
+
+
+class TestChannelFilteringMultiLanguage:
+    """strip_lower_channels must not drop tracks from other language groups."""
+
+    def _build(
+        self,
+        tracks: list[MkvTrack],
+        language: list[str],
+        strip_lower_channels: bool = True,
+    ) -> list[str] | None:
+        return build_mkvmerge_command(
+            mkvmerge_path=MKVMERGE,
+            input_path=Path("/media/Movie.mkv"),
+            output_path=Path("/media/Movie.mkv.tmp"),
+            tracks=tracks,
+            language=language,
+            keep_audio=False,
+            keep_subtitles=False,
+            edit_metadata_title=False,
+            delete_metadata_title=False,
+            strip_lower_channels=strip_lower_channels,
+        )
+
+    def test_lower_channel_track_in_other_language_is_not_dropped(self) -> None:
+        """English 8ch + French 2ch, language=[eng,fre] → French must NOT be dropped.
+
+        The French 2ch track was explicitly requested via --language fre; dropping
+        it because English happens to have more channels is wrong.
+        """
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", channels=8),
+            MkvTrack(id=2, type="audio", language="fre", channels=2),
+        ]
+        # Both eng and fre are in language list; fre 2ch must survive
+        cmd = self._build(tracks, language=["eng", "fre"])
+        # No tracks to drop → should return None (no change needed)
+        assert cmd is None, "French 2ch audio was incorrectly dropped even though 'fre' is in --language list"
+
+    def test_lower_channel_within_same_language_is_still_dropped(self) -> None:
+        """English 8ch + English 2ch, language=[eng] → 2ch track dropped."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", channels=8),
+            MkvTrack(id=2, type="audio", language="eng", channels=2),
+        ]
+        cmd = self._build(tracks, language=["eng"])
+        assert cmd is not None
+        idx = cmd.index("--audio-tracks") + 1
+        kept = cmd[idx].split(",")
+        assert "1" in kept
+        assert "2" not in kept
+
+    def test_each_language_group_keeps_its_own_max_channel_track(self) -> None:
+        """English 8ch + French 6ch + French 2ch, language=[eng,fre].
+
+        Within the French group the 2ch track should be dropped; English 8ch
+        must not affect French's own max (6ch).
+        """
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", channels=8),
+            MkvTrack(id=2, type="audio", language="fre", channels=6),
+            MkvTrack(id=3, type="audio", language="fre", channels=2),
+        ]
+        cmd = self._build(tracks, language=["eng", "fre"])
+        assert cmd is not None
+        idx = cmd.index("--audio-tracks") + 1
+        kept = cmd[idx].split(",")
+        assert "1" in kept  # eng 8ch → kept
+        assert "2" in kept  # fre 6ch (max for fre group) → kept
+        assert "3" not in kept  # fre 2ch (below fre max) → dropped
+
+
+# ---------------------------------------------------------------------------
+# Commentary fallback + channel strip interaction (I6)
+# ---------------------------------------------------------------------------
+
+
+class TestCommentaryFallbackChannelStripInteraction:
+    """Channel-strip must behave correctly when commentary fallback has fired."""
+
+    def _build(
+        self,
+        tracks: list[MkvTrack],
+        language: list[str] = ENG,
+        strip_lower_channels: bool = True,
+    ) -> list[str] | None:
+        return build_mkvmerge_command(
+            mkvmerge_path=MKVMERGE,
+            input_path=Path("/media/Movie.mkv"),
+            output_path=Path("/media/Movie.mkv.tmp"),
+            tracks=tracks,
+            language=language,
+            keep_audio=False,
+            keep_subtitles=False,
+            edit_metadata_title=False,
+            delete_metadata_title=False,
+            strip_lower_channels=strip_lower_channels,
+        )
+
+    def test_commentary_fallback_then_no_channel_drop(self) -> None:
+        """When commentary fallback fires (all matching audio is commentary), channel-strip
+        must not then erroneously drop the kept tracks based on channel count.
+
+        Scenario: eng commentary 6ch + fre main 8ch, language=[eng]
+          - Language filter: eng commentary (6ch) kept, fre main (8ch) dropped
+          - Commentary fallback: ALL matching eng tracks are commentary → audio_drop cleared,
+            both tracks kept
+          - Channel-strip: now all tracks are kept; max(8,6)=8, so 6ch could be dropped
+          - Expected: channel-strip should NOT drop the 6ch eng commentary track because
+            the commentary fallback was already triggered to preserve user audio.
+        """
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name="Commentary", channels=6),
+            MkvTrack(id=2, type="audio", language="fre", channels=8),
+        ]
+        # With commentary fallback firing, audio_drop is cleared → all audio kept
+        # With channel-strip, the 6ch track is below max(8), but since commentary
+        # fallback fired, audio_keep includes ALL tracks (eng 6ch + fre 8ch).
+        # The 6ch eng track is in the commentary fallback "keep all" group.
+        cmd = self._build(tracks, language=["eng"])
+        # No audio should be dropped — the commentary fallback keeps everything
+        # and channel-strip should still apply to the keep set
+        # (this documents the current behaviour: channel-strip CAN still fire
+        # on the fallback-restored set, which is by design)
+        # This test simply confirms no crash and the result is deterministic.
+        # After fallback: audio_keep = [1(eng,6ch), 2(fre,8ch)] — both retained
+        # Channel-strip: max_ch=8, eng-group max=6, fre-group max=8 → no drop within group
+        # (per-language group: eng has only 6ch, fre has only 8ch — no drops)
+        assert cmd is None  # No changes needed (no sub drops, no metadata changes)
+
+    def test_single_language_commentary_fallback_no_channel_strip_within_group(self) -> None:
+        """Commentary fallback fires, all audio kept. Channel-strip then runs per-language.
+        With only one track per language group, channel-strip does nothing.
+        """
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name="Director Commentary", channels=2),
+            MkvTrack(id=2, type="audio", language="fre", channels=8),
+        ]
+        # Commentary fallback for eng keeps everything
+        # Channel-strip: per-language max: eng max=2 (only one track), fre max=8 (only one)
+        # → no drops within any group
+        cmd = self._build(tracks, language=["eng"])
+        assert cmd is None
