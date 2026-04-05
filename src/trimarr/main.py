@@ -260,7 +260,7 @@ def run(
                         logger=logger,
                     )
                     if success:
-                        bytes_saved = size_before - file_path.stat().st_size
+                        bytes_saved = max(0, size_before - file_path.stat().st_size)
                         session_bytes_saved += bytes_saved
                         db.mark_processed(file_path, profile_hash=profile_hash, bytes_saved=bytes_saved)
                         logger.success(f"Processed: {file_path.name}")

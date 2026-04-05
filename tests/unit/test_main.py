@@ -182,6 +182,29 @@ class TestDryRunDoesNotRecordToDatabase:
 
         mock_mark.assert_called_once_with(mkv, profile_hash=ANY, bytes_saved=1500)
 
+    def test_bytes_saved_clamped_to_zero_when_output_larger(self, tmp_path: Path) -> None:
+        """I1: bytes_saved must never be negative; if remux produces a larger file,
+        bytes_saved should be clamped to 0 rather than storing a negative value."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"A" * 500)  # 500-byte original
+        db_path = str(tmp_path / "trimarr.db")
+        fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), str(mkv)]
+
+        def fake_process_file(*_args: object, file_path: object = None, **_kwargs: object) -> bool:
+            assert hasattr(file_path, "write_bytes")
+            file_path.write_bytes(b"B" * 2000)  # output larger than input  # noqa: PGH003
+            return True
+
+        with (
+            patch("trimarr.main.probe_file", return_value=[]),
+            patch("trimarr.main.build_mkvmerge_command", return_value=fake_cmd),
+            patch("trimarr.main.process_file", side_effect=fake_process_file),
+            patch("core.database.Database.mark_processed") as mock_mark,
+        ):
+            run(**_run_kwargs(tmp_path, dry_run=False, db_path=db_path))
+
+        mock_mark.assert_called_once_with(mkv, profile_hash=ANY, bytes_saved=0)
+
 
 # ---------------------------------------------------------------------------
 # KeyboardInterrupt handling

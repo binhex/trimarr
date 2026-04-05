@@ -186,6 +186,35 @@ class TestProbeFile:
         ):
             probe_file(MKVMERGE, mkv)
 
+    def test_language_ietf_two_char_normalised_to_iso_639_2(self, tmp_path: Path) -> None:
+        """I4: When 'language' is absent but 'language_ietf' is a 2-char code, it must be
+        normalised to ISO 639-2 so language filters work correctly (e.g. 'en' → 'eng')."""
+        raw_tracks = [
+            {"id": 0, "type": "audio", "properties": {"language_ietf": "en"}},
+            {"id": 1, "type": "audio", "properties": {"language_ietf": "fr"}},
+        ]
+        mkv = tmp_path / "movie.mkv"
+        mkv.touch()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=self._mkvmerge_json(raw_tracks), stderr="")
+            result = probe_file(MKVMERGE, mkv)
+        assert result[0].language == "eng"
+        assert result[1].language == "fre"
+
+    def test_language_ietf_bcp47_with_subtag_normalised(self, tmp_path: Path) -> None:
+        """I4: BCP-47 tags with subtags (e.g. 'en-US', 'pt-BR') must be normalised to ISO 639-2."""
+        raw_tracks = [
+            {"id": 0, "type": "audio", "properties": {"language_ietf": "en-US"}},
+            {"id": 1, "type": "audio", "properties": {"language_ietf": "pt-BR"}},
+        ]
+        mkv = tmp_path / "movie.mkv"
+        mkv.touch()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=self._mkvmerge_json(raw_tracks), stderr="")
+            result = probe_file(MKVMERGE, mkv)
+        assert result[0].language == "eng"
+        assert result[1].language == "por"
+
 
 # ---------------------------------------------------------------------------
 # build_mkvmerge_command()
@@ -1241,3 +1270,32 @@ class TestCommentaryFallbackChannelStripInteraction:
         # Channel-strip: max_ch=8, eng-group max=6, fre-group max=8 → no drop within group
         # (per-language group: eng has only 6ch, fre has only 8ch — no drops)
         assert cmd is None  # No changes needed (no sub drops, no metadata changes)
+
+    def test_commentary_fallback_with_channel_strip_preserves_foreign_track(self) -> None:
+        """C1 regression: two eng commentary tracks (8ch + 2ch) plus one fre main track.
+
+        When the commentary fallback fires it must expand audio_keep to ALL audio
+        tracks (not just the language-matching commentary ones).  Channel-strip then
+        runs on the full set and drops only the lower-channel duplicate within the
+        eng group; the fre main track must survive.
+
+        Scenario: eng_commentary_8ch + eng_commentary_2ch + fre_main_6ch, language=[eng]
+          Language filter  → audio_keep=[1,2], audio_drop=[3]
+          Fallback fires   → audio_keep=[1,2,3], audio_drop=[]
+          Channel-strip    → eng group max=8, id=2 dropped; fre group one track, no drop
+          Expected cmd     → --audio-tracks 1,3  (fre NOT silently excluded)
+        """
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name="Commentary", channels=8),
+            MkvTrack(id=2, type="audio", language="eng", name="Commentary", channels=2),
+            MkvTrack(id=3, type="audio", language="fre", channels=6),
+        ]
+        cmd = _build_cmd(tracks, language=["eng"], strip_lower_channels=True)
+        assert cmd is not None
+        assert "--audio-tracks" in cmd
+        idx = cmd.index("--audio-tracks") + 1
+        kept = cmd[idx].split(",")
+        assert "1" in kept  # eng 8ch commentary — kept (fallback + channel-strip max)
+        assert "3" in kept  # fre 6ch main — kept (fallback expanded audio_keep)
+        assert "2" not in kept  # eng 2ch commentary — dropped by channel-strip

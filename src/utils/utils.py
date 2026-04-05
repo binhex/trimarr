@@ -230,7 +230,10 @@ def download_mkvmerge(dest_dir: str | Path | None = None) -> Path:
     with tempfile.TemporaryDirectory() as tmp:
         archive_path = Path(tmp) / asset_name
 
-        response = requests.get(download_url, stream=True, timeout=120)
+        try:
+            response = requests.get(download_url, stream=True, timeout=120)
+        except requests.exceptions.RequestException as exc:
+            raise RuntimeError(f"Failed to download mkvmerge from '{download_url}': {exc}") from exc
         response.raise_for_status()
 
         with archive_path.open("wb") as f:

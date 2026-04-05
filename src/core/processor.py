@@ -37,6 +37,8 @@ class MkvTrack:
             when the track has no name.
         default_track: Whether this track is flagged as the default for its
             type in the source container.
+        channels: Number of audio channels, or *None* for non-audio tracks or
+            when the value is absent from the container metadata.
     """
 
     id: int
@@ -50,6 +52,71 @@ class MkvTrack:
 # Matches track names containing "commentary" (any case, with or without
 # surrounding words/numerics, e.g. "Commentary 1", "Director Commentary").
 _COMMENTARY_RE: re.Pattern[str] = re.compile(r"commentary", re.IGNORECASE)
+
+# Map ISO 639-1 (2-char) codes to ISO 639-2/B (3-char) codes so that
+# mkvmerge files using BCP-47 ``language_ietf`` tags (e.g. "en", "en-US")
+# are matched correctly against user-supplied ISO 639-2 language arguments.
+_ISO_639_1_TO_2: dict[str, str] = {
+    "af": "afr",
+    "sq": "alb",
+    "ar": "ara",
+    "hy": "arm",
+    "az": "aze",
+    "be": "bel",
+    "bs": "bos",
+    "bg": "bul",
+    "ca": "cat",
+    "zh": "chi",
+    "hr": "hrv",
+    "cs": "cze",
+    "da": "dan",
+    "nl": "dut",
+    "en": "eng",
+    "et": "est",
+    "fi": "fin",
+    "fr": "fre",
+    "gl": "glg",
+    "ka": "geo",
+    "de": "ger",
+    "el": "gre",
+    "he": "heb",
+    "hi": "hin",
+    "hu": "hun",
+    "is": "ice",
+    "id": "ind",
+    "it": "ita",
+    "ja": "jpn",
+    "kn": "kan",
+    "kk": "kaz",
+    "ko": "kor",
+    "lv": "lav",
+    "lt": "lit",
+    "mk": "mac",
+    "ms": "may",
+    "ml": "mal",
+    "mt": "mlt",
+    "nb": "nor",
+    "fa": "per",
+    "pl": "pol",
+    "pt": "por",
+    "ro": "rum",
+    "ru": "rus",
+    "sr": "srp",
+    "sk": "slo",
+    "sl": "slv",
+    "es": "spa",
+    "sw": "swa",
+    "sv": "swe",
+    "tl": "tgl",
+    "ta": "tam",
+    "te": "tel",
+    "th": "tha",
+    "tr": "tur",
+    "uk": "ukr",
+    "ur": "urd",
+    "vi": "vie",
+    "cy": "wel",
+}
 
 # Minimum acceptable output-to-input size ratio.  A legitimate remux strips
 # audio/subtitle tracks but the video stream (the bulk of any MKV) is always
@@ -151,6 +218,13 @@ def probe_file(mkvmerge_path: str, file_path: Path) -> list[MkvTrack]:
         # callers can treat it the same as missing language information.
         if lang == "und":
             lang = None
+        # Normalise BCP-47 / ISO 639-1 tags to ISO 639-2 so that files using
+        # "language_ietf" (e.g. "en", "en-US") match user-supplied codes like
+        # "eng".  3-char codes are already ISO 639-2 and pass through unchanged.
+        if lang:
+            base = lang.split("-")[0]
+            if len(base) == 2:
+                lang = _ISO_639_1_TO_2.get(base, base)
         tracks.append(
             MkvTrack(
                 id=raw["id"],
@@ -257,6 +331,13 @@ def build_mkvmerge_command(
                     f"All audio tracks matching language {lang_desc} in '{input_path.name}' are commentary "
                     f"— keeping all audio to avoid commentary-only audio."
                 )
+            # Expand audio_keep to ALL audio tracks (not just language-matching
+            # ones) so that any subsequent channel-strip pass sees the full set.
+            # Merely clearing audio_drop is insufficient: foreign tracks that
+            # were already in audio_drop would not appear in audio_keep, so the
+            # final --audio-tracks argument would silently exclude them.
+            all_audio_ids = [t.id for t in tracks if t.type == "audio"]
+            audio_keep[:] = all_audio_ids
             audio_drop.clear()
 
     # Same safety fallback for subtitles.
@@ -403,8 +484,9 @@ def process_file(
 
     The workflow is:
     1. Run mkvmerge to a temporary file in the same directory.
-    2. Validate the output (non-zero size; exit code 0 only — exit code 1 from
-       mkvmerge is treated as a warning/failure per project policy).
+    2. Validate the output (non-zero size; exit codes 0 and 1 are both
+       accepted — 0 means success, 1 means "completed with warnings" and
+       the output is still considered valid; anything else is a failure).
     3. On success: rename original to ``<path>.bak`` (unless *no_backup*) then
        rename temp to original.
     4. On any failure: remove the temp file and leave the original untouched.
