@@ -5,14 +5,23 @@ Removes (trims) unwanted audio and subtitles from matroska container format vide
 ## Features
 
 - **Recursive scan** — finds all `.mkv` files under the specified directory tree.
-- **Smart skip** — tracks processed files in SQLite using a fingerprint (size + mtime + partial hash); only reprocesses a file if its content has changed.
-- **Commentary track safety** — if the default audio or subtitle track is a commentary track, trimarr automatically demotes it and promotes the first non-commentary track to be the new default.
-- **Multi-language support** — keep tracks in any combination of languages with a single comma-separated value, e.g. `--language eng,fre` retains both English and French.
-- **Language safety fallbacks** — if *no* audio (or subtitle) tracks match the target language(s), all tracks of that type are kept to prevent accidentally silencing a file. Additionally, if all language-matching audio tracks are commentary (e.g. Director's Commentary on a foreign-language film), audio filtering is also skipped. A warning is logged in both cases.
-- **Auto-managed mkvmerge** — downloads the mkvmerge binary from MKVToolNix GitHub releases on first run and keeps it up to date automatically (disable with `--no-update-check`).
-- **Space savings summary** — reports bytes reclaimed at the end of each run and a cumulative all-time total across all sessions.
+- **Smart skip** — tracks processed files in SQLite using a fingerprint (size + mtime + partial
+  hash); only reprocesses a file if its content has changed.
+- **Commentary track safety** — if the default audio or subtitle track is a commentary track,
+  trimarr automatically demotes it and promotes the first non-commentary track to be the new default.
+- **Multi-language support** — keep tracks in any combination of languages with a single
+  comma-separated value, e.g. `--language eng,fre` retains both English and French.
+- **Language safety fallbacks** — if *no* audio (or subtitle) tracks match the target language(s),
+  all tracks of that type are kept to prevent accidentally silencing a file. Additionally, if all
+  language-matching audio tracks are commentary (e.g. Director's Commentary on a foreign-language
+  film), audio filtering is also skipped. A warning is logged in both cases.
+- **Auto-managed mkvmerge** — downloads the mkvmerge binary from MKVToolNix GitHub releases on
+  first run and keeps it up to date automatically (disable with `--no-update-check`).
+- **Space savings summary** — reports bytes reclaimed at the end of each run and a cumulative
+  all-time total across all sessions.
 - **Graceful interrupt** — Ctrl+C shows a partial summary before exiting with code 130.
-- **Safe file replacement** — output is written to a temp file first, then atomically renamed over the original so a failed remux never corrupts the source.
+- **Safe file replacement** — output is written to a temp file first, then atomically renamed over
+  the original so a failed remux never corrupts the source.
 
 ## Prerequisites
 
@@ -67,7 +76,9 @@ trimarr --help
 
 ✱ Required.
 
-> **Note:** Default paths are platform-aware. On Linux, paths respect `XDG_DATA_HOME` (if set to an absolute path, trimarr uses `$XDG_DATA_HOME/trimarr/`). On Windows, `%LOCALAPPDATA%` is used (falling back to `%APPDATA%`).
+> **Note:** Default paths are platform-aware. On Linux, paths respect `XDG_DATA_HOME` (if set to
+> an absolute path, trimarr uses `$XDG_DATA_HOME/trimarr/`). On Windows, `%LOCALAPPDATA%` is used
+> (falling back to `%APPDATA%`).
 
 ## How it works
 
@@ -112,7 +123,9 @@ flowchart TD
     K --> J
 ```
 
-> If a file needs no changes (all tracks already match, no metadata to edit), it is marked as processed in the database and skipped on all future runs — unless the file content or processing profile changes.
+> If a file needs no changes (all tracks already match, no metadata to edit), it is marked as
+> processed in the database and skipped on all future runs — unless the file content or processing
+> profile changes.
 
 ## Development
 
