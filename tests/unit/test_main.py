@@ -78,6 +78,27 @@ class TestDryRunDoesNotRecordToDatabase:
         mock_process.assert_not_called()
         mock_mark.assert_not_called()
 
+    def test_dry_run_log_uses_safe_tmpfile_placeholder(self, tmp_path: Path) -> None:
+        """Dry-run log must use [tmpfile] not <tmpfile> — angle-brackets crash loguru colour parsing."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        db_path = str(tmp_path / "trimarr.db")
+        logger = _make_logger()
+
+        fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), str(mkv)]
+
+        with (
+            patch("trimarr.main.probe_file", return_value=[]),
+            patch("trimarr.main.build_mkvmerge_command", return_value=fake_cmd),
+        ):
+            run(**{**_run_kwargs(tmp_path, dry_run=True, db_path=db_path), "logger": logger})
+
+        info_calls = _logged_messages(logger.info)
+        dry_run_msgs = [m for m in info_calls if "Would run" in m]
+        assert dry_run_msgs, "Expected a 'Would run' dry-run log message"
+        assert "[tmpfile]" in dry_run_msgs[0]
+        assert "<tmpfile>" not in dry_run_msgs[0]
+
     def test_dry_run_does_not_mark_processed_when_no_changes_needed(self, tmp_path: Path) -> None:
         """When a file needs no changes, dry run must not call mark_processed."""
         mkv = tmp_path / "movie.mkv"
