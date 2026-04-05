@@ -99,6 +99,31 @@ class TestDryRunDoesNotRecordToDatabase:
         assert "[tmpfile]" in dry_run_msgs[0]
         assert "<tmpfile>" not in dry_run_msgs[0]
 
+    def test_dry_run_log_escapes_angle_brackets_in_file_path(self, tmp_path: Path) -> None:
+        """Angle brackets in file paths must be escaped so loguru colour parsing does not crash."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        db_path = str(tmp_path / "trimarr.db")
+        logger = _make_logger()
+
+        # Simulate a command whose last element (input path) contains angle brackets.
+        dangerous_path = "/media/TV<Series>/episode.mkv"
+        fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), dangerous_path]
+
+        with (
+            patch("trimarr.main.probe_file", return_value=[]),
+            patch("trimarr.main.build_mkvmerge_command", return_value=fake_cmd),
+        ):
+            run(**{**_run_kwargs(tmp_path, dry_run=True, db_path=db_path), "logger": logger})
+
+        info_calls = _logged_messages(logger.info)
+        dry_run_msgs = [m for m in info_calls if "Would run" in m]
+        assert dry_run_msgs, "Expected a 'Would run' dry-run log message"
+        # Angle brackets in the path must be escaped with backslash so loguru does not
+        # mistake them for colour tags.
+        assert r"\<" in dry_run_msgs[0]
+        assert r"\>" in dry_run_msgs[0]
+
     def test_dry_run_does_not_mark_processed_when_no_changes_needed(self, tmp_path: Path) -> None:
         """When a file needs no changes, dry run must not call mark_processed."""
         mkv = tmp_path / "movie.mkv"
