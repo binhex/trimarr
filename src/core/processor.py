@@ -120,9 +120,10 @@ _ISO_639_1_TO_2: dict[str, str] = {
 
 # Minimum acceptable output-to-input size ratio.  A legitimate remux strips
 # audio/subtitle tracks but the video stream (the bulk of any MKV) is always
-# retained, so the output should never be less than 0.1 % of the source.
-# This guards against silently accepting a truncated/corrupt mkvmerge write.
-_MIN_OUTPUT_RATIO: float = 0.001
+# retained — typically 90 %+ of the source size.  50 % is a very conservative
+# lower bound that catches catastrophically truncated or partial writes while
+# still allowing files with unusually large audio/subtitle payloads.
+_MIN_OUTPUT_RATIO: float = 0.5
 
 
 def _is_commentary(name: str | None) -> bool:
@@ -554,6 +555,24 @@ def process_file(
             )
             return False
 
+        # Structural validation: probe the output with mkvmerge -J to confirm
+        # it is a well-formed MKV container.  This catches partial writes and
+        # internally inconsistent files that pass the size check but are
+        # unplayable (e.g. due to disk-full mid-write on a FUSE/network share).
+        probe = subprocess.run(
+            [mkvmerge_path, "-J", str(tmp_path)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if probe.returncode != 0:
+            logger.error(
+                f"mkvmerge output for '{file_path}' failed structural validation "
+                f"(mkvmerge -J exit {probe.returncode}); rejecting to avoid data loss.\n"
+                f"{probe.stderr.strip() or probe.stdout.strip()}"
+            )
+            return False
+
         # Replace original atomically.
         # For backup mode: rename original → .bak, then atomically replace with temp.
         # If the second step fails, roll back the backup rename.
@@ -593,4 +612,7 @@ def process_file(
         return False
     finally:
         if tmp_path is not None and tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError as cleanup_exc:
+                logger.warning(f"Could not remove temp file '{tmp_path}': {cleanup_exc}")
