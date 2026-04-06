@@ -120,9 +120,52 @@ _ISO_639_1_TO_2: dict[str, str] = {
 
 # Minimum acceptable output-to-input size ratio.  A legitimate remux strips
 # audio/subtitle tracks but the video stream (the bulk of any MKV) is always
-# retained, so the output should never be less than 0.1 % of the source.
-# This guards against silently accepting a truncated/corrupt mkvmerge write.
-_MIN_OUTPUT_RATIO: float = 0.001
+# retained — typically 90 %+ of the source size.  50 % is a very conservative
+# lower bound that catches catastrophically truncated or partial writes while
+# still allowing files with unusually large audio/subtitle payloads.
+_MIN_OUTPUT_RATIO: float = 0.5
+
+
+class CorruptOutputError(BaseException):
+    """Raised when the mkvmerge output fails structural (``mkvmerge -J``) validation.
+
+    Inherits from :class:`BaseException` rather than :class:`Exception` so that
+    it bypasses the broad ``except Exception`` safety-net inside
+    :func:`process_file` and propagates directly to the orchestrating caller,
+    halting all further processing immediately.
+
+    The temporary output file is *preserved on disk* at :attr:`tmp_path` so
+    the operator can inspect it to diagnose the root cause.
+
+    Attributes:
+        file_path: Source MKV file that was being processed.
+        tmp_path: Temporary output file retained on disk for inspection.
+        probe_returncode: Exit code returned by ``mkvmerge -J``.
+        probe_output: Combined stderr / stdout from the ``mkvmerge -J`` probe.
+        output_size: Size in bytes of the temporary output file.
+        input_size: Size in bytes of the source file.
+        mkvmerge_path: Filesystem path to the mkvmerge binary that was used.
+    """
+
+    def __init__(
+        self,
+        file_path: Path,
+        tmp_path: Path,
+        probe_returncode: int,
+        probe_output: str,
+        output_size: int,
+        input_size: int,
+        mkvmerge_path: str,
+    ) -> None:
+        """Initialise with full diagnostic context."""
+        self.file_path = file_path
+        self.tmp_path = tmp_path
+        self.probe_returncode = probe_returncode
+        self.probe_output = probe_output
+        self.output_size = output_size
+        self.input_size = input_size
+        self.mkvmerge_path = mkvmerge_path
+        super().__init__(str(file_path))
 
 
 def _is_commentary(name: str | None) -> bool:
@@ -554,6 +597,31 @@ def process_file(
             )
             return False
 
+        # Structural validation: probe the output with mkvmerge -J to confirm
+        # it is a well-formed MKV container.  This catches partial writes and
+        # internally inconsistent files that pass the size check but are
+        # unplayable (e.g. due to disk-full mid-write on a FUSE/network share).
+        # If validation fails, CorruptOutputError is raised to halt ALL further
+        # processing — the temp file is preserved for operator inspection.
+        probe = subprocess.run(
+            [mkvmerge_path, "-J", str(tmp_path)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if probe.returncode != 0:
+            corrupt_tmp = tmp_path
+            tmp_path = None  # Prevent finally-block cleanup; file kept for inspection.
+            raise CorruptOutputError(
+                file_path=file_path,
+                tmp_path=corrupt_tmp,
+                probe_returncode=probe.returncode,
+                probe_output=probe.stderr.strip() or probe.stdout.strip(),
+                output_size=output_size,
+                input_size=input_size,
+                mkvmerge_path=mkvmerge_path,
+            )
+
         # Replace original atomically.
         # For backup mode: rename original → .bak, then atomically replace with temp.
         # If the second step fails, roll back the backup rename.
@@ -593,4 +661,7 @@ def process_file(
         return False
     finally:
         if tmp_path is not None and tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError as cleanup_exc:
+                logger.warning(f"Could not remove temp file '{tmp_path}': {cleanup_exc}")

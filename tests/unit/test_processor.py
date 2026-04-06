@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from core.processor import MkvTrack, build_mkvmerge_command, probe_file, process_file
+from core.processor import CorruptOutputError, MkvTrack, build_mkvmerge_command, probe_file, process_file
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -686,6 +686,9 @@ class TestProcessFile:
         logger = _proc_logger()
 
         def fake_run(args: list[str], **kwargs: object) -> MagicMock:
+            # Structural validation probe (-J) must return 0; only the remux returns 1.
+            if args[1] == "-J":
+                return MagicMock(returncode=0, stdout="{}", stderr="")
             Path(args[2]).write_bytes(b"processed")
             return MagicMock(returncode=1, stdout="", stderr="warning from mkvmerge")
 
@@ -883,13 +886,15 @@ class TestTruncatedOutputRejection:
         logger.error.assert_called()
 
     def test_accepts_output_at_threshold(self, tmp_path: Path) -> None:
-        """Output at or above the 0.1 % threshold must be accepted."""
+        """Output at or above the 50 % threshold must be accepted."""
         mkv = tmp_path / "movie.mkv"
-        mkv.write_bytes(b"A" * 10_000)  # 10 KB input → threshold = 10 bytes
+        mkv.write_bytes(b"A" * 10_000)  # 10 KB input → threshold = 5000 bytes (50 %)
         cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
-        min_ok = max(1, 10_000 // 1000)  # = 10 bytes
+        min_ok = max(1, 10_000 // 2)  # = 5000 bytes
 
         def fake_run(args: list[str], **kwargs: object) -> MagicMock:
+            if args[1] == "-J":
+                return MagicMock(returncode=0, stdout="{}", stderr="")
             Path(args[2]).write_bytes(b"B" * min_ok)
             return MagicMock(returncode=0, stdout="", stderr="")
 
@@ -897,6 +902,35 @@ class TestTruncatedOutputRejection:
             result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
 
         assert result is True
+
+    def test_rejects_output_failing_structural_validation(self, tmp_path: Path) -> None:
+        """Output passing size check but rejected by mkvmerge -J must raise CorruptOutputError.
+
+        This halts ALL processing and preserves the temp file for inspection.
+        """
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"A" * 10_000)
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
+        min_ok = max(1, 10_000 // 2)  # 5000 bytes — passes size check
+
+        def fake_run(args: list[str], **kwargs: object) -> MagicMock:
+            if args[1] == "-J":
+                return MagicMock(returncode=1, stdout="", stderr="not a valid MKV container")
+            Path(args[2]).write_bytes(b"B" * min_ok)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run), pytest.raises(CorruptOutputError) as exc_info:
+            process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
+
+        exc = exc_info.value
+        assert exc.probe_returncode == 1
+        assert "not a valid MKV container" in exc.probe_output
+        assert exc.output_size == min_ok
+        assert exc.input_size == 10_000
+        # Original must be completely untouched
+        assert mkv.read_bytes() == b"A" * 10_000
+        # Temp file must be PRESERVED on disk for operator inspection
+        assert exc.tmp_path.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1030,6 +1064,29 @@ class TestProcessFileOsFailures:
 
         assert result is False
         assert mkv.read_bytes() == b"original"
+
+    def test_cleanup_oserror_in_finally_is_suppressed(self, tmp_path: Path) -> None:
+        """OSError from temp-file unlink in finally must be swallowed (logged as warning, not propagated)."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"original")
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
+
+        def fake_run(args: list[str], **kwargs: object) -> MagicMock:
+            Path(args[2]).write_bytes(b"")  # Empty output — fails size check before -J
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        logger = _proc_logger()
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch.object(Path, "unlink", side_effect=OSError("permission denied")),
+        ):
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=logger)
+
+        # Must return False (not raise), even though cleanup also failed
+        assert result is False
+        assert mkv.read_bytes() == b"original"
+        # Warning must have been logged about the cleanup failure
+        logger.warning.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
