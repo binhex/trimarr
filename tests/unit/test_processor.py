@@ -271,6 +271,35 @@ class TestBuildMkvmergeCommand:
         assert result is None  # No other changes → nothing to do
         logger.warning.assert_called_once()
 
+    def test_subtitle_fallback_does_not_log_false_drop_when_audio_changes_present(self) -> None:
+        """Regression: subtitle fallback + audio changes must not emit a 'Dropping subtitle track(s)' log.
+
+        When no subtitle tracks match the language the safety fallback fires and all subtitles
+        are kept.  Previously the summary log block used the pre-fallback snapshot
+        (language_sub_drop_ids) without checking needs_sub_change, so it emitted a misleading
+        'Dropping N subtitle track(s)' INFO message even though no subtitle filtering happened.
+        """
+        tracks = [
+            MkvTrack(id=1, type="audio", language="eng"),
+            MkvTrack(id=2, type="audio", language="fre"),  # dropped — language mismatch
+            MkvTrack(id=3, type="subtitles", language="fre"),  # no eng sub → fallback keeps all
+            MkvTrack(id=4, type="subtitles", language="ger"),  # no eng sub → fallback keeps all
+        ]
+        logger = MagicMock()
+        cmd = _build_cmd(tracks, language=["eng"], logger=logger)
+        # Audio change present → command is not None
+        assert cmd is not None
+        # Subtitle fallback fired → no --subtitle-tracks / --no-subtitles in command
+        assert "--subtitle-tracks" not in cmd
+        assert "--no-subtitles" not in cmd
+        # No info log mentioning subtitle drops should have been emitted
+        for call in logger.info.call_args_list:
+            assert "subtitle" not in call.args[0].lower(), (
+                f"Unexpected subtitle drop log when fallback should suppress it: {call.args[0]}"
+            )
+        # Warning about keeping all subtitles must have fired
+        logger.warning.assert_called_once()
+
     def test_keep_subtitles_overrides_language_filter(self) -> None:
         tracks = _make_tracks(audio_langs=[], sub_langs=["fre"])
         result = _build_cmd(tracks, language=["eng"], keep_subtitles=True)

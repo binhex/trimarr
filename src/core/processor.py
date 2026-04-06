@@ -405,7 +405,7 @@ def build_mkvmerge_command(
             logger.info(f"  Dropping {len(language_audio_drop_ids)} audio track(s) (language {lang_filter}).")
             descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "audio" and t.id in language_audio_drop_ids)
             logger.debug(f"  Dropping audio track(s): {descs}")
-        if language_sub_drop_ids:
+        if language_sub_drop_ids and needs_sub_change:
             logger.info(f"  Dropping {len(language_sub_drop_ids)} subtitle track(s) (language {lang_filter}).")
             descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "subtitles" and t.id in language_sub_drop_ids)
             logger.debug(f"  Dropping subtitle track(s): {descs}")
