@@ -126,6 +126,48 @@ _ISO_639_1_TO_2: dict[str, str] = {
 _MIN_OUTPUT_RATIO: float = 0.5
 
 
+class CorruptOutputError(BaseException):
+    """Raised when the mkvmerge output fails structural (``mkvmerge -J``) validation.
+
+    Inherits from :class:`BaseException` rather than :class:`Exception` so that
+    it bypasses the broad ``except Exception`` safety-net inside
+    :func:`process_file` and propagates directly to the orchestrating caller,
+    halting all further processing immediately.
+
+    The temporary output file is *preserved on disk* at :attr:`tmp_path` so
+    the operator can inspect it to diagnose the root cause.
+
+    Attributes:
+        file_path: Source MKV file that was being processed.
+        tmp_path: Temporary output file retained on disk for inspection.
+        probe_returncode: Exit code returned by ``mkvmerge -J``.
+        probe_output: Combined stderr / stdout from the ``mkvmerge -J`` probe.
+        output_size: Size in bytes of the temporary output file.
+        input_size: Size in bytes of the source file.
+        mkvmerge_path: Filesystem path to the mkvmerge binary that was used.
+    """
+
+    def __init__(
+        self,
+        file_path: Path,
+        tmp_path: Path,
+        probe_returncode: int,
+        probe_output: str,
+        output_size: int,
+        input_size: int,
+        mkvmerge_path: str,
+    ) -> None:
+        """Initialise with full diagnostic context."""
+        self.file_path = file_path
+        self.tmp_path = tmp_path
+        self.probe_returncode = probe_returncode
+        self.probe_output = probe_output
+        self.output_size = output_size
+        self.input_size = input_size
+        self.mkvmerge_path = mkvmerge_path
+        super().__init__(str(file_path))
+
+
 def _is_commentary(name: str | None) -> bool:
     """Return *True* if *name* looks like a commentary track."""
     if not name:
@@ -559,6 +601,8 @@ def process_file(
         # it is a well-formed MKV container.  This catches partial writes and
         # internally inconsistent files that pass the size check but are
         # unplayable (e.g. due to disk-full mid-write on a FUSE/network share).
+        # If validation fails, CorruptOutputError is raised to halt ALL further
+        # processing — the temp file is preserved for operator inspection.
         probe = subprocess.run(
             [mkvmerge_path, "-J", str(tmp_path)],
             capture_output=True,
@@ -566,12 +610,17 @@ def process_file(
             timeout=60,
         )
         if probe.returncode != 0:
-            logger.error(
-                f"mkvmerge output for '{file_path}' failed structural validation "
-                f"(mkvmerge -J exit {probe.returncode}); rejecting to avoid data loss.\n"
-                f"{probe.stderr.strip() or probe.stdout.strip()}"
+            corrupt_tmp = tmp_path
+            tmp_path = None  # Prevent finally-block cleanup; file kept for inspection.
+            raise CorruptOutputError(
+                file_path=file_path,
+                tmp_path=corrupt_tmp,
+                probe_returncode=probe.returncode,
+                probe_output=probe.stderr.strip() or probe.stdout.strip(),
+                output_size=output_size,
+                input_size=input_size,
+                mkvmerge_path=mkvmerge_path,
             )
-            return False
 
         # Replace original atomically.
         # For backup mode: rename original → .bak, then atomically replace with temp.

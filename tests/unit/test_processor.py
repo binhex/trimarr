@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from core.processor import MkvTrack, build_mkvmerge_command, probe_file, process_file
+from core.processor import CorruptOutputError, MkvTrack, build_mkvmerge_command, probe_file, process_file
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -904,7 +904,10 @@ class TestTruncatedOutputRejection:
         assert result is True
 
     def test_rejects_output_failing_structural_validation(self, tmp_path: Path) -> None:
-        """Output passing size check but rejected by mkvmerge -J must be treated as corrupt."""
+        """Output passing size check but rejected by mkvmerge -J must raise CorruptOutputError.
+
+        This halts ALL processing and preserves the temp file for inspection.
+        """
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"A" * 10_000)
         cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
@@ -916,13 +919,18 @@ class TestTruncatedOutputRejection:
             Path(args[2]).write_bytes(b"B" * min_ok)
             return MagicMock(returncode=0, stdout="", stderr="")
 
-        logger = _proc_logger()
-        with patch("subprocess.run", side_effect=fake_run):
-            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=logger)
+        with patch("subprocess.run", side_effect=fake_run), pytest.raises(CorruptOutputError) as exc_info:
+            process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
 
-        assert result is False
+        exc = exc_info.value
+        assert exc.probe_returncode == 1
+        assert "not a valid MKV container" in exc.probe_output
+        assert exc.output_size == min_ok
+        assert exc.input_size == 10_000
+        # Original must be completely untouched
         assert mkv.read_bytes() == b"A" * 10_000
-        logger.error.assert_called()
+        # Temp file must be PRESERVED on disk for operator inspection
+        assert exc.tmp_path.exists()
 
 
 # ---------------------------------------------------------------------------

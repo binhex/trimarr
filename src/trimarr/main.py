@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sqlite3
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from core.database import Database
-from core.processor import build_mkvmerge_command, probe_file, process_file
+from core.processor import CorruptOutputError, build_mkvmerge_command, probe_file, process_file
 
 if TYPE_CHECKING:
     from loguru import Logger
@@ -274,6 +275,44 @@ def run(
                 except sqlite3.Error as exc:
                     logger.error(f"Database error processing '{file_path}': {exc}")
                     counts["failed"] += 1
+
+    except CorruptOutputError as exc:
+        ratio_pct = (exc.output_size / exc.input_size * 100) if exc.input_size else 0.0
+        try:
+            disk = shutil.disk_usage(exc.tmp_path.parent)
+            free_str = f"{disk.free:,} bytes ({_fmt_bytes(disk.free)}) on '{exc.tmp_path.parent}'"
+        except OSError:
+            free_str = "unavailable"
+        sep = "=" * 80
+        logger.opt(colors=False).critical(
+            f"\n{sep}\n"
+            "TRIMARR ABORTED — CORRUPT OUTPUT DETECTED\n"
+            f"{sep}\n"
+            "mkvmerge produced a structurally invalid MKV that failed the integrity check.\n"
+            "All processing has been halted immediately to prevent further data loss.\n\n"
+            f"  Source file  : {exc.file_path}\n"
+            f"  Source size  : {exc.input_size:,} bytes ({_fmt_bytes(exc.input_size)})\n"
+            f"  Output file  : {exc.tmp_path}  <-- RETAINED for inspection\n"
+            f"  Output size  : {exc.output_size:,} bytes ({_fmt_bytes(exc.output_size)}, {ratio_pct:.1f}% of source)\n"
+            f"  Free space   : {free_str}\n"
+            f"  mkvmerge     : {exc.mkvmerge_path}\n"
+            f"  Probe exit   : {exc.probe_returncode}\n"
+            f"  Probe output : {exc.probe_output or '(none)'}\n\n"
+            f"  Progress before halt: "
+            f"{counts['processed']} processed, {counts['skipped']} skipped, "
+            f"{counts['failed']} failed, {counts['no_change']} unchanged.\n\n"
+            "Possible causes:\n"
+            "  * Disk full or near-full during the mkvmerge write\n"
+            "  * Network / FUSE filesystem error (e.g. Unraid mergerfs, Samba, NFS)\n"
+            "  * Insufficient write permissions on the temp directory\n"
+            "  * mkvmerge bug or unsupported container variant\n\n"
+            "The ORIGINAL source file has NOT been modified.\n"
+            "The corrupt temp file has been retained at the path shown above.\n"
+            f'  Inspect with: {exc.mkvmerge_path} -J "{exc.tmp_path}"\n'
+            "Delete the temp file and resolve the root cause before re-running trimarr.\n"
+            f"{sep}"
+        )
+        sys.exit(2)
 
     except KeyboardInterrupt:
         interrupted = True
