@@ -1647,34 +1647,37 @@ class TestStripCommentary:
     # Safety fallback: stripping would leave zero tracks
     # ------------------------------------------------------------------
 
-    def test_all_audio_commentary_keeps_all_audio_and_warns(self) -> None:
-        """If ALL surviving audio tracks are commentary, skip strip with a WARNING."""
-        logger = MagicMock()
+    def test_all_audio_commentary_strips_all(self) -> None:
+        """When ALL surviving audio tracks are commentary, they are ALL stripped.
+
+        There is no 'all-commentary' safety gate — commentary tracks are always
+        removed when strip_commentary is enabled (guard conditions permitting).
+        In practice real-world files always have at least one non-commentary audio
+        track, so the result will be a file with no audio commentary at all.
+        """
         tracks = [
             MkvTrack(id=0, type="video", language=None),
             MkvTrack(id=1, type="audio", language="eng", name="Commentary"),
         ]
-        cmd = _build_cmd(tracks, logger=logger, strip_commentary=True)
-        assert cmd is None  # commentary audio kept; no change
+        cmd = _build_cmd(tracks, strip_commentary=True)
+        # Commentary track is dropped unconditionally
+        assert cmd is not None
+        assert "--no-audio" in cmd
 
-        warning_calls = [str(c) for c in logger.warning.call_args_list]
-        assert any("commentary" in msg.lower() for msg in warning_calls), "Expected WARNING about all-commentary audio"
+    def test_all_subtitles_commentary_strips_all(self) -> None:
+        """When ALL surviving subtitle tracks are commentary, they are ALL stripped.
 
-    def test_all_subtitles_commentary_keeps_all_subs_and_warns(self) -> None:
-        """If ALL surviving subtitle tracks are commentary, skip strip with a WARNING."""
-        logger = MagicMock()
+        Same unconditional rule — commentary subtitle tracks are always removed
+        when strip_commentary is enabled (guard conditions permitting).
+        """
         tracks = [
             MkvTrack(id=0, type="video", language=None),
             MkvTrack(id=1, type="audio", language="eng", name=None),
             MkvTrack(id=2, type="subtitles", language="eng", name="Commentary"),
         ]
-        cmd = _build_cmd(tracks, logger=logger, strip_commentary=True)
-        assert cmd is None  # commentary subtitle kept; no change
-
-        warning_calls = [str(c) for c in logger.warning.call_args_list]
-        assert any("commentary" in msg.lower() for msg in warning_calls), (
-            "Expected WARNING about all-commentary subtitles"
-        )
+        cmd = _build_cmd(tracks, strip_commentary=True)
+        assert cmd is not None
+        assert "--no-subtitles" in cmd
 
     # ------------------------------------------------------------------
     # Interaction with --strip-lower-channels

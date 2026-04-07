@@ -334,9 +334,9 @@ def build_mkvmerge_command(
             language filtering and all safety fallbacks have resolved.  Skipped
             for audio when *keep_audio* is *True* or the audio safety fallback
             fired; skipped for subtitles when *keep_subtitles* is *True* or the
-            subtitle safety fallback fired.  If stripping would leave **no**
-            remaining tracks of a type, that type is kept and a warning is
-            logged instead.
+            subtitle safety fallback fired.  Commentary tracks are stripped
+            unconditionally when the guard conditions above are not met —
+            there is no "all-commentary" safety check.
 
     Returns:
         A list of strings suitable for :func:`subprocess.run`, or *None* if
@@ -411,14 +411,15 @@ def build_mkvmerge_command(
 
     # Commentary-track stripping: runs after ALL language/safety fallbacks so we
     # only operate on tracks that have already passed the language filter and
-    # survived the fallback logic.  Both audio and subtitle are handled
-    # independently, each with its own safety check.
+    # survived the fallback logic.
     #
-    # Safety rules:
-    #   • Skipped for audio  when keep_audio is True or audio_fallback_fired.
-    #   • Skipped for subs   when keep_subtitles is True or sub_fallback_fired.
-    #   • If stripping would remove ALL remaining tracks of a type, that type
-    #     is kept and a warning is emitted — never produce silent/sub-free output.
+    # Guards (skipping strip-commentary entirely for a type):
+    #   • Audio:     keep_audio is True  OR  audio_fallback_fired
+    #   • Subtitles: keep_subtitles is True  OR  sub_fallback_fired
+    #
+    # No "all remaining tracks are commentary" safety check — commentary tracks
+    # are considered useless when this flag is on.  The real safety net is the
+    # language fallback above, which protects non-commentary content.
     #
     # Ordering matters: strip-commentary runs BEFORE strip-lower-channels so
     # that commentary tracks do not inflate the max-channel calculation.
@@ -431,18 +432,10 @@ def build_mkvmerge_command(
                 t.id for t in tracks if t.type == "audio" and t.id in audio_keep_set and _is_commentary(t.name)
             ]
             if audio_commentary_to_drop:
-                remaining = [i for i in audio_keep if i not in set(audio_commentary_to_drop)]
-                if not remaining:
-                    if logger is not None:
-                        logger.warning(
-                            f"All audio tracks in '{input_path.name}' are commentary "
-                            f"— keeping all audio to prevent silent output."
-                        )
-                else:
-                    commentary_audio_drop_ids = set(audio_commentary_to_drop)
-                    for tid in audio_commentary_to_drop:
-                        audio_keep.remove(tid)
-                        audio_drop.append(tid)
+                commentary_audio_drop_ids = set(audio_commentary_to_drop)
+                for tid in audio_commentary_to_drop:
+                    audio_keep.remove(tid)
+                    audio_drop.append(tid)
 
         if not keep_subtitles and not sub_fallback_fired and sub_keep:
             sub_keep_set = set(sub_keep)
@@ -450,18 +443,10 @@ def build_mkvmerge_command(
                 t.id for t in tracks if t.type == "subtitles" and t.id in sub_keep_set and _is_commentary(t.name)
             ]
             if sub_commentary_to_drop:
-                remaining = [i for i in sub_keep if i not in set(sub_commentary_to_drop)]
-                if not remaining:
-                    if logger is not None:
-                        logger.warning(
-                            f"All subtitle tracks in '{input_path.name}' are commentary "
-                            f"— keeping all subtitles to prevent subtitle-free output."
-                        )
-                else:
-                    commentary_sub_drop_ids = set(sub_commentary_to_drop)
-                    for tid in sub_commentary_to_drop:
-                        sub_keep.remove(tid)
-                        sub_drop.append(tid)
+                commentary_sub_drop_ids = set(sub_commentary_to_drop)
+                for tid in sub_commentary_to_drop:
+                    sub_keep.remove(tid)
+                    sub_drop.append(tid)
 
     # only evaluate tracks that have already survived the language filter.
     # Skipped when keep_audio is True, the flag is off, or a safety fallback
