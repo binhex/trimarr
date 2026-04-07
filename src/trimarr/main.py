@@ -41,6 +41,7 @@ def _build_profile_hash(
     edit_metadata_title: bool,
     delete_metadata_title: bool,
     strip_lower_channels: bool,
+    strip_commentary: bool,
 ) -> str:
     """Return a stable SHA-256 hex digest encoding the current processing profile.
 
@@ -54,6 +55,7 @@ def _build_profile_hash(
         edit_metadata_title: Set container title to filename stem.
         delete_metadata_title: Clear container title.
         strip_lower_channels: Drop audio tracks below the max channel count.
+        strip_commentary: Drop tracks whose name contains "commentary".
 
     Returns:
         64-character lowercase hex string.
@@ -64,6 +66,7 @@ def _build_profile_hash(
         "keep_audio": keep_audio,
         "keep_subtitles": keep_subtitles,
         "language": sorted(language),
+        "strip_commentary": strip_commentary,
         "strip_lower_channels": strip_lower_channels,
     }
     return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
@@ -133,6 +136,7 @@ def run(
     dry_run: bool,
     logger: Logger,
     strip_lower_channels: bool = False,
+    strip_commentary: bool = False,
 ) -> None:
     """Scan *media_path* and trim unwanted tracks from every MKV file found.
 
@@ -157,6 +161,9 @@ def run(
         strip_lower_channels: When *True*, after language filtering, drop any
             audio tracks with a channel count below the maximum among surviving
             audio tracks.
+        strip_commentary: When *True*, audio and subtitle tracks whose name
+            contains "commentary" (case-insensitive) are removed after language
+            filtering and safety fallbacks.  Standard safety fallbacks apply.
     """
     root = Path(media_path)
 
@@ -187,6 +194,7 @@ def run(
         edit_metadata_title=edit_metadata_title,
         delete_metadata_title=delete_metadata_title,
         strip_lower_channels=strip_lower_channels,
+        strip_commentary=strip_commentary,
     )
 
     total = len(mkv_files)
@@ -227,6 +235,7 @@ def run(
                         delete_metadata_title=delete_metadata_title,
                         logger=logger,
                         strip_lower_channels=strip_lower_channels,
+                        strip_commentary=strip_commentary,
                     )
 
                     if cmd is None:

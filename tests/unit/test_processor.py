@@ -61,6 +61,7 @@ def _build_cmd(
     output_path: Path | None = None,
     logger: MagicMock | None = None,
     strip_lower_channels: bool = False,
+    strip_commentary: bool = False,
 ) -> list[str] | None:
     """Thin wrapper around build_mkvmerge_command with test-friendly defaults."""
     return build_mkvmerge_command(
@@ -75,6 +76,7 @@ def _build_cmd(
         delete_metadata_title=delete_metadata_title,
         logger=logger,
         strip_lower_channels=strip_lower_channels,
+        strip_commentary=strip_commentary,
     )
 
 
@@ -1421,3 +1423,312 @@ class TestCommentaryFallbackChannelStripInteraction:
         assert "2" not in cmd[audio_idx]  # 5.1 dropped (lower than 7.1)
         assert "3" in cmd[audio_idx]  # commentary kept (exempt from strip)
         assert "4" not in cmd[audio_idx]  # fre dropped
+
+
+# ---------------------------------------------------------------------------
+# TestStripCommentary – strip_commentary flag behaviour
+# ---------------------------------------------------------------------------
+
+
+class TestStripCommentary:
+    """Verify --strip-commentary behaviour in build_mkvmerge_command()."""
+
+    # ------------------------------------------------------------------
+    # Happy-path: tracks ARE dropped
+    # ------------------------------------------------------------------
+
+    def test_audio_commentary_track_is_dropped(self) -> None:
+        """An audio track named 'Commentary' is removed when strip_commentary=True."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name=None),
+            MkvTrack(id=2, type="audio", language="eng", name="Commentary"),
+        ]
+        cmd = _build_cmd(tracks, strip_commentary=True)
+
+        assert cmd is not None
+        assert "--audio-tracks" in cmd
+        audio_idx = cmd.index("--audio-tracks") + 1
+        assert "1" in cmd[audio_idx]
+        assert "2" not in cmd[audio_idx]
+
+    def test_subtitle_commentary_track_is_dropped(self) -> None:
+        """A subtitle track named 'Commentary' is removed when strip_commentary=True."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng"),
+            MkvTrack(id=2, type="subtitles", language="eng", name=None),
+            MkvTrack(id=3, type="subtitles", language="eng", name="Commentary"),
+        ]
+        cmd = _build_cmd(tracks, strip_commentary=True)
+
+        assert cmd is not None
+        assert "--subtitle-tracks" in cmd
+        sub_idx = cmd.index("--subtitle-tracks") + 1
+        assert "2" in cmd[sub_idx]
+        assert "3" not in cmd[sub_idx]
+
+    def test_multiple_commentary_tracks_all_dropped(self) -> None:
+        """Multiple commentary audio tracks are all removed in a single pass."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name=None),
+            MkvTrack(id=2, type="audio", language="eng", name="Director Commentary"),
+            MkvTrack(id=3, type="audio", language="eng", name="Cast Commentary"),
+        ]
+        cmd = _build_cmd(tracks, strip_commentary=True)
+
+        assert cmd is not None
+        audio_idx = cmd.index("--audio-tracks") + 1
+        assert "1" in cmd[audio_idx]
+        assert "2" not in cmd[audio_idx]
+        assert "3" not in cmd[audio_idx]
+
+    def test_commentary_match_is_case_insensitive(self) -> None:
+        """'COMMENTARY', 'Commentary', 'commentary' all match."""
+        for name in ("COMMENTARY", "Commentary", "commentary", "Audio Commentary Track"):
+            tracks = [
+                MkvTrack(id=0, type="video", language=None),
+                MkvTrack(id=1, type="audio", language="eng", name=None),
+                MkvTrack(id=2, type="audio", language="eng", name=name),
+            ]
+            cmd = _build_cmd(tracks, strip_commentary=True)
+            assert cmd is not None, f"Expected change for name={name!r}"
+            audio_idx = cmd.index("--audio-tracks") + 1
+            assert "2" not in cmd[audio_idx], f"Track with name={name!r} should be dropped"
+
+    def test_info_logged_when_audio_commentary_dropped(self) -> None:
+        """An INFO message is emitted when commentary audio tracks are dropped."""
+        logger = MagicMock()
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name=None),
+            MkvTrack(id=2, type="audio", language="eng", name="Commentary"),
+        ]
+        _build_cmd(tracks, logger=logger, strip_commentary=True)
+
+        info_calls = [str(c) for c in logger.info.call_args_list]
+        assert any("commentary" in msg.lower() for msg in info_calls), (
+            "Expected INFO log about dropping commentary audio track"
+        )
+
+    def test_info_logged_when_subtitle_commentary_dropped(self) -> None:
+        """An INFO message is emitted when commentary subtitle tracks are dropped."""
+        logger = MagicMock()
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng"),
+            MkvTrack(id=2, type="subtitles", language="eng", name=None),
+            MkvTrack(id=3, type="subtitles", language="eng", name="Commentary"),
+        ]
+        _build_cmd(tracks, logger=logger, strip_commentary=True)
+
+        info_calls = [str(c) for c in logger.info.call_args_list]
+        assert any("commentary" in msg.lower() for msg in info_calls), (
+            "Expected INFO log about dropping commentary subtitle track"
+        )
+
+    # ------------------------------------------------------------------
+    # Default disabled
+    # ------------------------------------------------------------------
+
+    def test_strip_commentary_disabled_keeps_commentary_tracks(self) -> None:
+        """strip_commentary=False (default) must leave commentary tracks untouched."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name=None),
+            MkvTrack(id=2, type="audio", language="eng", name="Commentary"),
+        ]
+        # No language drops, no changes -> should return None
+        assert _build_cmd(tracks, strip_commentary=False) is None
+
+    def test_no_commentary_found_produces_no_log(self) -> None:
+        """When no commentary tracks exist, no INFO or WARNING is emitted."""
+        logger = MagicMock()
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name=None),
+            MkvTrack(id=2, type="subtitles", language="eng", name=None),
+        ]
+        _build_cmd(tracks, logger=logger, strip_commentary=True)
+
+        # No INFO/WARNING about commentary should be emitted when none found
+        for call in logger.info.call_args_list + logger.warning.call_args_list:
+            assert "commentary" not in str(call).lower()
+
+    # ------------------------------------------------------------------
+    # Safety fallback: keep_audio / keep_subtitles overrides
+    # ------------------------------------------------------------------
+
+    def test_keep_audio_skips_strip_commentary_for_audio(self) -> None:
+        """--keep-audio prevents commentary audio from being stripped."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name=None),
+            MkvTrack(id=2, type="audio", language="eng", name="Commentary"),
+            MkvTrack(id=3, type="subtitles", language="eng", name=None),
+            MkvTrack(id=4, type="subtitles", language="eng", name="Commentary"),
+        ]
+        cmd = _build_cmd(tracks, keep_audio=True, strip_commentary=True)
+        # Subtitle commentary still dropped, audio untouched (keep_audio=True)
+        assert cmd is not None
+        assert "--audio-tracks" not in cmd  # keep_audio -> no audio manipulation
+        assert "--subtitle-tracks" in cmd
+        sub_idx = cmd.index("--subtitle-tracks") + 1
+        assert "3" in cmd[sub_idx]
+        assert "4" not in cmd[sub_idx]
+
+    def test_keep_subtitles_skips_strip_commentary_for_subtitles(self) -> None:
+        """--keep-subtitles prevents commentary subtitle tracks from being stripped."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name=None),
+            MkvTrack(id=2, type="audio", language="eng", name="Commentary"),
+            MkvTrack(id=3, type="subtitles", language="eng", name=None),
+            MkvTrack(id=4, type="subtitles", language="eng", name="Commentary"),
+        ]
+        cmd = _build_cmd(tracks, keep_subtitles=True, strip_commentary=True)
+        # Audio commentary still dropped, subtitles untouched (keep_subtitles=True)
+        assert cmd is not None
+        assert "--audio-tracks" in cmd
+        audio_idx = cmd.index("--audio-tracks") + 1
+        assert "1" in cmd[audio_idx]
+        assert "2" not in cmd[audio_idx]
+        assert "--subtitle-tracks" not in cmd  # keep_subtitles -> no sub manipulation
+
+    # ------------------------------------------------------------------
+    # Safety fallback: language fallbacks take priority
+    # ------------------------------------------------------------------
+
+    def test_audio_fallback_fired_skips_strip_commentary(self) -> None:
+        """When the audio language fallback fires, strip_commentary must not apply.
+
+        If there are no matching-language audio tracks, we already keep everything.
+        Adding a commentary strip on top would silently drop audio in a fallback scenario.
+        """
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="fre", name="Commentary"),
+            MkvTrack(id=2, type="audio", language="fre", name=None),
+        ]
+        # Language=eng -> no eng tracks -> audio fallback fires -> strip_commentary skipped
+        cmd = _build_cmd(tracks, language=["eng"], strip_commentary=True)
+        assert cmd is None  # fallback kept all audio, no sub changes
+
+    def test_subtitle_fallback_fired_skips_strip_commentary_for_subs(self) -> None:
+        """When the subtitle language fallback fires, strip_commentary must not apply to subs."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name=None),
+            MkvTrack(id=2, type="subtitles", language="fre", name="Commentary"),
+            MkvTrack(id=3, type="subtitles", language="fre", name=None),
+        ]
+        # Eng audio fine; no eng subs -> subtitle fallback fires -> sub strip skipped
+        cmd = _build_cmd(tracks, language=["eng"], strip_commentary=True)
+        assert cmd is None  # fallback kept all subs, no audio changes needed
+
+    def test_secondary_audio_fallback_fired_skips_strip_commentary(self) -> None:
+        """Secondary fallback (all matching audio are commentary) blocks strip_commentary.
+
+        Scenario: only eng track is a commentary; non-eng main track exists.
+        Secondary fallback fires to keep the non-eng main audio.
+        strip_commentary must not then strip audio.
+        """
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name="Commentary"),
+            MkvTrack(id=2, type="audio", language="fre", name=None),
+        ]
+        # Secondary fallback fires -> audio_fallback_fired=True -> strip_commentary skipped
+        cmd = _build_cmd(tracks, language=["eng"], strip_commentary=True)
+        assert cmd is None  # all audio kept
+
+    # ------------------------------------------------------------------
+    # Safety fallback: stripping would leave zero tracks
+    # ------------------------------------------------------------------
+
+    def test_all_audio_commentary_keeps_all_audio_and_warns(self) -> None:
+        """If ALL surviving audio tracks are commentary, skip strip with a WARNING."""
+        logger = MagicMock()
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name="Commentary"),
+        ]
+        cmd = _build_cmd(tracks, logger=logger, strip_commentary=True)
+        assert cmd is None  # commentary audio kept; no change
+
+        warning_calls = [str(c) for c in logger.warning.call_args_list]
+        assert any("commentary" in msg.lower() for msg in warning_calls), "Expected WARNING about all-commentary audio"
+
+    def test_all_subtitles_commentary_keeps_all_subs_and_warns(self) -> None:
+        """If ALL surviving subtitle tracks are commentary, skip strip with a WARNING."""
+        logger = MagicMock()
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name=None),
+            MkvTrack(id=2, type="subtitles", language="eng", name="Commentary"),
+        ]
+        cmd = _build_cmd(tracks, logger=logger, strip_commentary=True)
+        assert cmd is None  # commentary subtitle kept; no change
+
+        warning_calls = [str(c) for c in logger.warning.call_args_list]
+        assert any("commentary" in msg.lower() for msg in warning_calls), (
+            "Expected WARNING about all-commentary subtitles"
+        )
+
+    # ------------------------------------------------------------------
+    # Interaction with --strip-lower-channels
+    # ------------------------------------------------------------------
+
+    def test_strip_commentary_before_strip_lower_channels(self) -> None:
+        """Commentary tracks are removed before strip-lower-channels runs.
+
+        strip-commentary must run first so that a high-channel commentary track
+        does not inflate the max-channel calculation and cause main audio to be dropped.
+
+        Scenario: eng main (6ch) + eng commentary (8ch) + fre (4ch)
+          Language filter  -> audio_keep=[1,2], audio_drop=[3]
+          strip-commentary -> audio_keep=[1], commentary_drop={2}
+          strip-lower-channels -> max=6 (only main), nothing else to drop
+          Expected         -> only eng main (6ch) kept
+        """
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name=None, channels=6),
+            MkvTrack(id=2, type="audio", language="eng", name="Commentary", channels=8),
+            MkvTrack(id=3, type="audio", language="fre", channels=4),
+        ]
+        cmd = _build_cmd(tracks, strip_commentary=True, strip_lower_channels=True)
+
+        assert cmd is not None
+        audio_idx = cmd.index("--audio-tracks") + 1
+        assert "1" in cmd[audio_idx]  # eng main kept
+        assert "2" not in cmd[audio_idx]  # commentary dropped by strip-commentary
+        assert "3" not in cmd[audio_idx]  # fre dropped by language filter
+
+    def test_strip_commentary_combined_with_language_and_channel_strip(self) -> None:
+        """Full pipeline: language filter + strip-commentary + strip-lower-channels.
+
+        Scenario: eng 7.1 main + eng 2ch secondary + eng commentary (6ch) + fre 6ch + fre commentary
+          Language filter  -> audio_keep=[1,2,3], audio_drop=[4,5]
+          strip-commentary -> removes eng commentary (3)
+          strip-lower-channels -> max=8 among non-commentary; drops 2ch secondary (2)
+          Expected         -> only eng 7.1 main (1) kept
+        """
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name=None, channels=8),  # 7.1
+            MkvTrack(id=2, type="audio", language="eng", name=None, channels=2),  # stereo
+            MkvTrack(id=3, type="audio", language="eng", name="Commentary", channels=6),
+            MkvTrack(id=4, type="audio", language="fre", channels=6),
+            MkvTrack(id=5, type="audio", language="fre", name="Commentary", channels=2),
+        ]
+        cmd = _build_cmd(tracks, strip_commentary=True, strip_lower_channels=True)
+
+        assert cmd is not None
+        audio_idx = cmd.index("--audio-tracks") + 1
+        assert "1" in cmd[audio_idx]  # eng 7.1 kept
+        assert "2" not in cmd[audio_idx]  # eng stereo dropped (lower channels)
+        assert "3" not in cmd[audio_idx]  # eng commentary dropped
+        assert "4" not in cmd[audio_idx]  # fre dropped by language
+        assert "5" not in cmd[audio_idx]  # fre commentary dropped by language

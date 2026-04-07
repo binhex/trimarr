@@ -293,6 +293,7 @@ def build_mkvmerge_command(
     delete_metadata_title: bool,
     logger: Logger | None = None,
     strip_lower_channels: bool = False,
+    strip_commentary: bool = False,
 ) -> list[str] | None:
     """Build the mkvmerge argv needed to produce a trimmed copy of *input_path*.
 
@@ -328,6 +329,14 @@ def build_mkvmerge_command(
             channel count of the surviving audio tracks.  Tracks with unknown
             channel counts (``channels=None``) are always preserved.  Skipped
             when *keep_audio* is *True*.
+        strip_commentary: When *True*, audio and subtitle tracks whose name
+            contains the word "commentary" (case-insensitive) are removed after
+            language filtering and all safety fallbacks have resolved.  Skipped
+            for audio when *keep_audio* is *True* or the audio safety fallback
+            fired; skipped for subtitles when *keep_subtitles* is *True* or the
+            subtitle safety fallback fired.  If stripping would leave **no**
+            remaining tracks of a type, that type is kept and a warning is
+            logged instead.
 
     Returns:
         A list of strings suitable for :func:`subprocess.run`, or *None* if
@@ -390,6 +399,7 @@ def build_mkvmerge_command(
             audio_fallback_fired = True
 
     # Same safety fallback for subtitles.
+    sub_fallback_fired = False
     if sub_drop and not sub_keep:
         if logger is not None:
             lang_desc = f"'{language[0]}'" if len(language) == 1 else str(language)
@@ -397,8 +407,62 @@ def build_mkvmerge_command(
                 f"No subtitle tracks match language {lang_desc} in '{input_path.name}' — keeping all subtitles."
             )
         sub_drop.clear()
+        sub_fallback_fired = True
 
-    # Channel-count filtering: run AFTER all language/safety fallbacks so we
+    # Commentary-track stripping: runs after ALL language/safety fallbacks so we
+    # only operate on tracks that have already passed the language filter and
+    # survived the fallback logic.  Both audio and subtitle are handled
+    # independently, each with its own safety check.
+    #
+    # Safety rules:
+    #   • Skipped for audio  when keep_audio is True or audio_fallback_fired.
+    #   • Skipped for subs   when keep_subtitles is True or sub_fallback_fired.
+    #   • If stripping would remove ALL remaining tracks of a type, that type
+    #     is kept and a warning is emitted — never produce silent/sub-free output.
+    #
+    # Ordering matters: strip-commentary runs BEFORE strip-lower-channels so
+    # that commentary tracks do not inflate the max-channel calculation.
+    commentary_audio_drop_ids: set[int] = set()
+    commentary_sub_drop_ids: set[int] = set()
+    if strip_commentary:
+        if not keep_audio and not audio_fallback_fired and audio_keep:
+            audio_keep_set = set(audio_keep)
+            audio_commentary_to_drop = [
+                t.id for t in tracks if t.type == "audio" and t.id in audio_keep_set and _is_commentary(t.name)
+            ]
+            if audio_commentary_to_drop:
+                remaining = [i for i in audio_keep if i not in set(audio_commentary_to_drop)]
+                if not remaining:
+                    if logger is not None:
+                        logger.warning(
+                            f"All audio tracks in '{input_path.name}' are commentary "
+                            f"— keeping all audio to prevent silent output."
+                        )
+                else:
+                    commentary_audio_drop_ids = set(audio_commentary_to_drop)
+                    for tid in audio_commentary_to_drop:
+                        audio_keep.remove(tid)
+                        audio_drop.append(tid)
+
+        if not keep_subtitles and not sub_fallback_fired and sub_keep:
+            sub_keep_set = set(sub_keep)
+            sub_commentary_to_drop = [
+                t.id for t in tracks if t.type == "subtitles" and t.id in sub_keep_set and _is_commentary(t.name)
+            ]
+            if sub_commentary_to_drop:
+                remaining = [i for i in sub_keep if i not in set(sub_commentary_to_drop)]
+                if not remaining:
+                    if logger is not None:
+                        logger.warning(
+                            f"All subtitle tracks in '{input_path.name}' are commentary "
+                            f"— keeping all subtitles to prevent subtitle-free output."
+                        )
+                else:
+                    commentary_sub_drop_ids = set(sub_commentary_to_drop)
+                    for tid in sub_commentary_to_drop:
+                        sub_keep.remove(tid)
+                        sub_drop.append(tid)
+
     # only evaluate tracks that have already survived the language filter.
     # Skipped when keep_audio is True, the flag is off, or a safety fallback
     # fired — pruning by channel count is pointless when we're already in
@@ -458,6 +522,16 @@ def build_mkvmerge_command(
             logger.info(f"  Dropping {len(language_sub_drop_ids)} subtitle track(s) (language {lang_filter}).")
             descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "subtitles" and t.id in language_sub_drop_ids)
             logger.debug(f"  Dropping subtitle track(s): {descs}")
+        if commentary_audio_drop_ids:
+            logger.info(f"  Dropping {len(commentary_audio_drop_ids)} audio commentary track(s).")
+            descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "audio" and t.id in commentary_audio_drop_ids)
+            logger.debug(f"  Dropping audio commentary track(s): {descs}")
+        if commentary_sub_drop_ids:
+            logger.info(f"  Dropping {len(commentary_sub_drop_ids)} subtitle commentary track(s).")
+            descs = ", ".join(
+                _fmt_track(t) for t in tracks if t.type == "subtitles" and t.id in commentary_sub_drop_ids
+            )
+            logger.debug(f"  Dropping subtitle commentary track(s): {descs}")
         if edit_metadata_title:
             logger.info(f"  Metadata: setting title to '{input_path.stem}'")
         elif delete_metadata_title:
