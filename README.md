@@ -72,7 +72,7 @@ trimarr --help
 | `--no-backup` | Delete the original file after successful processing instead of renaming it to `<name>.bak`. By default a backup is always created. | `false` | — | `flag` |
 | `--no-update-check` | Skip the automatic check for a newer mkvmerge version. Has no effect when `--mkvmerge-path` is supplied (user-managed binaries are never auto-updated). | `false` | — | `flag` |
 | `--strip-lower-channels` | After language filtering, drop any audio tracks whose channel count is strictly below the highest channel count among the surviving audio tracks. For example, given English tracks at 8ch, 8ch, and 2ch, the 2ch track is removed. Tracks with an unknown channel count are always kept. Has no effect when `--keep-audio` is set. **Disabled by default** — enable only when you are confident lower-channel duplicates are not needed. | `false` | — | `flag` |
-| `--strip-commentary` | If specified, audio and subtitle tracks whose name contains "commentary" (case-insensitive) will be removed after language filtering. Tracks are stripped unconditionally — there is no "all-commentary" safety gate. Has no effect on audio when `--keep-audio` is set, or on subtitles when `--keep-subtitles` is set. **Disabled by default.** | `false` | — | `flag` |
+| `--strip-commentary` | If specified, audio and subtitle tracks whose name contains "commentary" (case-insensitive) will be removed after language filtering. **Audio final gate:** if stripping would leave zero audio tracks, all audio is retained and a warning is logged — a silent file is never acceptable. Subtitles have no such gate and are stripped unconditionally. Has no effect on audio when `--keep-audio` is set, or on subtitles when `--keep-subtitles` is set. **Disabled by default.** | `false` | — | `flag` |
 | `--dry-run` | Log planned changes without modifying any files. Processed files are not recorded to the database in this mode. | `false` | — | `flag` |
 
 ✱ Required.
@@ -99,7 +99,9 @@ flowchart TD
     F -- No --> H[Drop non-matching tracks]
     H --> SC{--strip-commentary?}
     SC -- No --> I
-    SC -- Yes --> SC4[Drop audio\ncommentary tracks]
+    SC -- Yes --> SC2{Stripping would\nleave zero audio?}
+    SC2 -- Yes --> SC3([⚠️ Keep all audio\nsilent-file gate])
+    SC2 -- No --> SC4[Drop audio\ncommentary tracks]
     SC4 --> I
     I{Commentary track\nholds default flag?}
     I -- No --> L{--strip-lower-channels?}
