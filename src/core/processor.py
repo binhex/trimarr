@@ -95,7 +95,7 @@ _ISO_639_1_TO_2: dict[str, str] = {
     "ms": "may",
     "ml": "mal",
     "mt": "mlt",
-    "nb": "nor",
+    "nb": "nob",
     "fa": "per",
     "pl": "pol",
     "pt": "por",
@@ -291,7 +291,7 @@ def build_mkvmerge_command(
     keep_subtitles: bool,
     edit_metadata_title: bool,
     delete_metadata_title: bool,
-    logger: Logger | None = None,
+    logger: Logger,
     strip_lower_channels: bool = False,
     strip_commentary: bool = False,
 ) -> list[str] | None:
@@ -373,14 +373,13 @@ def build_mkvmerge_command(
     # Channel-strip is also skipped when a fallback fires — when we're already
     # in a "best effort, keep everything" state there is no benefit in pruning
     # further by channel count.
+    lang_desc = f"'{language[0]}'" if len(language) == 1 else str(language)
     audio_fallback_fired = False
     if audio_drop and not audio_keep:
-        if logger is not None:
-            lang_desc = f"'{language[0]}'" if len(language) == 1 else str(language)
-            logger.warning(
-                f"No audio tracks match language {lang_desc} in '{input_path.name}' "
-                f"— keeping all audio to prevent silent data loss."
-            )
+        logger.warning(
+            f"No audio tracks match language {lang_desc} in '{input_path.name}' "
+            f"— keeping all audio to prevent silent data loss."
+        )
         audio_drop.clear()
         audio_fallback_fired = True
     elif audio_drop:
@@ -390,23 +389,17 @@ def build_mkvmerge_command(
         # preferred-language audio is the commentary track, not the main dub).
         audio_commentary_ids = {t.id for t in tracks if t.type == "audio" and _is_commentary(t.name)}
         if all(tid in audio_commentary_ids for tid in audio_keep):
-            if logger is not None:
-                lang_desc = f"'{language[0]}'" if len(language) == 1 else str(language)
-                logger.warning(
-                    f"All audio tracks matching language {lang_desc} in '{input_path.name}' are commentary "
-                    f"— keeping all audio to avoid commentary-only audio."
-                )
+            logger.warning(
+                f"All audio tracks matching language {lang_desc} in '{input_path.name}' are commentary "
+                f"— keeping all audio to avoid commentary-only audio."
+            )
             audio_drop.clear()
             audio_fallback_fired = True
 
     # Same safety fallback for subtitles.
     sub_fallback_fired = False
     if sub_drop and not sub_keep:
-        if logger is not None:
-            lang_desc = f"'{language[0]}'" if len(language) == 1 else str(language)
-            logger.warning(
-                f"No subtitle tracks match language {lang_desc} in '{input_path.name}' — keeping all subtitles."
-            )
+        logger.warning(f"No subtitle tracks match language {lang_desc} in '{input_path.name}' — keeping all subtitles.")
         sub_drop.clear()
         sub_fallback_fired = True
 
@@ -437,11 +430,10 @@ def build_mkvmerge_command(
                 remaining = [i for i in audio_keep if i not in set(audio_commentary_to_drop)]
                 if not remaining:
                     # Final gate: stripping would leave zero audio — keep all and warn.
-                    if logger is not None:
-                        logger.warning(
-                            f"All audio tracks in '{input_path.name}' are commentary "
-                            f"— keeping all audio to prevent silent output."
-                        )
+                    logger.warning(
+                        f"All audio tracks in '{input_path.name}' are commentary "
+                        f"— keeping all audio to prevent silent output."
+                    )
                 else:
                     commentary_audio_drop_ids = set(audio_commentary_to_drop)
                     for tid in audio_commentary_to_drop:
@@ -493,12 +485,11 @@ def build_mkvmerge_command(
             for tid in channel_drop:
                 audio_keep.remove(tid)
                 audio_drop.append(tid)
-            if logger is not None:
-                descs = ", ".join(_fmt_track(t) for t in surviving if t.id in channel_drop_set)
-                logger.info(
-                    f"  Dropping {len(channel_drop)} audio track(s) with fewer channels than the per-language maximum."
-                )
-                logger.debug(f"  Dropping lower-channel audio track(s): {descs}")
+            descs = ", ".join(_fmt_track(t) for t in surviving if t.id in channel_drop_set)
+            logger.info(
+                f"  Dropping {len(channel_drop)} audio track(s) with fewer channels than the per-language maximum."
+            )
+            logger.debug(f"  Dropping lower-channel audio track(s): {descs}")
 
     needs_audio_change = bool(audio_drop)
     needs_sub_change = bool(sub_drop)
@@ -508,30 +499,27 @@ def build_mkvmerge_command(
         return None
 
     # Log what is being changed and why, so the user has full visibility.
-    if logger is not None:
-        lang_filter = f"≠ '{language[0]}'" if len(language) == 1 else f"not in {language}"
-        if language_audio_drop_ids:
-            logger.info(f"  Dropping {len(language_audio_drop_ids)} audio track(s) (language {lang_filter}).")
-            descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "audio" and t.id in language_audio_drop_ids)
-            logger.debug(f"  Dropping audio track(s): {descs}")
-        if language_sub_drop_ids and needs_sub_change:
-            logger.info(f"  Dropping {len(language_sub_drop_ids)} subtitle track(s) (language {lang_filter}).")
-            descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "subtitles" and t.id in language_sub_drop_ids)
-            logger.debug(f"  Dropping subtitle track(s): {descs}")
-        if commentary_audio_drop_ids:
-            logger.info(f"  Dropping {len(commentary_audio_drop_ids)} audio commentary track(s).")
-            descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "audio" and t.id in commentary_audio_drop_ids)
-            logger.debug(f"  Dropping audio commentary track(s): {descs}")
-        if commentary_sub_drop_ids:
-            logger.info(f"  Dropping {len(commentary_sub_drop_ids)} subtitle commentary track(s).")
-            descs = ", ".join(
-                _fmt_track(t) for t in tracks if t.type == "subtitles" and t.id in commentary_sub_drop_ids
-            )
-            logger.debug(f"  Dropping subtitle commentary track(s): {descs}")
-        if edit_metadata_title:
-            logger.info(f"  Metadata: setting title to '{input_path.stem}'")
-        elif delete_metadata_title:
-            logger.info("  Metadata: clearing title")
+    lang_filter = f"≠ '{language[0]}'" if len(language) == 1 else f"not in {language}"
+    if language_audio_drop_ids and needs_audio_change:
+        logger.info(f"  Dropping {len(language_audio_drop_ids)} audio track(s) (language {lang_filter}).")
+        descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "audio" and t.id in language_audio_drop_ids)
+        logger.debug(f"  Dropping audio track(s): {descs}")
+    if language_sub_drop_ids and needs_sub_change:
+        logger.info(f"  Dropping {len(language_sub_drop_ids)} subtitle track(s) (language {lang_filter}).")
+        descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "subtitles" and t.id in language_sub_drop_ids)
+        logger.debug(f"  Dropping subtitle track(s): {descs}")
+    if commentary_audio_drop_ids:
+        logger.info(f"  Dropping {len(commentary_audio_drop_ids)} audio commentary track(s).")
+        descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "audio" and t.id in commentary_audio_drop_ids)
+        logger.debug(f"  Dropping audio commentary track(s): {descs}")
+    if commentary_sub_drop_ids:
+        logger.info(f"  Dropping {len(commentary_sub_drop_ids)} subtitle commentary track(s).")
+        descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "subtitles" and t.id in commentary_sub_drop_ids)
+        logger.debug(f"  Dropping subtitle commentary track(s): {descs}")
+    if edit_metadata_title:
+        logger.info(f"  Metadata: setting title to '{input_path.stem}'")
+    elif delete_metadata_title:
+        logger.info("  Metadata: clearing title")
 
     cmd: list[str] = [mkvmerge_path, "-o", str(output_path)]
 
@@ -587,11 +575,10 @@ def build_mkvmerge_command(
             for t in commentary_kept:
                 if t.default_track:
                     default_flags += ["--default-track", f"{t.id}:0"]
-            if logger is not None:
-                logger.warning(
-                    f"All remaining {track_type} tracks in '{input_path.name}' are commentary "
-                    f"— cannot reassign default {track_type} track."
-                )
+            logger.warning(
+                f"All remaining {track_type} tracks in '{input_path.name}' are commentary "
+                f"— cannot reassign default {track_type} track."
+            )
 
     cmd += default_flags
     cmd.append(str(input_path))
@@ -722,8 +709,8 @@ def process_file(
                     try:
                         backup_path.replace(file_path)
                     except Exception as restore_exc:
-                        logger.error(
-                            f"CRITICAL: Could not restore original from backup '{backup_path}': {restore_exc}. "
+                        logger.critical(
+                            f"Could not restore original from backup '{backup_path}': {restore_exc}. "
                             f"Original is at '{backup_path}'."
                         )
                 raise
@@ -734,6 +721,7 @@ def process_file(
 
     except Exception as exc:  # noqa: BLE001
         logger.error(f"Unexpected error processing '{file_path}': {exc}")
+        logger.debug("", exc_info=True)
         return False
     finally:
         if tmp_path is not None and tmp_path.exists():

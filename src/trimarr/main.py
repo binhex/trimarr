@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import shutil
@@ -49,7 +50,7 @@ def _build_profile_hash(
     Run-time options (``dry_run``, ``no_backup``, paths) are deliberately excluded.
 
     Args:
-        language: Sorted list of ISO 639-2 language codes to retain.
+        language: List of ISO 639-2 language codes to retain (sorted internally).
         keep_audio: Retain all audio tracks regardless of language.
         keep_subtitles: Retain all subtitle tracks regardless of language.
         edit_metadata_title: Set container title to filename stem.
@@ -174,7 +175,7 @@ def run(
         logger.error(f"Media path '{media_path}' is not a directory.")
         return
 
-    mkv_files = sorted(root.rglob("*.mkv"))
+    mkv_files = sorted(p for p in root.rglob("*") if p.suffix.lower() == ".mkv")
 
     if not mkv_files:
         logger.warning(f"No .mkv files found under '{media_path}'.")
@@ -252,7 +253,8 @@ def run(
                         # execution strategy; mkvmerge refuses input == output, so showing the raw
                         # command (where placeholder output_path == input_path) would be misleading.
                         display_cmd = list(cmd)
-                        display_cmd[display_cmd.index("-o") + 1] = "[tmpfile]"
+                        with contextlib.suppress(ValueError):
+                            display_cmd[display_cmd.index("-o") + 1] = "[tmpfile]"
                         # Escape angle brackets in dynamic content (file paths, titles) so loguru's
                         # colour parser does not mistake them for markup tags.
                         cmd_str = " ".join(display_cmd).replace("<", r"\<").replace(">", r"\>")

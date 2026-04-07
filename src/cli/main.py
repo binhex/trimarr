@@ -204,8 +204,9 @@ Examples:
     help=(
         "If specified, audio and subtitle tracks whose name contains 'commentary'"
         " (case-insensitive) will be removed after language filtering."
-        " Safety fallbacks apply: if stripping would leave no audio tracks, all audio is kept"
-        " and a warning is logged; same for subtitles."
+        " Audio safety fallback: if stripping commentary would leave no audio tracks, all audio is kept"
+        " and a warning is logged. Subtitle commentary tracks are stripped unconditionally"
+        " (a subtitle-free file is acceptable)."
         " Has no effect on audio when --keep-audio is set, or on subtitles when --keep-subtitles is set."
         " Disabled by default."
     ),
