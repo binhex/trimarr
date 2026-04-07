@@ -97,7 +97,14 @@ flowchart TD
     D -- Yes --> F{All matches\nare commentary?}
     F -- Yes --> G([⚠️ Keep all\ncommentary-only audio])
     F -- No --> H[Drop non-matching tracks]
-    H --> I{Commentary track\nholds default flag?}
+    H --> SC{--strip-commentary?}
+    SC -- No --> I
+    SC -- Yes --> SC2{All surviving\naudio are commentary?}
+    SC2 -- Yes --> SC3[⚠️ Skip strip\ncommentary-only safety]
+    SC3 --> I
+    SC2 -- No --> SC4[Drop audio\ncommentary tracks]
+    SC4 --> I
+    I{Commentary track\nholds default flag?}
     I -- No --> L{--strip-lower-channels?}
     I -- Yes --> K[Promote non-commentary\nto default · demote commentary]
     K --> L
@@ -118,7 +125,14 @@ flowchart TD
     C --> D{Any track\nmatches language?}
     D -- No --> E([⚠️ Keep all\nno language match])
     D -- Yes --> H[Drop non-matching tracks]
-    H --> I{Commentary subtitle\nholds default flag?}
+    H --> SC{--strip-commentary?}
+    SC -- No --> I
+    SC -- Yes --> SC2{All surviving\nsubtitles are commentary?}
+    SC2 -- Yes --> SC3[⚠️ Skip strip\ncommentary-only safety]
+    SC3 --> I
+    SC2 -- No --> SC4[Drop subtitle\ncommentary tracks]
+    SC4 --> I
+    I{Commentary subtitle\nholds default flag?}
     I -- No --> J([✅ Apply changes])
     I -- Yes --> K[Promote non-commentary\nto default · demote commentary]
     K --> J
