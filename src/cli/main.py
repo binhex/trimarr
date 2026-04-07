@@ -196,6 +196,20 @@ Examples:
         " Has no effect when --keep-audio is set.  Disabled by default."
     ),
 )
+@click.option(
+    "--strip-commentary",
+    is_flag=True,
+    default=False,
+    show_default=True,
+    help=(
+        "If specified, audio and subtitle tracks whose name contains 'commentary'"
+        " (case-insensitive) will be removed after language filtering."
+        " Safety fallbacks apply: if stripping would leave no audio tracks, all audio is kept"
+        " and a warning is logged; same for subtitles."
+        " Has no effect on audio when --keep-audio is set, or on subtitles when --keep-subtitles is set."
+        " Disabled by default."
+    ),
+)
 @click.version_option(version=_VERSION, prog_name="Trimarr")
 def cli(
     language: str,
@@ -212,6 +226,7 @@ def cli(
     dry_run: bool,
     no_update_check: bool,
     strip_lower_channels: bool,
+    strip_commentary: bool,
 ) -> None:
     """Trimarr - Removes (trims) unwanted audio and subtitles from matroska container format video files.
 
@@ -281,6 +296,7 @@ def cli(
         dry_run=dry_run,
         logger=logger,
         strip_lower_channels=strip_lower_channels,
+        strip_commentary=strip_commentary,
     )
 
 

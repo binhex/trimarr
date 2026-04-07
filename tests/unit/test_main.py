@@ -52,6 +52,7 @@ def _run_kwargs(tmp_path: Path, *, dry_run: bool, db_path: str) -> dict:
         "dry_run": dry_run,
         "logger": _make_logger(),
         "strip_lower_channels": False,
+        "strip_commentary": False,
     }
 
 
@@ -496,4 +497,38 @@ class TestStripLowerChannelsWiring:
         _, kwargs = mock_build.call_args
         assert kwargs.get("strip_lower_channels") is True, (
             "strip_lower_channels=True was not forwarded to build_mkvmerge_command()"
+        )
+
+
+# ---------------------------------------------------------------------------
+# strip_commentary wiring through run() (I5)
+# ---------------------------------------------------------------------------
+
+
+class TestStripCommentaryWiring:
+    """Verify --strip-commentary is passed through run() to build_mkvmerge_command()."""
+
+    def test_strip_commentary_true_reaches_build_mkvmerge_command(self, tmp_path: Path) -> None:
+        """run(strip_commentary=True) must call build_mkvmerge_command with that flag."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake")
+        db_path = str(tmp_path / "trimarr.db")
+
+        dummy_track = MkvTrack(id=0, type="video", language=None)
+
+        with (
+            patch("trimarr.main.probe_file", return_value=[dummy_track]),
+            patch("trimarr.main.build_mkvmerge_command", return_value=None) as mock_build,
+        ):
+            run(
+                **{
+                    **_run_kwargs(tmp_path, dry_run=False, db_path=db_path),
+                    "strip_commentary": True,
+                }
+            )
+
+        assert mock_build.called
+        _, kwargs = mock_build.call_args
+        assert kwargs.get("strip_commentary") is True, (
+            "strip_commentary=True was not forwarded to build_mkvmerge_command()"
         )
