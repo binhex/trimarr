@@ -415,12 +415,18 @@ def build_mkvmerge_command(
 
         channel_drop: list[int] = []
         for group_tracks in lang_groups.values():
-            known = [t.channels for t in group_tracks if t.channels is not None]
+            # Commentary tracks are excluded from both the max-channel calculation
+            # and the drop candidates.  A commentary track's channel count must
+            # never cause a main audio track to be removed — otherwise a 2ch
+            # commentary alongside a 1ch main track would cause the main track
+            # to be dropped, leaving only commentary.
+            non_commentary = [t for t in group_tracks if not _is_commentary(t.name)]
+            known = [t.channels for t in non_commentary if t.channels is not None]
             if not known:
                 continue
             max_ch = max(known)
             if any(ch < max_ch for ch in known):
-                channel_drop.extend(t.id for t in group_tracks if t.channels is not None and t.channels < max_ch)
+                channel_drop.extend(t.id for t in non_commentary if t.channels is not None and t.channels < max_ch)
 
         if channel_drop:
             channel_drop_set = set(channel_drop)

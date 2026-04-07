@@ -1365,3 +1365,59 @@ class TestCommentaryFallbackChannelStripInteraction:
         cmd = _build_cmd(tracks, language=["eng"], strip_lower_channels=True)
         # Fallback fires → channel-strip skipped → audio_drop empty → no change needed
         assert cmd is None
+
+    def test_channel_strip_never_drops_main_audio_in_favour_of_commentary(self) -> None:
+        """Regression: commentary track with MORE channels than main audio must not
+        cause the main audio track to be dropped.
+
+        Real-world case: Across 110th Street (1972) — eng FLAC 1.0 (1ch main) +
+        eng commentary (2ch) + non-eng track, with --strip-lower-channels.
+
+        Without the fix, max_ch=2 caused the 1ch main audio to be dropped,
+        leaving only the commentary track in the output.
+
+        With the fix, commentary tracks are excluded from the max-channel
+        calculation, so max_ch=1 (from non-commentary tracks only) and the
+        main audio is retained.
+        """
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name=None, channels=1),  # main FLAC 1.0
+            MkvTrack(id=2, type="audio", language="eng", name="Commentary", channels=2),
+            MkvTrack(id=3, type="audio", language="fre", channels=6),
+        ]
+        cmd = _build_cmd(tracks, language=["eng"], strip_lower_channels=True)
+
+        # Non-eng track must be dropped, eng main + commentary both kept.
+        assert cmd is not None
+        assert "--audio-tracks" in cmd
+        audio_idx = cmd.index("--audio-tracks") + 1
+        assert "1" in cmd[audio_idx]  # main audio kept
+        assert "2" in cmd[audio_idx]  # commentary kept
+        assert "3" not in cmd[audio_idx]  # non-eng dropped
+
+    def test_channel_strip_still_drops_lower_non_commentary_tracks(self) -> None:
+        """Commentary exclusion must not disable stripping of lower-channel main tracks.
+
+        When multiple non-commentary tracks exist at different channel counts,
+        the lower-channel non-commentary tracks must still be dropped.
+        Commentary tracks must be preserved regardless of channel count.
+
+        Scenario: eng 7.1 main + eng 5.1 secondary + eng 2ch commentary + fre 6ch
+        Expected: 5.1 secondary dropped (5 < 7), commentary kept, fre dropped.
+        """
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name=None, channels=8),  # 7.1
+            MkvTrack(id=2, type="audio", language="eng", name=None, channels=6),  # 5.1
+            MkvTrack(id=3, type="audio", language="eng", name="Commentary", channels=2),
+            MkvTrack(id=4, type="audio", language="fre", channels=6),
+        ]
+        cmd = _build_cmd(tracks, language=["eng"], strip_lower_channels=True)
+
+        assert cmd is not None
+        audio_idx = cmd.index("--audio-tracks") + 1
+        assert "1" in cmd[audio_idx]  # 7.1 kept
+        assert "2" not in cmd[audio_idx]  # 5.1 dropped (lower than 7.1)
+        assert "3" in cmd[audio_idx]  # commentary kept (exempt from strip)
+        assert "4" not in cmd[audio_idx]  # fre dropped
