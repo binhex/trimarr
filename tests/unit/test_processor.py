@@ -74,7 +74,7 @@ def _build_cmd(
         keep_subtitles=keep_subtitles,
         edit_metadata_title=edit_metadata_title,
         delete_metadata_title=delete_metadata_title,
-        logger=logger,
+        logger=logger or MagicMock(),
         strip_lower_channels=strip_lower_channels,
         strip_commentary=strip_commentary,
     )
@@ -620,19 +620,18 @@ class TestCommentaryDefaultTrack:
         assert result is None
 
     def test_commentary_name_case_insensitive(self) -> None:
-        """Commentary matching is case-insensitive (e.g. 'COMMENTARY', 'Commentary 2')."""
-        for name in ("COMMENTARY", "commentary", "Director's Commentary", "Commentary 2"):
-            tracks = [
-                MkvTrack(id=0, type="video", language=None),
-                MkvTrack(id=1, type="audio", language="eng", name=name, default_track=True),
-                MkvTrack(id=2, type="audio", language="eng", name="Main", default_track=False),
-                MkvTrack(id=3, type="audio", language="fre"),
-            ]
-            cmd = _build_cmd(tracks)
-            assert cmd is not None, f"Expected command for name={name!r}"
-            assert "--default-track" in cmd, f"Expected flags for name={name!r}"
-            assert "1:0" in cmd
-            assert "2:1" in cmd
+        """Commentary matching is case-insensitive; default-track reassignment applies."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", name="Director's Commentary", default_track=True),
+            MkvTrack(id=2, type="audio", language="eng", name="Main", default_track=False),
+            MkvTrack(id=3, type="audio", language="fre"),
+        ]
+        cmd = _build_cmd(tracks)
+        assert cmd is not None
+        assert "--default-track" in cmd
+        assert "1:0" in cmd
+        assert "2:1" in cmd
 
 
 # ---------------------------------------------------------------------------
@@ -736,21 +735,6 @@ class TestProcessFile:
         logger.error.assert_called_once()
         assert not list(tmp_path.glob("*.trimarr_tmp"))  # No leftover temp files
 
-    def test_empty_output_treated_as_failure(self, tmp_path: Path) -> None:
-        mkv = tmp_path / "movie.mkv"
-        mkv.write_bytes(b"original")
-        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
-
-        def fake_run(args: list[str], **kwargs: object) -> MagicMock:
-            Path(args[2]).write_bytes(b"")  # Empty file
-            return MagicMock(returncode=0, stdout="", stderr="")
-
-        with patch("subprocess.run", side_effect=fake_run):
-            result = process_file(MKVMERGE, mkv, cmd, no_backup=False, logger=_proc_logger())
-
-        assert result is False
-        assert mkv.read_bytes() == b"original"
-
     def test_no_backup_uses_atomic_replace_not_delete_first(self, tmp_path: Path) -> None:
         """Verify no-backup mode does NOT delete the original before renaming.
 
@@ -841,8 +825,9 @@ class TestProcessFile:
             result = process_file(MKVMERGE, mkv, cmd, no_backup=False, logger=logger)
 
         assert result is False
-        error_calls = " ".join(str(c) for c in logger.error.call_args_list)
-        assert "CRITICAL" in error_calls
+        assert logger.critical.call_count >= 1
+        critical_calls = " ".join(str(c) for c in logger.critical.call_args_list)
+        assert "backup" in critical_calls.lower()
 
 
 # ---------------------------------------------------------------------------

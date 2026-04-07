@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import platform
 import stat
@@ -91,10 +92,10 @@ def _extract_from_tar(archive_path: Path, binary_name: str, tmp_dir: Path) -> Pa
         if member is None:
             raise RuntimeError(f"Could not find '{binary_name}' inside '{archive_path.name}'.")
         tar.extract(member, path=tmp_dir, filter="data")
-    matches = list(tmp_dir.rglob(binary_name))
-    if not matches:
+    extracted = tmp_dir / member.name
+    if not extracted.exists():
         raise RuntimeError(f"Could not locate '{binary_name}' after extraction.")
-    return matches[0]
+    return extracted
 
 
 def _extract_from_zip(archive_path: Path, binary_name: str, tmp_dir: Path) -> Path:
@@ -103,11 +104,14 @@ def _extract_from_zip(archive_path: Path, binary_name: str, tmp_dir: Path) -> Pa
         names = [n for n in zf.namelist() if Path(n).name == binary_name]
         if not names:
             raise RuntimeError(f"Could not find '{binary_name}' inside '{archive_path.name}'.")
+        # Validate the entry does not escape the extraction directory (path-traversal guard).
+        extracted = (tmp_dir / names[0]).resolve()
+        if not str(extracted).startswith(str(tmp_dir.resolve())):
+            raise RuntimeError(f"Archive entry '{names[0]}' would escape the extraction directory.")
         zf.extract(names[0], path=tmp_dir)
-    matches = list(tmp_dir.rglob(binary_name))
-    if not matches:
+    if not extracted.exists():
         raise RuntimeError(f"Could not locate '{binary_name}' after extraction.")
-    return matches[0]
+    return extracted
 
 
 def _fetch_latest_release(repo: str) -> dict:
@@ -275,7 +279,8 @@ def download_mkvmerge(dest_dir: str | Path | None = None) -> Path:
                 tmp_bin.chmod(tmp_bin.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
             os.replace(tmp_bin, dest_binary)
         except Exception:
-            tmp_bin.unlink(missing_ok=True)
+            with contextlib.suppress(OSError):
+                tmp_bin.unlink(missing_ok=True)
             raise
 
     # Atomically write the version file so the binary and version are never mismatched.
@@ -287,7 +292,8 @@ def download_mkvmerge(dest_dir: str | Path | None = None) -> Path:
         tmp_ver.write_text(release_tag, encoding="utf-8")
         os.replace(tmp_ver, dest_dir / _VERSION_FILE)
     except Exception:
-        tmp_ver.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            tmp_ver.unlink(missing_ok=True)
         raise
 
     return dest_binary
