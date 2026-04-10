@@ -9,8 +9,8 @@ from unittest.mock import ANY, MagicMock, patch
 import pytest
 from loguru import logger as _real_loguru_logger
 
-from core.processor import MkvTrack
-from trimarr.main import run
+from trimarr.processor import MkvTrack
+from trimarr.runner import run
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -73,10 +73,10 @@ class TestDryRunDoesNotRecordToDatabase:
         fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), str(mkv)]
 
         with (
-            patch("trimarr.main.probe_file", return_value=[]) as _,
-            patch("trimarr.main.build_mkvmerge_command", return_value=fake_cmd),
-            patch("trimarr.main.process_file") as mock_process,
-            patch("core.database.Database.mark_processed") as mock_mark,
+            patch("trimarr.runner.probe_file", return_value=[]) as _,
+            patch("trimarr.runner.build_mkvmerge_command", return_value=fake_cmd),
+            patch("trimarr.runner.process_file") as mock_process,
+            patch("trimarr.database.Database.mark_processed") as mock_mark,
         ):
             run(**_run_kwargs(tmp_path, dry_run=True, db_path=db_path))
 
@@ -105,8 +105,8 @@ class TestDryRunDoesNotRecordToDatabase:
             fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), dangerous_path]
 
             with (
-                patch("trimarr.main.probe_file", return_value=[]),
-                patch("trimarr.main.build_mkvmerge_command", return_value=fake_cmd),
+                patch("trimarr.runner.probe_file", return_value=[]),
+                patch("trimarr.runner.build_mkvmerge_command", return_value=fake_cmd),
             ):
                 # Must not raise — if it does, an angle bracket escaped to loguru's parser.
                 run(**{**_run_kwargs(tmp_path, dry_run=True, db_path=db_path), "logger": _real_loguru_logger})
@@ -120,9 +120,9 @@ class TestDryRunDoesNotRecordToDatabase:
         db_path = str(tmp_path / "trimarr.db")
 
         with (
-            patch("trimarr.main.probe_file", return_value=[]),
-            patch("trimarr.main.build_mkvmerge_command", return_value=None),  # no changes needed
-            patch("core.database.Database.mark_processed") as mock_mark,
+            patch("trimarr.runner.probe_file", return_value=[]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=None),  # no changes needed
+            patch("trimarr.database.Database.mark_processed") as mock_mark,
         ):
             run(**_run_kwargs(tmp_path, dry_run=True, db_path=db_path))
 
@@ -135,9 +135,9 @@ class TestDryRunDoesNotRecordToDatabase:
         db_path = str(tmp_path / "trimarr.db")
 
         with (
-            patch("trimarr.main.probe_file", return_value=[]),
-            patch("trimarr.main.build_mkvmerge_command", return_value=None),
-            patch("core.database.Database.mark_processed") as mock_mark,
+            patch("trimarr.runner.probe_file", return_value=[]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=None),
+            patch("trimarr.database.Database.mark_processed") as mock_mark,
         ):
             run(**_run_kwargs(tmp_path, dry_run=False, db_path=db_path))
 
@@ -152,10 +152,10 @@ class TestDryRunDoesNotRecordToDatabase:
         fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), str(mkv)]
 
         with (
-            patch("trimarr.main.probe_file", return_value=[]),
-            patch("trimarr.main.build_mkvmerge_command", return_value=fake_cmd),
-            patch("trimarr.main.process_file", return_value=True),
-            patch("core.database.Database.mark_processed") as mock_mark,
+            patch("trimarr.runner.probe_file", return_value=[]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=fake_cmd),
+            patch("trimarr.runner.process_file", return_value=True),
+            patch("trimarr.database.Database.mark_processed") as mock_mark,
         ):
             run(**_run_kwargs(tmp_path, dry_run=False, db_path=db_path))
 
@@ -174,10 +174,10 @@ class TestDryRunDoesNotRecordToDatabase:
             return True
 
         with (
-            patch("trimarr.main.probe_file", return_value=[]),
-            patch("trimarr.main.build_mkvmerge_command", return_value=fake_cmd),
-            patch("trimarr.main.process_file", side_effect=fake_process_file),
-            patch("core.database.Database.mark_processed") as mock_mark,
+            patch("trimarr.runner.probe_file", return_value=[]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=fake_cmd),
+            patch("trimarr.runner.process_file", side_effect=fake_process_file),
+            patch("trimarr.database.Database.mark_processed") as mock_mark,
         ):
             run(**_run_kwargs(tmp_path, dry_run=False, db_path=db_path))
 
@@ -197,10 +197,10 @@ class TestDryRunDoesNotRecordToDatabase:
             return True
 
         with (
-            patch("trimarr.main.probe_file", return_value=[]),
-            patch("trimarr.main.build_mkvmerge_command", return_value=fake_cmd),
-            patch("trimarr.main.process_file", side_effect=fake_process_file),
-            patch("core.database.Database.mark_processed") as mock_mark,
+            patch("trimarr.runner.probe_file", return_value=[]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=fake_cmd),
+            patch("trimarr.runner.process_file", side_effect=fake_process_file),
+            patch("trimarr.database.Database.mark_processed") as mock_mark,
         ):
             run(**_run_kwargs(tmp_path, dry_run=False, db_path=db_path))
 
@@ -222,8 +222,8 @@ class TestKeyboardInterruptHandling:
         db_path = str(tmp_path / "trimarr.db")
 
         with (
-            patch("trimarr.main.probe_file", side_effect=KeyboardInterrupt),
-            patch("core.database.Database.mark_processed"),
+            patch("trimarr.runner.probe_file", side_effect=KeyboardInterrupt),
+            patch("trimarr.database.Database.mark_processed"),
             pytest.raises(SystemExit) as exc_info,
         ):
             run(**_run_kwargs(tmp_path, dry_run=False, db_path=db_path))
@@ -238,7 +238,7 @@ class TestKeyboardInterruptHandling:
         logger = _make_logger()
 
         with (
-            patch("trimarr.main.probe_file", side_effect=KeyboardInterrupt),
+            patch("trimarr.runner.probe_file", side_effect=KeyboardInterrupt),
             pytest.raises(SystemExit),
         ):
             run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
@@ -266,9 +266,9 @@ class TestKeyboardInterruptHandling:
             return []
 
         with (
-            patch("trimarr.main.probe_file", side_effect=probe_side_effect),
-            patch("trimarr.main.build_mkvmerge_command", return_value=fake_cmd),
-            patch("trimarr.main.process_file", return_value=True),
+            patch("trimarr.runner.probe_file", side_effect=probe_side_effect),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=fake_cmd),
+            patch("trimarr.runner.process_file", return_value=True),
             pytest.raises(SystemExit),
         ):
             run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
@@ -284,7 +284,7 @@ class TestKeyboardInterruptHandling:
         db_path = str(tmp_path / "trimarr.db")
 
         with (
-            patch("trimarr.main.probe_file", side_effect=KeyboardInterrupt),
+            patch("trimarr.runner.probe_file", side_effect=KeyboardInterrupt),
             pytest.raises(SystemExit) as exc_info,
         ):
             run(**_run_kwargs(tmp_path, dry_run=True, db_path=db_path))
@@ -355,10 +355,10 @@ class TestPerFileOsErrorResilience:
             return False
 
         with (
-            patch("core.database.Database.is_processed", side_effect=is_processed_side_effect),
-            patch("trimarr.main.probe_file", return_value=[]),
-            patch("trimarr.main.build_mkvmerge_command", return_value=None),
-            patch("core.database.Database.mark_processed"),
+            patch("trimarr.database.Database.is_processed", side_effect=is_processed_side_effect),
+            patch("trimarr.runner.probe_file", return_value=[]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=None),
+            patch("trimarr.database.Database.mark_processed"),
         ):
             run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
 
@@ -402,9 +402,9 @@ class TestSQLiteErrorHandling:
             raise sqlite3.OperationalError("database is locked")
 
         with (
-            patch("trimarr.main.probe_file", side_effect=probe_side_effect),
-            patch("trimarr.main.build_mkvmerge_command", return_value=None),
-            patch("core.database.Database.mark_processed", side_effect=mark_side_effect),
+            patch("trimarr.runner.probe_file", side_effect=probe_side_effect),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=None),
+            patch("trimarr.database.Database.mark_processed", side_effect=mark_side_effect),
         ):
             # Must not raise — should log the error and continue
             run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
@@ -448,8 +448,8 @@ class TestPrintSummaryDBFailure:
             raise sqlite3.OperationalError("disk I/O error")
 
         with (
-            patch("trimarr.main.probe_file", side_effect=KeyboardInterrupt),
-            patch("trimarr.main.Database", side_effect=database_side_effect),
+            patch("trimarr.runner.probe_file", side_effect=KeyboardInterrupt),
+            patch("trimarr.runner.Database", side_effect=database_side_effect),
             contextlib.suppress(SystemExit),
         ):
             run(
@@ -483,8 +483,8 @@ class TestStripLowerChannelsWiring:
         dummy_track = MkvTrack(id=0, type="video", language=None)
 
         with (
-            patch("trimarr.main.probe_file", return_value=[dummy_track]),
-            patch("trimarr.main.build_mkvmerge_command", return_value=None) as mock_build,
+            patch("trimarr.runner.probe_file", return_value=[dummy_track]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=None) as mock_build,
         ):
             run(
                 **{
@@ -517,8 +517,8 @@ class TestStripCommentaryWiring:
         dummy_track = MkvTrack(id=0, type="video", language=None)
 
         with (
-            patch("trimarr.main.probe_file", return_value=[dummy_track]),
-            patch("trimarr.main.build_mkvmerge_command", return_value=None) as mock_build,
+            patch("trimarr.runner.probe_file", return_value=[dummy_track]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=None) as mock_build,
         ):
             run(
                 **{

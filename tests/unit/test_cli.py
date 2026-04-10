@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
-from cli.main import cli
+from trimarr.cli import cli
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -33,7 +33,7 @@ class TestLanguageOption:
 
     def test_single_language_accepted(self, tmp_path: Path) -> None:
         runner = CliRunner()
-        with patch("trimarr.main.run") as mock_run:
+        with patch("trimarr.runner.run") as mock_run:
             result = runner.invoke(cli, _base_args(str(tmp_path)))
         assert result.exit_code == 0, result.output
         _, kwargs = mock_run.call_args
@@ -41,7 +41,7 @@ class TestLanguageOption:
 
     def test_multiple_languages_comma_separated(self, tmp_path: Path) -> None:
         runner = CliRunner()
-        with patch("trimarr.main.run") as mock_run:
+        with patch("trimarr.runner.run") as mock_run:
             result = runner.invoke(cli, ["--language", "eng,fre", "--media-path", str(tmp_path)])
         assert result.exit_code == 0, result.output
         _, kwargs = mock_run.call_args
@@ -55,7 +55,7 @@ class TestLanguageOption:
 
     def test_language_codes_normalised_to_lowercase(self, tmp_path: Path) -> None:
         runner = CliRunner()
-        with patch("trimarr.main.run") as mock_run:
+        with patch("trimarr.runner.run") as mock_run:
             result = runner.invoke(cli, ["--language", "ENG,FRE", "--media-path", str(tmp_path)])
         assert result.exit_code == 0, result.output
         _, kwargs = mock_run.call_args
@@ -93,13 +93,13 @@ class TestMutuallyExclusiveMetadataFlags:
 
     def test_edit_alone_is_accepted(self, tmp_path: Path) -> None:
         runner = CliRunner()
-        with patch("trimarr.main.run"):
+        with patch("trimarr.runner.run"):
             result = runner.invoke(cli, _base_args(str(tmp_path)) + ["--edit-metadata-title"])
         assert result.exit_code == 0, result.output
 
     def test_delete_alone_is_accepted(self, tmp_path: Path) -> None:
         runner = CliRunner()
-        with patch("trimarr.main.run"):
+        with patch("trimarr.runner.run"):
             result = runner.invoke(cli, _base_args(str(tmp_path)) + ["--delete-metadata-title"])
         assert result.exit_code == 0, result.output
 
@@ -114,7 +114,7 @@ class TestFlagsForwardedToRun:
 
     def _invoke_with_flags(self, tmp_path: Path, extra_args: list[str]) -> MagicMock:
         runner = CliRunner()
-        with patch("trimarr.main.run") as mock_run:
+        with patch("trimarr.runner.run") as mock_run:
             result = runner.invoke(cli, _base_args(str(tmp_path)) + extra_args)
         assert result.exit_code == 0, result.output
         return mock_run
@@ -174,7 +174,7 @@ class TestMkvmergePath:
         fake_mkvmerge.touch()
         fake_mkvmerge.chmod(0o755)
         runner = CliRunner()
-        with patch("trimarr.main.run") as mock_run:
+        with patch("trimarr.runner.run") as mock_run:
             result = runner.invoke(
                 cli,
                 _base_args(str(tmp_path)) + ["--mkvmerge-path", str(fake_mkvmerge)],

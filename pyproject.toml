@@ -43,8 +43,8 @@ dev = [
 ]
 
 [project.scripts]
-Trimarr = "cli.main:cli"
-trimarr = "cli.main:cli"
+Trimarr = "trimarr.cli:cli"
+trimarr = "trimarr.cli:cli"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -79,7 +79,7 @@ ignore = [
 "tests/*" = ["S101"]      # assert usage in tests
 
 [tool.ruff.lint.isort]
-known-first-party = ["Trimarr"]
+known-first-party = ["trimarr"]
 
 [tool.mypy]
 python_version = "3.12"

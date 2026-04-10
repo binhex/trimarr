@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from core.processor import CorruptOutputError, MkvTrack, build_mkvmerge_command, probe_file, process_file
+from trimarr.processor import CorruptOutputError, MkvTrack, build_mkvmerge_command, probe_file, process_file
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1046,7 +1046,7 @@ class TestProcessFileOsFailures:
         mkv.write_bytes(b"original")
         cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
 
-        with patch("core.processor.tempfile.mkstemp", side_effect=OSError("no space left on device")):
+        with patch("trimarr.processor.tempfile.mkstemp", side_effect=OSError("no space left on device")):
             result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
 
         assert result is False

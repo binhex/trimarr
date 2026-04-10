@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from core.database import _PARTIAL_HASH_BYTES, Database, fingerprint
+from trimarr.database import _PARTIAL_HASH_BYTES, Database, fingerprint
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -328,7 +328,7 @@ class TestProfileTracking:
             "  processed_at DATETIME DEFAULT CURRENT_TIMESTAMP"
             ")"
         )
-        from core.database import fingerprint
+        from trimarr.database import fingerprint
 
         conn.execute(
             "INSERT INTO processed_files (file_path, file_hash) VALUES (?, ?)",
