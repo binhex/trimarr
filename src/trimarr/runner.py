@@ -11,8 +11,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from core.database import Database
-from core.processor import CorruptOutputError, build_mkvmerge_command, probe_file, process_file
+from trimarr.database import Database
+from trimarr.processor import CorruptOutputError, build_mkvmerge_command, probe_file, process_file
 
 if TYPE_CHECKING:
     from loguru import Logger

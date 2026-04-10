@@ -6,8 +6,8 @@ from pathlib import Path
 
 import click
 
-from core.logging import create_logger
-from utils.utils import get_app_data_dir
+from trimarr.downloader import get_app_data_dir
+from trimarr.logging import create_logger
 
 try:
     _VERSION = version("Trimarr")
@@ -235,8 +235,8 @@ def cli(
     user-defined criteria. It uses matroska CLI tools for processing the video files and SQLite for tracking which files
     have already been processed to avoid redundant work.
     """
-    from trimarr.main import run
-    from utils.utils import download_mkvmerge, get_installed_mkvmerge_tag, get_latest_mkvmerge_tag
+    from trimarr.downloader import download_mkvmerge, get_installed_mkvmerge_tag, get_latest_mkvmerge_tag
+    from trimarr.runner import run
 
     # Parse comma-separated language codes into a normalised list.
     languages = [code.strip().lower() for code in language.split(",") if code.strip()]
