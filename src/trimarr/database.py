@@ -135,7 +135,7 @@ class Database:
         Args:
             path: Absolute or relative path to the MKV file.
             profile_hash: SHA-256 hex digest of the current processing configuration
-                (see :func:`trimarr.main._build_profile_hash`).
+                (see :func:`trimarr.runner._build_profile_hash`).
 
         Returns:
             ``True`` if the file has been processed with the same content and the same
