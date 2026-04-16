@@ -39,3 +39,8 @@ repos:
     hooks:
       - id: autoflake
         args: [--recursive, --remove-all-unused-imports, --remove-unused-variables, --ignore-pass-after-docstring, --in-place]
+
+  -   repo: https://github.com/hhatto/autopep8
+      rev: v2.3.2
+      hooks:
+      -   id: autopep8
