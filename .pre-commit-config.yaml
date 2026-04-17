@@ -13,10 +13,13 @@ repos:
       - id: mixed-line-ending
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.1
+    # Ruff version.
+    rev: v0.15.11
     hooks:
-      - id: ruff
-        args: [--fix, --exit-non-zero-on-fix]
+      # Run the linter.
+      - id: ruff-check
+        args: [ --fix ]
+      # Run the formatter.
       - id: ruff-format
 
   - repo: https://github.com/pre-commit/mirrors-mypy
@@ -39,8 +42,3 @@ repos:
     hooks:
       - id: autoflake
         args: [--recursive, --remove-all-unused-imports, --remove-unused-variables, --ignore-pass-after-docstring, --in-place]
-
-  -   repo: https://github.com/hhatto/autopep8
-      rev: v2.3.2
-      hooks:
-      -   id: autopep8
