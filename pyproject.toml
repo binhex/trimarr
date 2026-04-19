@@ -29,7 +29,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "autopep8>=2.3.2",
     "debugpy>=1.8.20",
     "python-lsp-server>=1.14.0",
     "python-lsp-ruff>=2.3.1",
