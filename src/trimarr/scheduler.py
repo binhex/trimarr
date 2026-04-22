@@ -140,7 +140,7 @@ def run_scheduled(
             t0 = time.monotonic()
             try:
                 run_fn()
-            except (Exception, SystemExit) as exc:
+            except Exception as exc:
                 logger.error(f"Scheduler: run failed: {exc}")
             elapsed = time.monotonic() - t0
 

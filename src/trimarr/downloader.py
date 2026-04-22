@@ -106,7 +106,7 @@ def _extract_from_zip(archive_path: Path, binary_name: str, tmp_dir: Path) -> Pa
             raise RuntimeError(f"Could not find '{binary_name}' inside '{archive_path.name}'.")
         # Validate the entry does not escape the extraction directory (path-traversal guard).
         extracted = (tmp_dir / names[0]).resolve()
-        if not str(extracted).startswith(str(tmp_dir.resolve())):
+        if not extracted.is_relative_to(tmp_dir.resolve()):
             raise RuntimeError(f"Archive entry '{names[0]}' would escape the extraction directory.")
         zf.extract(names[0], path=tmp_dir)
     if not extracted.exists():
