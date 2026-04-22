@@ -591,7 +591,7 @@ def process_file(
     command: list[str],
     no_backup: bool,
     logger: Logger,
-) -> bool:
+) -> str | None:
     """Execute a pre-built mkvmerge command and safely replace *file_path*.
 
     The workflow is:
@@ -611,7 +611,7 @@ def process_file(
         logger: Loguru logger instance.
 
     Returns:
-        *True* on success, *False* on failure.
+        *None* on success, or a concise single-line error reason string on failure.
     """
     tmp_path: Path | None = None
     try:
@@ -632,11 +632,13 @@ def process_file(
             result = subprocess.run(patched_cmd, capture_output=True, text=True, timeout=3600)
 
         if result.returncode not in (0, 1):
-            logger.error(
-                f"mkvmerge failed for '{file_path}' (exit {result.returncode}).\n"
-                f"{result.stderr.strip() or result.stdout.strip()}"
-            )
-            return False
+            stderr = result.stderr.strip() or result.stdout.strip()
+            logger.error(f"mkvmerge failed for '{file_path}' (exit {result.returncode}).\n{stderr}")
+            first_stderr = stderr.splitlines()[0].strip() if stderr else ""
+            reason = f"mkvmerge failed (exit {result.returncode})"
+            if first_stderr:
+                reason += f": {first_stderr}"
+            return reason
 
         # mkvmerge exit 1 means "completed with warnings" — the output is still valid.
         # Log the warning but continue; the output file check below confirms usability.
@@ -650,7 +652,7 @@ def process_file(
         # A zero-size or heavily truncated file indicates a crashed/partial write.
         if not tmp_path.exists():
             logger.error(f"mkvmerge produced no output file for '{file_path}'.")
-            return False
+            return "mkvmerge produced no output file"
         output_size = tmp_path.stat().st_size
         min_acceptable = max(1, int(input_size * _MIN_OUTPUT_RATIO))
         if output_size < min_acceptable:
@@ -658,7 +660,7 @@ def process_file(
                 f"mkvmerge output for '{file_path}' is suspiciously small "
                 f"({output_size} B vs {input_size} B input); rejecting to avoid data loss."
             )
-            return False
+            return f"mkvmerge output suspiciously small ({output_size} B vs {input_size} B input)"
 
         # Structural validation: probe the output with mkvmerge -J to confirm
         # it is a well-formed MKV container.  This catches partial writes and
@@ -717,12 +719,12 @@ def process_file(
             logger.debug(f"Original backed up to '{backup_path}'.")
         tmp_path = None  # Ownership transferred; do not delete in finally block.
 
-        return True
+        return None
 
     except Exception as exc:  # noqa: BLE001
         logger.error(f"Unexpected error processing '{file_path}': {exc}")
         logger.debug("", exc_info=True)
-        return False
+        return f"unexpected error: {str(exc).splitlines()[0].strip()}"
     finally:
         if tmp_path is not None and tmp_path.exists():
             try:

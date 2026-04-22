@@ -111,11 +111,6 @@ class TestGetAppDataDir:
             result = get_app_data_dir()
         assert result == Path.home() / "AppData" / "Local" / "trimarr"
 
-    def test_returns_path_instance(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
-        with patch("trimarr.downloader.platform.system", return_value="Linux"):
-            assert isinstance(get_app_data_dir(), Path)
-
 
 class TestGetInstalledMkvmergeTag:
     """Tests for get_installed_mkvmerge_tag()."""
