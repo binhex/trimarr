@@ -43,6 +43,10 @@ def parse_interval(interval: str) -> int:
         raise ValueError(f"Unknown unit '{unit}'. Valid units: {valid}.")
 
     n_str = interval[:-1]
+    if n_str != n_str.strip():
+        raise ValueError(
+            f"Invalid interval '{interval}': N must be immediately adjacent to the unit, no whitespace allowed."
+        )
     try:
         n = int(n_str)
     except ValueError:

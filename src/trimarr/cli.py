@@ -285,6 +285,16 @@ def cli(
     if run_on_start and schedule is None:
         raise click.UsageError("--run-on-start requires --schedule.")
 
+    if schedule is not None:
+        from trimarr.scheduler import parse_interval
+
+        try:
+            interval_seconds = parse_interval(schedule)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="--schedule") from exc
+    else:
+        interval_seconds = None
+
     # Logger format for consistent output styling
     log_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>"
 
@@ -344,13 +354,9 @@ def cli(
         )
 
     if schedule is not None:
-        from trimarr.scheduler import parse_interval, run_scheduled
+        from trimarr.scheduler import run_scheduled
 
-        try:
-            interval_seconds = parse_interval(schedule)
-        except ValueError as exc:
-            raise click.BadParameter(str(exc), param_hint="--schedule") from exc
-
+        assert interval_seconds is not None  # guaranteed by early validation block above
         run_scheduled(_run, interval_seconds=interval_seconds, run_on_start=run_on_start, logger=logger)
     else:
         _run()
