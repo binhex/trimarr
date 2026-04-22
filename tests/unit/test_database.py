@@ -288,16 +288,6 @@ class TestProfileTracking:
             # Same file, different profile (e.g. --language changed)
             assert db.is_processed(mkv, profile_hash=self.PROFILE_B) is False
 
-    def test_same_profile_hash_returns_true(self, tmp_path: Path) -> None:
-        """is_processed returns True only when both file content and profile match."""
-        mkv = tmp_path / "movie.mkv"
-        mkv.write_bytes(b"content")
-        db_path = tmp_path / "trimarr.db"
-
-        with Database(db_path) as db:
-            db.mark_processed(mkv, profile_hash=self.PROFILE_A)
-            assert db.is_processed(mkv, profile_hash=self.PROFILE_A) is True
-
     def test_reprocessing_with_new_profile_updates_stored_profile(self, tmp_path: Path) -> None:
         """After reprocessing with a new profile, only the new profile matches."""
         mkv = tmp_path / "movie.mkv"

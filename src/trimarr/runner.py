@@ -35,6 +35,24 @@ def _fmt_bytes(n: int) -> str:
     return f"{value:.2f} TB"
 
 
+def _print_failure_report(failures: list[tuple[Path, str]], logger: Logger) -> None:
+    """Log a consolidated list of all files that failed processing.
+
+    Called after the run summary to provide a single point of reference for
+    any files that could not be processed, regardless of the reason.  Each
+    entry is the file path paired with a concise single-line error reason.
+
+    Args:
+        failures: List of ``(file_path, reason)`` pairs collected during the run.
+        logger: Loguru logger instance.
+    """
+    if not failures:
+        return
+    logger.warning(f"Failed files ({len(failures)}):")
+    for file_path, reason in failures:
+        logger.warning(f"  {file_path}: {reason}")
+
+
 def _build_profile_hash(
     language: list[str],
     keep_audio: bool,
@@ -202,6 +220,7 @@ def run(
     counts: dict[str, int] = {"processed": 0, "skipped": 0, "failed": 0, "no_change": 0}
     session_bytes_saved: int = 0
     interrupted = False
+    failures: list[tuple[Path, str]] = []
 
     try:
         with Database(database_path) as db:
@@ -219,7 +238,9 @@ def run(
                     try:
                         tracks = probe_file(mkvmerge_path, file_path)
                     except RuntimeError as exc:
+                        reason = f"probe failed: {str(exc).splitlines()[0].strip()}"
                         logger.error(f"Could not probe '{file_path}': {exc}")
+                        failures.append((file_path, reason))
                         counts["failed"] += 1
                         continue
 
@@ -264,27 +285,32 @@ def run(
 
                     # Process the file
                     size_before = file_path.stat().st_size
-                    success = process_file(
+                    error = process_file(
                         mkvmerge_path=mkvmerge_path,
                         file_path=file_path,
                         command=cmd,
                         no_backup=no_backup,
                         logger=logger,
                     )
-                    if success:
+                    if error is None:
                         bytes_saved = max(0, size_before - file_path.stat().st_size)
                         session_bytes_saved += bytes_saved
                         db.mark_processed(file_path, profile_hash=profile_hash, bytes_saved=bytes_saved)
                         logger.success(f"Processed: {file_path.name}")
                         counts["processed"] += 1
                     else:
+                        failures.append((file_path, error))
                         counts["failed"] += 1
 
                 except OSError as exc:
+                    reason = f"filesystem error: {str(exc).splitlines()[0].strip()}"
                     logger.error(f"File system error processing '{file_path}': {exc}")
+                    failures.append((file_path, reason))
                     counts["failed"] += 1
                 except sqlite3.Error as exc:
+                    reason = f"database error: {str(exc).splitlines()[0].strip()}"
                     logger.error(f"Database error processing '{file_path}': {exc}")
+                    failures.append((file_path, reason))
                     counts["failed"] += 1
 
     except CorruptOutputError as exc:
@@ -330,6 +356,7 @@ def run(
         logger.warning("Interrupted — showing partial results.")
 
     _print_summary(counts, session_bytes_saved, dry_run, interrupted, database_path, logger)
+    _print_failure_report(failures, logger)
 
     if interrupted:
         sys.exit(130)

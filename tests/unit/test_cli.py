@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -195,3 +196,129 @@ class TestVersionFlag:
         result = runner.invoke(cli, ["--version"])
         assert result.exit_code == 0
         assert "trimarr" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# Version fallback when package metadata is absent
+# ---------------------------------------------------------------------------
+
+
+class TestVersionFallback:
+    """_VERSION falls back to 'unknown' when importlib cannot find the package."""
+
+    def test_version_unknown_when_package_not_installed(self) -> None:
+        from importlib.metadata import PackageNotFoundError as _PNFError
+
+        import trimarr.cli as cli_module
+
+        with patch("importlib.metadata.version", side_effect=_PNFError):
+            importlib.reload(cli_module)
+        try:
+            assert cli_module._VERSION == "unknown"
+        finally:
+            importlib.reload(cli_module)
+
+
+# ---------------------------------------------------------------------------
+# Help output / custom epilog
+# ---------------------------------------------------------------------------
+
+
+class TestHelpOutput:
+    """--help renders the custom epilog with usage examples."""
+
+    def test_help_shows_examples(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--help"])
+        assert result.exit_code == 0
+        assert "Examples:" in result.output
+        assert "{prog}" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# Auto-download when the default managed mkvmerge binary is absent
+# ---------------------------------------------------------------------------
+
+
+class TestAutoDownloadMkvmerge:
+    """When the managed mkvmerge binary is absent it is downloaded automatically."""
+
+    def test_downloads_when_default_path_missing(self, tmp_path: Path) -> None:
+        fake_bin = tmp_path / "mkvmerge"
+        with (
+            patch("trimarr.cli._DEFAULT_MKVMERGE_PATH", "/nonexistent/mkvmerge"),
+            patch("trimarr.downloader.download_mkvmerge", return_value=fake_bin) as mock_dl,
+            patch("trimarr.runner.run") as mock_run,
+        ):
+            result = CliRunner().invoke(cli, _base_args(str(tmp_path)))
+        assert result.exit_code == 0, result.output
+        mock_dl.assert_called_once()
+        assert mock_run.call_args.kwargs["mkvmerge_path"] == str(fake_bin)
+
+    def test_download_failure_exits_with_error(self, tmp_path: Path) -> None:
+        with (
+            patch("trimarr.cli._DEFAULT_MKVMERGE_PATH", "/nonexistent/mkvmerge"),
+            patch("trimarr.downloader.download_mkvmerge", side_effect=RuntimeError("network error")),
+        ):
+            result = CliRunner().invoke(cli, _base_args(str(tmp_path)))
+        assert result.exit_code != 0
+        assert "mkvmerge" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# Managed mkvmerge update-check branches
+# ---------------------------------------------------------------------------
+
+
+class TestMkvmergeUpdateCheck:
+    """Update-check paths: no tag file, newer tag available, and check failure."""
+
+    def test_updates_when_no_version_tag_present(self, tmp_path: Path) -> None:
+        """Binary exists but has no version tag (pre-versioning install) — update is triggered."""
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+        fake_new_bin = tmp_path / "mkvmerge_new"
+        with (
+            patch("trimarr.cli._DEFAULT_MKVMERGE_PATH", str(fake_mkvmerge)),
+            patch("trimarr.downloader.get_installed_mkvmerge_tag", return_value=None),
+            patch("trimarr.downloader.get_latest_mkvmerge_tag", return_value="v82.0.0"),
+            patch("trimarr.downloader.download_mkvmerge", return_value=fake_new_bin) as mock_dl,
+            patch("trimarr.runner.run") as mock_run,
+        ):
+            result = CliRunner().invoke(cli, _base_args(str(tmp_path)))
+        assert result.exit_code == 0, result.output
+        mock_dl.assert_called_once()
+        assert mock_run.call_args.kwargs["mkvmerge_path"] == str(fake_new_bin)
+
+    def test_updates_when_newer_version_available(self, tmp_path: Path) -> None:
+        """When installed tag differs from latest, the binary is updated."""
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+        fake_new_bin = tmp_path / "mkvmerge_new"
+        with (
+            patch("trimarr.cli._DEFAULT_MKVMERGE_PATH", str(fake_mkvmerge)),
+            patch("trimarr.downloader.get_installed_mkvmerge_tag", return_value="v80.0.0"),
+            patch("trimarr.downloader.get_latest_mkvmerge_tag", return_value="v82.0.0"),
+            patch("trimarr.downloader.download_mkvmerge", return_value=fake_new_bin) as mock_dl,
+            patch("trimarr.runner.run") as mock_run,
+        ):
+            result = CliRunner().invoke(cli, _base_args(str(tmp_path)))
+        assert result.exit_code == 0, result.output
+        mock_dl.assert_called_once()
+        assert mock_run.call_args.kwargs["mkvmerge_path"] == str(fake_new_bin)
+
+    def test_update_check_failure_continues_with_installed_version(self, tmp_path: Path) -> None:
+        """A failing update check logs a warning but does not abort the run."""
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+        mock_logger = MagicMock()
+        with (
+            patch("trimarr.cli._DEFAULT_MKVMERGE_PATH", str(fake_mkvmerge)),
+            patch("trimarr.cli.create_logger", return_value=mock_logger),
+            patch("trimarr.downloader.get_installed_mkvmerge_tag", side_effect=OSError("no network")),
+            patch("trimarr.runner.run") as mock_run,
+        ):
+            result = CliRunner().invoke(cli, _base_args(str(tmp_path)))
+        assert result.exit_code == 0, result.output
+        mock_logger.warning.assert_called_once()
+        mock_run.assert_called_once()

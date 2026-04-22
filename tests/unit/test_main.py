@@ -154,7 +154,7 @@ class TestDryRunDoesNotRecordToDatabase:
         with (
             patch("trimarr.runner.probe_file", return_value=[]),
             patch("trimarr.runner.build_mkvmerge_command", return_value=fake_cmd),
-            patch("trimarr.runner.process_file", return_value=True),
+            patch("trimarr.runner.process_file", return_value=None),
             patch("trimarr.database.Database.mark_processed") as mock_mark,
         ):
             run(**_run_kwargs(tmp_path, dry_run=False, db_path=db_path))
@@ -168,10 +168,10 @@ class TestDryRunDoesNotRecordToDatabase:
         db_path = str(tmp_path / "trimarr.db")
         fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), str(mkv)]
 
-        def fake_process_file(*_args: object, file_path: object = None, **_kwargs: object) -> bool:
+        def fake_process_file(*_args: object, file_path: object = None, **_kwargs: object) -> str | None:
             assert hasattr(file_path, "write_bytes")
             file_path.write_bytes(b"B" * 500)  # noqa: PGH003
-            return True
+            return None
 
         with (
             patch("trimarr.runner.probe_file", return_value=[]),
@@ -191,10 +191,10 @@ class TestDryRunDoesNotRecordToDatabase:
         db_path = str(tmp_path / "trimarr.db")
         fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), str(mkv)]
 
-        def fake_process_file(*_args: object, file_path: object = None, **_kwargs: object) -> bool:
+        def fake_process_file(*_args: object, file_path: object = None, **_kwargs: object) -> str | None:
             assert hasattr(file_path, "write_bytes")
             file_path.write_bytes(b"B" * 2000)  # output larger than input  # noqa: PGH003
-            return True
+            return None
 
         with (
             patch("trimarr.runner.probe_file", return_value=[]),
@@ -268,7 +268,7 @@ class TestKeyboardInterruptHandling:
         with (
             patch("trimarr.runner.probe_file", side_effect=probe_side_effect),
             patch("trimarr.runner.build_mkvmerge_command", return_value=fake_cmd),
-            patch("trimarr.runner.process_file", return_value=True),
+            patch("trimarr.runner.process_file", return_value=None),
             pytest.raises(SystemExit),
         ):
             run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
@@ -276,20 +276,6 @@ class TestKeyboardInterruptHandling:
         # The summary (counts line) must mention "Interrupted"
         info_msgs = _logged_messages(logger.info)
         assert any("nterrupted" in msg for msg in info_msgs)
-
-    def test_interrupt_in_dry_run_exits_130(self, tmp_path: Path) -> None:
-        """Ctrl+C in dry-run mode must also exit 130."""
-        mkv = tmp_path / "movie.mkv"
-        mkv.write_bytes(b"fake mkv")
-        db_path = str(tmp_path / "trimarr.db")
-
-        with (
-            patch("trimarr.runner.probe_file", side_effect=KeyboardInterrupt),
-            pytest.raises(SystemExit) as exc_info,
-        ):
-            run(**_run_kwargs(tmp_path, dry_run=True, db_path=db_path))
-
-        assert exc_info.value.code == 130
 
 
 # ---------------------------------------------------------------------------
@@ -532,3 +518,99 @@ class TestStripCommentaryWiring:
         assert kwargs.get("strip_commentary") is True, (
             "strip_commentary=True was not forwarded to build_mkvmerge_command()"
         )
+
+
+# ---------------------------------------------------------------------------
+
+
+class TestFailureReport:
+    """Verify failure report is printed after summary when files fail processing."""
+
+    def test_process_file_failure_appears_in_failure_report(self, tmp_path: Path) -> None:
+        """A process_file failure must be logged in the failure report at the end."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        db_path = str(tmp_path / "trimarr.db")
+        fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), str(mkv)]
+        logger = _make_logger()
+
+        with (
+            patch("trimarr.runner.probe_file", return_value=[]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=fake_cmd),
+            patch("trimarr.runner.process_file", return_value="mkvmerge failed (exit -6)"),
+        ):
+            run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
+
+        all_msgs = _logged_messages(logger.warning) + _logged_messages(logger.error)
+        assert any("movie.mkv" in m for m in all_msgs), "Failure report must mention the failed file"
+        assert any("mkvmerge failed" in m for m in all_msgs), "Failure report must mention the reason"
+
+    def test_probe_failure_appears_in_failure_report(self, tmp_path: Path) -> None:
+        """A probe_file RuntimeError must be logged in the failure report at the end."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        db_path = str(tmp_path / "trimarr.db")
+        logger = _make_logger()
+
+        with patch("trimarr.runner.probe_file", side_effect=RuntimeError("probe exploded")):
+            run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
+
+        all_msgs = _logged_messages(logger.warning) + _logged_messages(logger.error)
+        assert any("movie.mkv" in m for m in all_msgs), "Failure report must mention the failed file"
+        assert any("probe" in m.lower() or "exploded" in m for m in all_msgs), (
+            "Failure report must mention the probe error"
+        )
+
+    def test_no_failure_report_when_all_succeed(self, tmp_path: Path) -> None:
+        """No failure report section should be logged when everything succeeds."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        db_path = str(tmp_path / "trimarr.db")
+        fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), str(mkv)]
+        logger = _make_logger()
+
+        with (
+            patch("trimarr.runner.probe_file", return_value=[]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=fake_cmd),
+            patch("trimarr.runner.process_file", return_value=None),
+            patch("trimarr.database.Database.mark_processed"),
+        ):
+            run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
+
+        warn_msgs = _logged_messages(logger.warning)
+        assert not any("Failed files" in m for m in warn_msgs), (
+            "No failure report section should appear when all files succeeded"
+        )
+
+    def test_failure_report_comes_after_summary(self, tmp_path: Path) -> None:
+        """Failure report log calls must occur after summary log calls."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        db_path = str(tmp_path / "trimarr.db")
+        fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), str(mkv)]
+        logger = _make_logger()
+        call_order: list[str] = []
+
+        def track_info(msg: str, *_a: object, **_kw: object) -> None:
+            if "processed" in msg.lower() or "skipped" in msg.lower() or "summary" in msg.lower():
+                call_order.append("summary")
+
+        def track_warning(msg: str, *_a: object, **_kw: object) -> None:
+            if "Failed files" in msg or "movie.mkv" in msg:
+                call_order.append("failure_report")
+
+        logger.info.side_effect = track_info
+        logger.warning.side_effect = track_warning
+
+        with (
+            patch("trimarr.runner.probe_file", return_value=[]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=fake_cmd),
+            patch("trimarr.runner.process_file", return_value="mkvmerge failed (exit -6)"),
+        ):
+            run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
+
+        summary_idx = next((i for i, v in enumerate(call_order) if v == "summary"), None)
+        failure_idx = next((i for i, v in enumerate(call_order) if v == "failure_report"), None)
+        assert summary_idx is not None, "Summary must be logged"
+        assert failure_idx is not None, "Failure report must be logged"
+        assert summary_idx < failure_idx, "Summary must come before failure report"

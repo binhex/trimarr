@@ -7,7 +7,7 @@ from pathlib import Path
 import click
 
 from trimarr.downloader import get_app_data_dir
-from trimarr.logging import create_logger
+from trimarr.logger import create_logger
 
 try:
     _VERSION = version("Trimarr")

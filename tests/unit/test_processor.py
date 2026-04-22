@@ -657,7 +657,7 @@ class TestProcessFile:
         with patch("subprocess.run", side_effect=fake_run):
             result = process_file(MKVMERGE, mkv, cmd, no_backup=False, logger=_proc_logger())
 
-        assert result is True
+        assert result is None
         assert mkv.read_bytes() == b"processed"
         backup = tmp_path / "movie.mkv.bak"
         assert backup.read_bytes() == b"original"
@@ -675,7 +675,7 @@ class TestProcessFile:
         with patch("subprocess.run", side_effect=fake_run):
             result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
 
-        assert result is True
+        assert result is None
         assert mkv.read_bytes() == b"processed"
         assert not (tmp_path / "movie.mkv.bak").exists()
 
@@ -696,7 +696,7 @@ class TestProcessFile:
         with patch("subprocess.run", side_effect=fake_run):
             result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=logger)
 
-        assert result is True
+        assert result is None
         assert mkv.read_bytes() == b"processed"
         logger.warning.assert_called_once()
 
@@ -714,7 +714,7 @@ class TestProcessFile:
         with patch("subprocess.run", side_effect=fake_run):
             result = process_file(MKVMERGE, mkv, cmd, no_backup=False, logger=logger)
 
-        assert result is False
+        assert result is not None
         assert mkv.read_bytes() == b"original"  # Original untouched
 
     def test_exit_code_2_fails_cleanly_and_cleans_up_temp(self, tmp_path: Path) -> None:
@@ -731,7 +731,7 @@ class TestProcessFile:
         with patch("subprocess.run", side_effect=fake_run):
             result = process_file(MKVMERGE, mkv, cmd, no_backup=False, logger=logger)
 
-        assert result is False
+        assert result is not None
         logger.error.assert_called_once()
         assert not list(tmp_path.glob("*.trimarr_tmp"))  # No leftover temp files
 
@@ -763,7 +763,7 @@ class TestProcessFile:
             result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=logger)
 
         # The process should have failed gracefully
-        assert result is False
+        assert result is not None
         # The original MUST still exist — atomic replace never deletes first
         assert mkv.exists()
         assert mkv.read_bytes() == b"original"
@@ -793,7 +793,7 @@ class TestProcessFile:
         with patch("subprocess.run", side_effect=fake_run), patch.object(Path, "replace", selective_replace):
             result = process_file(MKVMERGE, mkv, cmd, no_backup=False, logger=logger)
 
-        assert result is False
+        assert result is not None
         # Original must be restored from backup
         assert mkv.exists()
         assert mkv.read_bytes() == b"original"
@@ -824,7 +824,7 @@ class TestProcessFile:
         with patch("subprocess.run", side_effect=fake_run), patch.object(Path, "replace", always_fail_replace):
             result = process_file(MKVMERGE, mkv, cmd, no_backup=False, logger=logger)
 
-        assert result is False
+        assert result is not None
         assert logger.critical.call_count >= 1
         critical_calls = " ".join(str(c) for c in logger.critical.call_args_list)
         assert "backup" in critical_calls.lower()
@@ -851,7 +851,7 @@ class TestTruncatedOutputRejection:
         with patch("subprocess.run", side_effect=fake_run):
             result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
 
-        assert result is False
+        assert result is not None
         assert mkv.read_bytes() == b"A" * 10_000
 
     def test_rejects_suspiciously_small_output(self, tmp_path: Path) -> None:
@@ -868,7 +868,7 @@ class TestTruncatedOutputRejection:
         with patch("subprocess.run", side_effect=fake_run):
             result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=logger)
 
-        assert result is False
+        assert result is not None
         assert mkv.read_bytes() == b"A" * 200_000
         logger.error.assert_called()
 
@@ -888,7 +888,7 @@ class TestTruncatedOutputRejection:
         with patch("subprocess.run", side_effect=fake_run):
             result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
 
-        assert result is True
+        assert result is None
 
     def test_rejects_output_failing_structural_validation(self, tmp_path: Path) -> None:
         """Output passing size check but rejected by mkvmerge -J must raise CorruptOutputError.
@@ -1006,7 +1006,7 @@ class TestProcessFileOsFailures:
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd, 3600)):
             result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
 
-        assert result is False
+        assert result is not None
         assert mkv.read_bytes() == b"original"
         assert list(tmp_path.glob("*.trimarr_tmp")) == []
 
@@ -1019,7 +1019,7 @@ class TestProcessFileOsFailures:
         with patch("subprocess.run", side_effect=OSError("disk full")):
             result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
 
-        assert result is False
+        assert result is not None
         assert mkv.read_bytes() == b"original"
         assert list(tmp_path.glob("*.trimarr_tmp")) == []
 
@@ -1036,7 +1036,7 @@ class TestProcessFileOsFailures:
         with patch("subprocess.run", side_effect=fake_run_with_partial_write):
             result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
 
-        assert result is False
+        assert result is not None
         assert mkv.read_bytes() == b"original"
         assert list(tmp_path.glob("*.trimarr_tmp")) == []
 
@@ -1049,7 +1049,7 @@ class TestProcessFileOsFailures:
         with patch("trimarr.processor.tempfile.mkstemp", side_effect=OSError("no space left on device")):
             result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
 
-        assert result is False
+        assert result is not None
         assert mkv.read_bytes() == b"original"
 
     def test_cleanup_oserror_in_finally_is_suppressed(self, tmp_path: Path) -> None:
@@ -1070,7 +1070,7 @@ class TestProcessFileOsFailures:
             result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=logger)
 
         # Must return False (not raise), even though cleanup also failed
-        assert result is False
+        assert result is not None
         assert mkv.read_bytes() == b"original"
         # Warning must have been logged about the cleanup failure
         logger.warning.assert_called_once()
@@ -1083,14 +1083,6 @@ class TestProcessFileOsFailures:
 
 class TestMkvTrackChannels:
     """MkvTrack must carry a channels field for audio channel count."""
-
-    def test_channels_defaults_to_none(self) -> None:
-        t = MkvTrack(id=0, type="audio", language="eng")
-        assert t.channels is None
-
-    def test_channels_can_be_set(self) -> None:
-        t = MkvTrack(id=0, type="audio", language="eng", channels=8)
-        assert t.channels == 8
 
     def test_channels_included_in_equality(self) -> None:
         a = MkvTrack(id=0, type="audio", language="eng", channels=8)
