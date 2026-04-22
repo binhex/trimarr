@@ -55,7 +55,14 @@ def parse_interval(interval: str) -> int:
     if n <= 0:
         raise ValueError(f"Interval N must be a positive integer, got {n}.")
 
-    return n * _UNITS[unit]
+    result = n * _UNITS[unit]
+    max_interval = 365 * 86400  # 1 year in seconds
+    if result > max_interval:
+        raise ValueError(
+            f"Interval '{interval}' ({result}s) exceeds the maximum allowed of 365 days ({max_interval}s)."
+        )
+
+    return result
 
 
 def _format_duration(seconds: float) -> str:
@@ -133,7 +140,7 @@ def run_scheduled(
             t0 = time.monotonic()
             try:
                 run_fn()
-            except Exception as exc:
+            except (Exception, SystemExit) as exc:
                 logger.error(f"Scheduler: run failed: {exc}")
             elapsed = time.monotonic() - t0
 
