@@ -83,6 +83,8 @@ trimarr --help
 | `--strip-lower-channels` | After language filtering, drop any audio tracks whose channel count is strictly below the highest channel count among the surviving audio tracks. For example, given English tracks at 8ch, 8ch, and 2ch, the 2ch track is removed. Tracks with an unknown channel count are always kept. Has no effect when `--keep-audio` is set. **Disabled by default** — enable only when you are confident lower-channel duplicates are not needed. | `false` | — | `flag` |
 | `--strip-commentary` | If specified, audio and subtitle tracks whose name contains "commentary" (case-insensitive) will be removed after language filtering. **Audio final gate:** if stripping would leave zero audio tracks, all audio is retained and a warning is logged — a silent file is never acceptable. Subtitles have no such gate and are stripped unconditionally. Has no effect on audio when `--keep-audio` is set, or on subtitles when `--keep-subtitles` is set. **Disabled by default.** | `false` | — | `flag` |
 | `--dry-run` | Log planned changes without modifying any files. Processed files are not recorded to the database in this mode. | `false` | — | `flag` |
+| `--schedule` | Run on a repeating schedule. Format: `<N><unit>` where unit is `m` (minutes), `h` (hours), `d` (days), or `w` (weeks). Examples: `30m`, `6h`, `1d`, `2w`. When omitted, trimarr runs once and exits. | — | `6h` | `string` |
+| `--run-on-start` | When used with `--schedule`, execute an immediate run before the first scheduled interval. Without `--schedule` this flag is an error. | `false` | — | `flag` |
 
 ✱ Required.
 
@@ -148,6 +150,40 @@ flowchart TD
 > If a file needs no changes (all tracks already match, no metadata to edit), it is marked as
 > processed in the database and skipped on all future runs — unless the file content or processing
 > profile changes.
+
+## Scheduler
+
+By default trimarr runs once and exits. Pass `--schedule` to run on a repeating interval.
+
+```bash
+# Run every 6 hours
+trimarr --language eng --media-path /mnt/media --schedule 6h
+
+# Run every day, with an immediate run on startup
+trimarr --language eng --media-path /mnt/media --schedule 1d --run-on-start
+```
+
+### Schedule format
+
+| Unit | Meaning  | Example |
+| ---- | -------- | ------- |
+| `m`  | minutes  | `30m`   |
+| `h`  | hours    | `6h`    |
+| `d`  | days     | `1d`    |
+| `w`  | weeks    | `2w`    |
+
+N must be a positive integer. Fractional values (e.g. `1.5h`) are not supported.
+
+### Drift correction
+
+The scheduler uses a **run-then-sleep** strategy. The sleep duration for each cycle is adjusted by
+the time the previous run took, so the interval is measured from the *start* of each run rather
+than the end. If a run exceeds the interval, the next run fires immediately (with a warning logged)
+and no drift accumulates over time.
+
+### Stopping the scheduler
+
+Press **Ctrl+C** at any time. The scheduler logs `Scheduler stopped.` and exits with code 0.
 
 ## Development
 
