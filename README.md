@@ -22,6 +22,15 @@ Removes (trims) unwanted audio and subtitles from matroska container format vide
 - **Graceful interrupt** — Ctrl+C shows a partial summary before exiting with code 130.
 - **Safe file replacement** — output is written to a temp file first, then atomically renamed over
   the original so a failed remux never corrupts the source.
+- **Corrupt output safeguard** — before replacing the original, trimarr probes the output with
+  `mkvmerge -J` to confirm it is a structurally valid MKV and rejects any output smaller than 50 %
+  of the source. If either check fails, all processing halts immediately, the temp file is preserved
+  for inspection, and the original file is left untouched.
+- **BCP-47 / ISO 639-1 language tag support** — files using IETF `language_ietf` tags (e.g. `en`,
+  `en-US`, `fr`) are automatically mapped to ISO 639-2 codes before matching, so `--language eng`
+  correctly matches tracks tagged as either `eng` or `en`.
+- **Failure report** — after the run summary, a consolidated list of every file that could not be
+  processed is printed with a concise reason for each failure.
 
 ## Prerequisites
 
@@ -98,20 +107,22 @@ flowchart TD
     F -- Yes --> G([⚠️ Keep all\ncommentary-only audio])
     F -- No --> H[Drop non-matching tracks]
     H --> SC{--strip-commentary?}
-    SC -- No --> I
+    SC -- No --> L
     SC -- Yes --> SC2{Stripping would\nleave zero audio?}
-    SC2 -- Yes --> SC3([⚠️ Keep all audio\nsilent-file gate])
+    SC2 -- Yes --> SC3[⚠️ Keep all audio\nsilent-file gate]
+    SC3 --> L
     SC2 -- No --> SC4[Drop audio\ncommentary tracks]
-    SC4 --> I
-    I{Commentary track\nholds default flag?}
-    I -- No --> L{--strip-lower-channels?}
-    I -- Yes --> K[Promote non-commentary\nto default · demote commentary]
-    K --> L
-    L -- No --> J([✅ Apply changes])
+    SC4 --> L
+    L{--strip-lower-channels?}
+    L -- No --> I
     L -- Yes --> M{All surviving tracks\nsame channel count?}
-    M -- Yes --> J
+    M -- Yes --> I
     M -- No --> N[Drop tracks below\nmax channel count]
-    N --> J
+    N --> I
+    I{Commentary track\nholds default flag?}
+    I -- No --> J([✅ Apply changes])
+    I -- Yes --> K[Promote non-commentary\nto default · demote commentary]
+    K --> J
 ```
 
 ### Subtitle tracks
