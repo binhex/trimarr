@@ -148,7 +148,7 @@ class TestRunScheduled:
         mock_sleep.assert_called_once_with(0.0)
 
     def test_system_exit_from_run_fn_propagates(self) -> None:
-        """SystemExit raised by run_fn (e.g. exit code 2 from CorruptOutputError) must propagate."""
+        """SystemExit(2) raised by run_fn (e.g. from CorruptOutputError) must propagate."""
 
         def run_fn() -> None:
             raise SystemExit(2)
@@ -159,6 +159,20 @@ class TestRunScheduled:
 
         assert exc_info.value.code == 2
         logger.error.assert_not_called()
+
+    def test_system_exit_130_from_run_fn_exits_zero(self) -> None:
+        """SystemExit(130) from run_fn (Ctrl+C converted by runner.py) must exit cleanly."""
+
+        def run_fn() -> None:
+            raise SystemExit(130)
+
+        logger = MagicMock()
+        with patch("trimarr.scheduler._sleep_interruptible"), pytest.raises(SystemExit) as exc_info:
+            run_scheduled(run_fn, interval_seconds=3600, run_on_start=True, logger=logger)
+
+        assert exc_info.value.code == 0
+        stop_messages = [str(c) for c in logger.info.call_args_list]
+        assert any("stopped" in m.lower() for m in stop_messages)
 
     def test_drift_correction_sleep_shrinks_by_elapsed(self) -> None:
         """After a 10-minute run on a 1-hour schedule, sleep is 50 minutes (3000s)."""

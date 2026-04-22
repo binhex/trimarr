@@ -140,6 +140,14 @@ def run_scheduled(
             t0 = time.monotonic()
             try:
                 run_fn()
+            except SystemExit as exc:
+                # Exit code 130 means the run was interrupted by Ctrl+C (runner.py converts
+                # KeyboardInterrupt to sys.exit(130)).  Re-raise as KeyboardInterrupt so the
+                # scheduler's outer handler can log "Scheduler stopped." and exit cleanly.
+                # Any other exit code (e.g. 2 for CorruptOutputError) propagates as-is.
+                if exc.code == 130:
+                    raise KeyboardInterrupt from exc
+                raise
             except Exception as exc:
                 logger.error(f"Scheduler: run failed: {exc}")
             elapsed = time.monotonic() - t0
