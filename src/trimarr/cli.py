@@ -69,6 +69,21 @@ Examples:
       --media-path /mnt/media/movies \\
       --mkvmerge-path /usr/bin/mkvmerge \\
       --database-path /var/lib/trimarr/trimarr.db
+
+\b
+  Run every 6 hours, processing immediately on startup:
+    {prog} \\
+      --language eng \\
+      --media-path /mnt/media/movies \\
+      --schedule 6h \\
+      --run-on-start
+
+\b
+  Run daily (first run after 24 hours):
+    {prog} \\
+      --language eng \\
+      --media-path /mnt/media/movies \\
+      --schedule 1d
 \b
 """
 
@@ -211,6 +226,28 @@ Examples:
         " Disabled by default."
     ),
 )
+@click.option(
+    "--schedule",
+    type=click.STRING,
+    required=False,
+    default=None,
+    metavar="<interval>",
+    help=(
+        "Run trimarr repeatedly at the given interval rather than once."
+        " Format: <N><unit> where unit is m (minutes), h (hours), d (days), or w (weeks)."
+        " Examples: 30m, 6h, 1d, 2w."
+        " Omit to run once and exit (default behaviour)."
+    ),
+)
+@click.option(
+    "--run-on-start",
+    is_flag=True,
+    default=False,
+    help=(
+        "When --schedule is set, fire one run immediately on startup before the first timed interval."
+        " Has no effect without --schedule."
+    ),
+)
 @click.version_option(version=_VERSION, prog_name="Trimarr")
 def cli(
     language: str,
@@ -228,6 +265,8 @@ def cli(
     no_update_check: bool,
     strip_lower_channels: bool,
     strip_commentary: bool,
+    schedule: str | None,
+    run_on_start: bool,
 ) -> None:
     """Trimarr - Removes (trims) unwanted audio and subtitles from matroska container format video files.
 
@@ -242,6 +281,9 @@ def cli(
     languages = [code.strip().lower() for code in language.split(",") if code.strip()]
     if not languages:
         raise click.UsageError("--language requires at least one non-empty language code, e.g. --language eng")
+
+    if run_on_start and schedule is None:
+        raise click.UsageError("--run-on-start requires --schedule.")
 
     # Logger format for consistent output styling
     log_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>"
@@ -284,21 +326,34 @@ def cli(
         except Exception as exc:
             logger.warning(f"mkvmerge update check failed ({exc}). Proceeding with installed version.")
 
-    run(
-        language=languages,
-        edit_metadata_title=edit_metadata_title,
-        delete_metadata_title=delete_metadata_title,
-        keep_subtitles=keep_subtitles,
-        keep_audio=keep_audio,
-        media_path=media_path,
-        mkvmerge_path=mkvmerge_path,
-        database_path=database_path,
-        no_backup=no_backup,
-        dry_run=dry_run,
-        logger=logger,
-        strip_lower_channels=strip_lower_channels,
-        strip_commentary=strip_commentary,
-    )
+    def _run() -> None:
+        run(
+            language=languages,
+            edit_metadata_title=edit_metadata_title,
+            delete_metadata_title=delete_metadata_title,
+            keep_subtitles=keep_subtitles,
+            keep_audio=keep_audio,
+            media_path=media_path,
+            mkvmerge_path=mkvmerge_path,
+            database_path=database_path,
+            no_backup=no_backup,
+            dry_run=dry_run,
+            logger=logger,
+            strip_lower_channels=strip_lower_channels,
+            strip_commentary=strip_commentary,
+        )
+
+    if schedule is not None:
+        from trimarr.scheduler import parse_interval, run_scheduled
+
+        try:
+            interval_seconds = parse_interval(schedule)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="--schedule") from exc
+
+        run_scheduled(_run, interval_seconds=interval_seconds, run_on_start=run_on_start, logger=logger)
+    else:
+        _run()
 
 
 if __name__ == "__main__":
