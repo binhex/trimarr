@@ -78,7 +78,7 @@ def _format_duration(seconds: float) -> str:
         parts.append(f"{hours}h")
     if minutes:
         parts.append(f"{minutes}m")
-    if secs and not parts:
+    if secs:
         parts.append(f"{secs}s")
 
     return " ".join(parts) if parts else "0s"
@@ -117,11 +117,12 @@ def run_scheduled(
     """
     try:
         if not run_on_start:
-            next_run = datetime.now() + timedelta(seconds=interval_seconds)
-            logger.info(
-                f"Scheduler started. First run at {next_run.strftime('%Y-%m-%d %H:%M:%S')}"
-                f" (in {_format_duration(interval_seconds)})."
-            )
+            try:
+                next_run = datetime.now() + timedelta(seconds=interval_seconds)
+                next_run_str = f" First run at {next_run.strftime('%Y-%m-%d %H:%M:%S')}"
+            except OverflowError:
+                next_run_str = ""
+            logger.info(f"Scheduler started.{next_run_str} (in {_format_duration(interval_seconds)}).")
             _sleep_interruptible(interval_seconds)
 
         while True:
@@ -141,10 +142,14 @@ def run_scheduled(
                     " Firing next run immediately."
                 )
             else:
-                next_run = datetime.now() + timedelta(seconds=sleep_secs)
-                logger.info(
-                    f"Next run at {next_run.strftime('%Y-%m-%d %H:%M:%S')} (in {_format_duration(sleep_secs)})."
-                )
+                try:
+                    next_run = datetime.now() + timedelta(seconds=sleep_secs)
+                    next_run_str = (
+                        f"Next run at {next_run.strftime('%Y-%m-%d %H:%M:%S')} (in {_format_duration(sleep_secs)})."
+                    )
+                except OverflowError:
+                    next_run_str = f"Next run in {_format_duration(sleep_secs)}."
+                logger.info(next_run_str)
             _sleep_interruptible(sleep_secs)
 
     except KeyboardInterrupt:

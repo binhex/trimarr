@@ -245,7 +245,7 @@ Examples:
     default=False,
     help=(
         "When --schedule is set, fire one run immediately on startup before the first timed interval."
-        " Has no effect without --schedule."
+        " Cannot be used without --schedule."
     ),
 )
 @click.version_option(version=_VERSION, prog_name="Trimarr")
