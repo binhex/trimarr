@@ -22,6 +22,15 @@ Removes (trims) unwanted audio and subtitles from matroska container format vide
 - **Graceful interrupt** — Ctrl+C shows a partial summary before exiting with code 130.
 - **Safe file replacement** — output is written to a temp file first, then atomically renamed over
   the original so a failed remux never corrupts the source.
+- **Corrupt output safeguard** — before replacing the original, trimarr probes the output with
+  `mkvmerge -J` to confirm it is a structurally valid MKV and rejects any output smaller than 50 %
+  of the source. If either check fails, all processing halts immediately, the temp file is preserved
+  for inspection, and the original file is left untouched.
+- **BCP-47 / ISO 639-1 language tag support** — files using IETF `language_ietf` tags (e.g. `en`,
+  `en-US`, `fr`) are automatically mapped to ISO 639-2 codes before matching, so `--language eng`
+  correctly matches tracks tagged as either `eng` or `en`.
+- **Failure report** — after the run summary, a consolidated list of every file that could not be
+  processed is printed with a concise reason for each failure.
 
 ## Prerequisites
 
@@ -74,6 +83,8 @@ trimarr --help
 | `--strip-lower-channels` | After language filtering, drop any audio tracks whose channel count is strictly below the highest channel count among the surviving audio tracks. For example, given English tracks at 8ch, 8ch, and 2ch, the 2ch track is removed. Tracks with an unknown channel count are always kept. Has no effect when `--keep-audio` is set. **Disabled by default** — enable only when you are confident lower-channel duplicates are not needed. | `false` | — | `flag` |
 | `--strip-commentary` | If specified, audio and subtitle tracks whose name contains "commentary" (case-insensitive) will be removed after language filtering. **Audio final gate:** if stripping would leave zero audio tracks, all audio is retained and a warning is logged — a silent file is never acceptable. Subtitles have no such gate and are stripped unconditionally. Has no effect on audio when `--keep-audio` is set, or on subtitles when `--keep-subtitles` is set. **Disabled by default.** | `false` | — | `flag` |
 | `--dry-run` | Log planned changes without modifying any files. Processed files are not recorded to the database in this mode. | `false` | — | `flag` |
+| `--schedule` | Run on a repeating schedule. Format: `<N><unit>` where unit is `m` (minutes), `h` (hours), `d` (days), or `w` (weeks). Examples: `30m`, `6h`, `1d`, `2w`. When omitted, trimarr runs once and exits. | — | `6h` | `string` |
+| `--run-on-start` | When used with `--schedule`, execute an immediate run before the first scheduled interval. Without `--schedule` this flag is an error. | `false` | — | `flag` |
 
 ✱ Required.
 
@@ -98,20 +109,22 @@ flowchart TD
     F -- Yes --> G([⚠️ Keep all\ncommentary-only audio])
     F -- No --> H[Drop non-matching tracks]
     H --> SC{--strip-commentary?}
-    SC -- No --> I
+    SC -- No --> L
     SC -- Yes --> SC2{Stripping would\nleave zero audio?}
-    SC2 -- Yes --> SC3([⚠️ Keep all audio\nsilent-file gate])
+    SC2 -- Yes --> SC3[⚠️ Keep all audio\nsilent-file gate]
+    SC3 --> L
     SC2 -- No --> SC4[Drop audio\ncommentary tracks]
-    SC4 --> I
-    I{Commentary track\nholds default flag?}
-    I -- No --> L{--strip-lower-channels?}
-    I -- Yes --> K[Promote non-commentary\nto default · demote commentary]
-    K --> L
-    L -- No --> J([✅ Apply changes])
+    SC4 --> L
+    L{--strip-lower-channels?}
+    L -- No --> I
     L -- Yes --> M{All surviving tracks\nsame channel count?}
-    M -- Yes --> J
+    M -- Yes --> I
     M -- No --> N[Drop tracks below\nmax channel count]
-    N --> J
+    N --> I
+    I{Commentary track\nholds default flag?}
+    I -- No --> J([✅ Apply changes])
+    I -- Yes --> K[Promote non-commentary\nto default · demote commentary]
+    K --> J
 ```
 
 ### Subtitle tracks
@@ -137,6 +150,40 @@ flowchart TD
 > If a file needs no changes (all tracks already match, no metadata to edit), it is marked as
 > processed in the database and skipped on all future runs — unless the file content or processing
 > profile changes.
+
+## Scheduler
+
+By default trimarr runs once and exits. Pass `--schedule` to run on a repeating interval.
+
+```bash
+# Run every 6 hours
+trimarr --language eng --media-path /mnt/media --schedule 6h
+
+# Run every day, with an immediate run on startup
+trimarr --language eng --media-path /mnt/media --schedule 1d --run-on-start
+```
+
+### Schedule format
+
+| Unit | Meaning  | Example |
+| ---- | -------- | ------- |
+| `m`  | minutes  | `30m`   |
+| `h`  | hours    | `6h`    |
+| `d`  | days     | `1d`    |
+| `w`  | weeks    | `2w`    |
+
+N must be a positive integer. Fractional values (e.g. `1.5h`) are not supported.
+
+### Drift correction
+
+The scheduler uses a **run-then-sleep** strategy. The sleep duration for each cycle is adjusted by
+the time the previous run took, so the interval is measured from the *start* of each run rather
+than the end. If a run exceeds the interval, the next run fires immediately (with a warning logged)
+and no drift accumulates over time.
+
+### Stopping the scheduler
+
+Press **Ctrl+C** at any time. The scheduler logs `Scheduler stopped.` and exits with code 0.
 
 ## Development
 

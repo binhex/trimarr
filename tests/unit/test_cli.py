@@ -199,6 +199,72 @@ class TestVersionFlag:
 
 
 # ---------------------------------------------------------------------------
+# Scheduler options
+# ---------------------------------------------------------------------------
+
+
+class TestScheduleOption:
+    """--schedule and --run-on-start CLI integration."""
+
+    def test_schedule_calls_run_scheduled(self, tmp_path: Path) -> None:
+        """When --schedule is provided, run_scheduled is called instead of runner.run."""
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+
+        with patch("trimarr.scheduler.run_scheduled") as mock_sched:
+            result = CliRunner().invoke(
+                cli,
+                _base_args(str(tmp_path)) + ["--mkvmerge-path", str(fake_mkvmerge), "--schedule", "6h"],
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_sched.assert_called_once()
+        _, kwargs = mock_sched.call_args
+        assert kwargs["interval_seconds"] == 21600
+        assert kwargs["run_on_start"] is False
+
+    def test_run_on_start_forwarded_to_run_scheduled(self, tmp_path: Path) -> None:
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+
+        with patch("trimarr.scheduler.run_scheduled") as mock_sched:
+            result = CliRunner().invoke(
+                cli,
+                _base_args(str(tmp_path))
+                + ["--mkvmerge-path", str(fake_mkvmerge), "--schedule", "1d", "--run-on-start"],
+            )
+
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_sched.call_args
+        assert kwargs["run_on_start"] is True
+
+    def test_run_on_start_without_schedule_exits_with_error(self, tmp_path: Path) -> None:
+        result = CliRunner().invoke(cli, _base_args(str(tmp_path)) + ["--run-on-start"])
+        assert result.exit_code != 0
+        assert "schedule" in result.output.lower()
+
+    def test_invalid_schedule_format_exits_with_error(self, tmp_path: Path) -> None:
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+
+        result = CliRunner().invoke(
+            cli,
+            _base_args(str(tmp_path)) + ["--mkvmerge-path", str(fake_mkvmerge), "--schedule", "0h"],
+        )
+
+        assert result.exit_code != 0
+        assert "schedule" in result.output.lower()
+
+    def test_no_schedule_calls_runner_run_directly(self, tmp_path: Path) -> None:
+        """Without --schedule the existing runner.run path is used unchanged."""
+        with patch("trimarr.runner.run") as mock_run:
+            result = CliRunner().invoke(cli, _base_args(str(tmp_path)))
+
+        assert result.exit_code == 0, result.output
+        mock_run.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # Version fallback when package metadata is absent
 # ---------------------------------------------------------------------------
 
