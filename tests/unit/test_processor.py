@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from trimarr.processor import CorruptOutputError, MkvTrack, build_mkvmerge_command, probe_file, process_file
+from trimarr.processor import CorruptOutputError, MkvTrack, _spinner, build_mkvmerge_command, probe_file, process_file
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1711,3 +1711,79 @@ class TestStripCommentary:
         assert "3" not in cmd[audio_idx]  # eng commentary dropped
         assert "4" not in cmd[audio_idx]  # fre dropped by language
         assert "5" not in cmd[audio_idx]  # fre commentary dropped by language
+
+
+# ---------------------------------------------------------------------------
+# _spinner
+# ---------------------------------------------------------------------------
+
+
+class TestSpinner:
+    """Tests for the _spinner context manager."""
+
+    def test_noop_when_not_a_tty(self) -> None:
+        """When stderr is not a TTY, _spinner is a pure no-op — no thread is started."""
+
+        class FakeStderr:
+            def isatty(self) -> bool:
+                return False
+
+        with patch("trimarr.processor.sys.stderr", FakeStderr()), _spinner("testing"):
+            pass  # must not raise
+
+    def test_tty_branch_starts_thread_and_cleans_up(self) -> None:
+        """When stderr is a TTY, the spinner writes to stderr and emits a cleanup \\r line."""
+
+        class FakeTTY:
+            def __init__(self) -> None:
+                self.written: list[str] = []
+
+            def isatty(self) -> bool:
+                return True
+
+            def write(self, s: str) -> None:
+                self.written.append(s)
+
+            def flush(self) -> None:
+                pass
+
+        fake_stderr = FakeTTY()
+        with (
+            patch("trimarr.processor.sys.stderr", fake_stderr),
+            patch("trimarr.processor.time.sleep"),  # instant — no real sleeping
+            _spinner("working..."),
+        ):
+            pass
+
+        # thread.join() was called, so all writes are complete
+        assert any("\r" in s for s in fake_stderr.written), "Expected at least one \\r write; got: " + repr(
+            fake_stderr.written
+        )
+
+
+# ---------------------------------------------------------------------------
+# Missing output file (process_file)
+# ---------------------------------------------------------------------------
+
+
+class TestMissingOutputFile:
+    """Verify that process_file handles mkvmerge producing no output file."""
+
+    def test_returns_error_when_output_file_absent_after_exit_0(self, tmp_path: Path) -> None:
+        """If mkvmerge exits 0 but writes no output file, process_file must return an error string."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"A" * 10_000)
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
+        logger = _proc_logger()
+
+        def fake_run(args: list[str], **kwargs: object) -> MagicMock:
+            # Simulate mkvmerge exiting successfully but not creating the output
+            Path(args[2]).unlink(missing_ok=True)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=logger)
+
+        assert result == "mkvmerge produced no output file"
+        assert mkv.read_bytes() == b"A" * 10_000
+        logger.error.assert_called()

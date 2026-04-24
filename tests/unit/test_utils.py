@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import tarfile
 import zipfile
 from pathlib import Path
@@ -235,6 +236,18 @@ class TestExtractFromTar:
         with pytest.raises(RuntimeError, match="Could not find 'mkvmerge'"):
             _extract_from_tar(archive, "mkvmerge", tmp_path / "out")
 
+    def test_raises_when_extracted_file_missing_after_extraction(self, tmp_path: Path) -> None:
+        """If tar.extract produces no file on disk, RuntimeError must be raised."""
+        archive = tmp_path / "test.tar.xz"
+        archive.write_bytes(_make_tar_xz("mkvmerge", _ELF_CONTENT))
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        with (
+            patch("tarfile.TarFile.extract"),  # no-op: nothing written to disk
+            pytest.raises(RuntimeError, match="Could not locate 'mkvmerge' after extraction"),
+        ):
+            _extract_from_tar(archive, "mkvmerge", out_dir)
+
 
 # ---------------------------------------------------------------------------
 # _extract_from_zip
@@ -255,6 +268,18 @@ class TestExtractFromZip:
         archive.write_bytes(_make_zip("other.exe", _PE_CONTENT))
         with pytest.raises(RuntimeError, match="Could not find 'mkvmerge.exe'"):
             _extract_from_zip(archive, "mkvmerge.exe", tmp_path / "out")
+
+    def test_raises_when_extracted_file_missing_after_extraction(self, tmp_path: Path) -> None:
+        """If ZipFile.extract produces no file on disk, RuntimeError must be raised."""
+        archive = tmp_path / "test.zip"
+        archive.write_bytes(_make_zip("mkvmerge.exe", _PE_CONTENT))
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        with (
+            patch("zipfile.ZipFile.extract"),  # no-op: nothing written to disk
+            pytest.raises(RuntimeError, match="Could not locate 'mkvmerge.exe' after extraction"),
+        ):
+            _extract_from_zip(archive, "mkvmerge.exe", out_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +450,69 @@ class TestDownloadMkvmerge:
             pytest.raises(RuntimeError, match="appears truncated"),
         ):
             download_mkvmerge(dest_dir=tmp_path)
+
+    def test_default_dest_dir_when_none_given(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When dest_dir=None, the binary is installed to <app_data_dir>/bin."""
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+        archive_bytes = _make_tar_xz("mkvmerge", _ELF_CONTENT)
+        with (
+            patch("trimarr.downloader.platform.system", return_value="Linux"),
+            patch("trimarr.downloader.platform.machine", return_value="x86_64"),
+            patch(
+                "trimarr.downloader._get_latest_release_info",
+                return_value=("https://github.com/fake/asset.tar.xz", "v58.0.0"),
+            ),
+            patch("trimarr.downloader.requests.get", return_value=_streaming_response(archive_bytes)),
+        ):
+            result = download_mkvmerge()  # no dest_dir
+
+        expected = tmp_path / "trimarr" / "bin" / "mkvmerge"
+        assert result == expected
+        assert result.exists()
+
+    def test_request_exception_raises_runtime_error(self, tmp_path: Path) -> None:
+        """requests.get raising RequestException must be wrapped as RuntimeError."""
+        with (
+            patch("trimarr.downloader.platform.system", return_value="Linux"),
+            patch("trimarr.downloader.platform.machine", return_value="x86_64"),
+            patch(
+                "trimarr.downloader._get_latest_release_info",
+                return_value=("https://github.com/fake/asset.tar.xz", "v58.0.0"),
+            ),
+            patch(
+                "trimarr.downloader.requests.get",
+                side_effect=req.exceptions.RequestException("connection reset"),
+            ),
+            pytest.raises(RuntimeError, match="Failed to download mkvmerge"),
+        ):
+            download_mkvmerge(dest_dir=tmp_path)
+
+    def test_version_file_write_error_cleans_up_tmp_ver(self, tmp_path: Path) -> None:
+        """If the version file atomic replace fails, the temp file is cleaned up."""
+        archive_bytes = _make_tar_xz("mkvmerge", _ELF_CONTENT)
+        real_replace = os.replace
+        call_count = [0]
+
+        def selective_replace(src: str, dst: str) -> None:
+            call_count[0] += 1
+            if str(dst).endswith("mkvmerge.version"):
+                raise OSError("simulated disk full writing version file")
+            real_replace(src, dst)
+
+        with (
+            patch("trimarr.downloader.platform.system", return_value="Linux"),
+            patch("trimarr.downloader.platform.machine", return_value="x86_64"),
+            patch(
+                "trimarr.downloader._get_latest_release_info",
+                return_value=("https://github.com/fake/asset.tar.xz", "v58.0.0"),
+            ),
+            patch("trimarr.downloader.requests.get", return_value=_streaming_response(archive_bytes)),
+            patch("trimarr.downloader.os.replace", side_effect=selective_replace),
+            pytest.raises(OSError, match="simulated disk full"),
+        ):
+            download_mkvmerge(dest_dir=tmp_path)
+
+        assert not list(tmp_path.glob(".mkvmerge.version.*.tmp"))
 
 
 # ---------------------------------------------------------------------------

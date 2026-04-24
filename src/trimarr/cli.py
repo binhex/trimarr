@@ -353,10 +353,9 @@ def cli(
             strip_commentary=strip_commentary,
         )
 
-    if schedule is not None:
+    if interval_seconds is not None:
         from trimarr.scheduler import run_scheduled
 
-        assert interval_seconds is not None  # guaranteed by early validation block above
         run_scheduled(_run, interval_seconds=interval_seconds, run_on_start=run_on_start, logger=logger)
     else:
         _run()

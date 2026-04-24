@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from trimarr.scheduler import parse_interval, run_scheduled
+from trimarr.scheduler import _format_duration, _sleep_interruptible, parse_interval, run_scheduled
 
 
 class TestParseInterval:
@@ -57,6 +57,56 @@ class TestParseInterval:
     def test_no_unit_raises(self) -> None:
         with pytest.raises(ValueError, match="Unknown unit"):
             parse_interval("60")
+
+    def test_whitespace_between_n_and_unit_raises(self) -> None:
+        with pytest.raises(ValueError):
+            parse_interval("1 h")
+
+    def test_max_interval_exceeded_raises(self) -> None:
+        with pytest.raises(ValueError, match="[Mm]ax"):
+            parse_interval("366d")
+
+
+class TestFormatDuration:
+    """_format_duration converts a number of seconds to a compact human-readable string."""
+
+    def test_zero_seconds(self) -> None:
+        assert _format_duration(0) == "0s"
+
+    def test_weeks_only(self) -> None:
+        assert _format_duration(604800) == "1w"
+
+    def test_days_only(self) -> None:
+        assert _format_duration(86400) == "1d"
+
+    def test_weeks_and_days(self) -> None:
+        assert _format_duration(604800 + 86400) == "1w 1d"
+
+    def test_hours_and_minutes(self) -> None:
+        assert _format_duration(3600 + 1800) == "1h 30m"
+
+
+class TestSleepInterruptible:
+    """_sleep_interruptible sleeps in 1-second ticks until the deadline."""
+
+    def test_zero_duration_does_not_sleep(self) -> None:
+        slept: list[float] = []
+        with (
+            patch("trimarr.scheduler.time.monotonic", side_effect=[0.0, 0.0]),
+            patch("trimarr.scheduler.time.sleep", side_effect=lambda s: slept.append(s)),
+        ):
+            _sleep_interruptible(0.0)
+        assert slept == []
+
+    def test_positive_duration_calls_time_sleep(self) -> None:
+        slept: list[float] = []
+        # monotonic: (1) compute deadline, (2) while-check True, (3) compute remaining, (4) while-check False
+        with (
+            patch("trimarr.scheduler.time.monotonic", side_effect=[0.0, 0.0, 0.0, 1.0]),
+            patch("trimarr.scheduler.time.sleep", side_effect=lambda s: slept.append(s)),
+        ):
+            _sleep_interruptible(0.5)
+        assert slept == [0.5]
 
 
 class TestRunScheduled:
@@ -193,3 +243,48 @@ class TestRunScheduled:
             run_scheduled(run_fn, interval_seconds=3600, run_on_start=True, logger=logger)
 
         assert slept == [3000.0]
+
+
+class TestOverflowError:
+    """run_scheduled survives OverflowError when computing next-run datetime."""
+
+    def test_overflow_error_initial_sleep_skips_timestamp(self) -> None:
+        """OverflowError before the first run falls back to a no-date 'Scheduler started' message."""
+        logger = MagicMock()
+        with (
+            patch("trimarr.scheduler._sleep_interruptible", side_effect=KeyboardInterrupt),
+            patch("trimarr.scheduler.datetime") as mock_dt,
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            mock_dt.now.side_effect = OverflowError("date value out of range")
+            run_scheduled(MagicMock(), interval_seconds=3600, run_on_start=False, logger=logger)
+
+        assert exc_info.value.code == 0
+        info_calls = [c.args[0] for c in logger.info.call_args_list if c.args]
+        started_msgs = [m for m in info_calls if "Scheduler started" in m]
+        assert started_msgs, "Expected 'Scheduler started.' message"
+        assert all("First run at" not in m for m in started_msgs)
+
+    def test_overflow_error_inner_loop_uses_fallback_message(self) -> None:
+        """OverflowError computing next-run datetime in the loop still logs 'Next run in ...'."""
+        calls = [0]
+
+        def run_fn() -> None:
+            calls[0] += 1
+            if calls[0] >= 2:
+                raise KeyboardInterrupt
+
+        logger = MagicMock()
+        with (
+            patch("trimarr.scheduler._sleep_interruptible"),
+            patch("time.monotonic", return_value=0.0),
+            patch("trimarr.scheduler.datetime") as mock_dt,
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            mock_dt.now.side_effect = OverflowError("date value out of range")
+            run_scheduled(run_fn, interval_seconds=3600, run_on_start=True, logger=logger)
+
+        assert exc_info.value.code == 0
+        info_calls = [c.args[0] for c in logger.info.call_args_list if c.args]
+        fallback_msgs = [m for m in info_calls if "Next run in" in m]
+        assert fallback_msgs, "Expected fallback 'Next run in ...' message"
