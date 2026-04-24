@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "Trimarr"
-version = "1.0.8"
+version = "1.0.9"
 description = "Automated tool"
 readme = "README.md"
 requires-python = ">=3.12"
