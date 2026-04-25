@@ -156,6 +156,7 @@ def run(
     logger: Logger,
     strip_lower_channels: bool = False,
     strip_commentary: bool = False,
+    skip_size_check: bool = False,
 ) -> None:
     """Scan *media_path* and trim unwanted tracks from every MKV file found.
 
@@ -183,6 +184,9 @@ def run(
         strip_commentary: When *True*, audio and subtitle tracks whose name
             contains "commentary" (case-insensitive) are removed after language
             filtering and safety fallbacks.  Standard safety fallbacks apply.
+        skip_size_check: When *True*, bypass the suspiciously-small output size
+            guard that rejects files whose mkvmerge output is less than 50 % of
+            the source size.
     """
     root = Path(media_path)
 
@@ -291,6 +295,7 @@ def run(
                         command=cmd,
                         no_backup=no_backup,
                         logger=logger,
+                        skip_size_check=skip_size_check,
                     )
                     if error is None:
                         bytes_saved = max(0, size_before - file_path.stat().st_size)

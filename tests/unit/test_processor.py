@@ -839,7 +839,7 @@ class TestTruncatedOutputRejection:
     """Verify that process_file rejects suspiciously small mkvmerge output."""
 
     def test_rejects_empty_output(self, tmp_path: Path) -> None:
-        """Zero-byte output must be rejected and return False."""
+        """Zero-byte output must be rejected."""
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"A" * 10_000)
         cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
@@ -850,6 +850,26 @@ class TestTruncatedOutputRejection:
 
         with patch("subprocess.run", side_effect=fake_run):
             result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
+
+        assert result is not None
+        assert mkv.read_bytes() == b"A" * 10_000
+
+    def test_rejects_empty_output_even_with_skip_size_check(self, tmp_path: Path) -> None:
+        """Zero-byte output must still be rejected when skip_size_check=True.
+
+        The zero-byte guard is unconditional — skip_size_check only bypasses the
+        50% ratio heuristic, not the hard empty-file check.
+        """
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"A" * 10_000)
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
+
+        def fake_run(args: list[str], **kwargs: object) -> MagicMock:
+            Path(args[2]).write_bytes(b"")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger(), skip_size_check=True)
 
         assert result is not None
         assert mkv.read_bytes() == b"A" * 10_000
@@ -871,6 +891,23 @@ class TestTruncatedOutputRejection:
         assert result is not None
         assert mkv.read_bytes() == b"A" * 200_000
         logger.error.assert_called()
+
+    def test_skip_size_check_accepts_small_output(self, tmp_path: Path) -> None:
+        """When skip_size_check=True, output below the 50 % threshold must be accepted."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"A" * 200_000)  # 200 KB input
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
+
+        def fake_run(args: list[str], **kwargs: object) -> MagicMock:
+            if args[1] == "-J":
+                return MagicMock(returncode=0, stdout="{}", stderr="")
+            Path(args[2]).write_bytes(b"X")  # 1 byte — well below 50 % of 200 KB
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger(), skip_size_check=True)
+
+        assert result is None
 
     def test_accepts_output_at_threshold(self, tmp_path: Path) -> None:
         """Output at or above the 50 % threshold must be accepted."""

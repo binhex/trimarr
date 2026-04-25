@@ -240,6 +240,16 @@ Examples:
     ),
 )
 @click.option(
+    "--skip-size-check",
+    is_flag=True,
+    default=False,
+    help=(
+        "If specified, bypass the output size guard that rejects mkvmerge results smaller than"
+        " 50 % of the source file.  Use when legitimate remuxes are expected to produce"
+        " significantly smaller output (e.g. files with very large audio/subtitle payloads)."
+    ),
+)
+@click.option(
     "--run-on-start",
     is_flag=True,
     default=False,
@@ -265,6 +275,7 @@ def cli(
     no_update_check: bool,
     strip_lower_channels: bool,
     strip_commentary: bool,
+    skip_size_check: bool,
     schedule: str | None,
     run_on_start: bool,
 ) -> None:
@@ -351,6 +362,7 @@ def cli(
             logger=logger,
             strip_lower_channels=strip_lower_channels,
             strip_commentary=strip_commentary,
+            skip_size_check=skip_size_check,
         )
 
     if interval_seconds is not None:
