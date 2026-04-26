@@ -388,3 +388,76 @@ class TestMkvmergeUpdateCheck:
         assert result.exit_code == 0, result.output
         mock_logger.warning.assert_called_once()
         mock_run.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# --media-path option: comma-separated multi-path support
+# ---------------------------------------------------------------------------
+
+
+class TestMediaPathOption:
+    """--media-path parsing, validation, and forwarding."""
+
+    def test_single_path_forwarded_as_list(self, tmp_path: Path) -> None:
+        """A single path is forwarded to run() as a one-element list."""
+        runner = CliRunner()
+        with patch("trimarr.runner.run") as mock_run:
+            result = runner.invoke(cli, _base_args(str(tmp_path)))
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_run.call_args
+        assert kwargs["media_path"] == [str(tmp_path)]
+
+    def test_comma_separated_paths_forwarded_as_list(self, tmp_path: Path) -> None:
+        """Comma-separated paths are split and forwarded as a list."""
+        dir_a = tmp_path / "a"
+        dir_b = tmp_path / "b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        runner = CliRunner()
+        with patch("trimarr.runner.run") as mock_run:
+            result = runner.invoke(
+                cli,
+                ["--language", "eng", "--media-path", f"{dir_a},{dir_b}"],
+            )
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_run.call_args
+        assert kwargs["media_path"] == [str(dir_a), str(dir_b)]
+
+    def test_whitespace_trimmed_around_commas(self, tmp_path: Path) -> None:
+        """Whitespace around comma-separated entries is stripped."""
+        dir_a = tmp_path / "a"
+        dir_b = tmp_path / "b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        runner = CliRunner()
+        with patch("trimarr.runner.run") as mock_run:
+            result = runner.invoke(
+                cli,
+                ["--language", "eng", "--media-path", f"  {dir_a}  ,  {dir_b}  "],
+            )
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_run.call_args
+        assert kwargs["media_path"] == [str(dir_a), str(dir_b)]
+
+    def test_file_path_rejected_at_cli(self, tmp_path: Path) -> None:
+        """A path pointing to a file (not a directory) should fail at CLI parse time."""
+        file_path = tmp_path / "movie.mkv"
+        file_path.write_bytes(b"data")
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["--language", "eng", "--media-path", str(file_path)],
+        )
+        assert result.exit_code != 0
+
+    def test_blank_only_segments_filtered(self, tmp_path: Path) -> None:
+        """Blank segments between commas are silently ignored."""
+        runner = CliRunner()
+        with patch("trimarr.runner.run") as mock_run:
+            result = runner.invoke(
+                cli,
+                ["--language", "eng", "--media-path", f"{tmp_path}, ,"],
+            )
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_run.call_args
+        assert kwargs["media_path"] == [str(tmp_path)]

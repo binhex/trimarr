@@ -45,7 +45,7 @@ def _run_kwargs(tmp_path: Path, *, dry_run: bool, db_path: str) -> dict:
         "delete_metadata_title": False,
         "keep_subtitles": False,
         "keep_audio": False,
-        "media_path": str(tmp_path),
+        "media_path": [str(tmp_path)],
         "mkvmerge_path": "/usr/bin/mkvmerge",
         "database_path": db_path,
         "no_backup": True,
@@ -292,7 +292,7 @@ class TestMediaPathValidation:
         logger = _make_logger()
         kwargs = {
             **_run_kwargs(tmp_path, dry_run=False, db_path=str(tmp_path / "trimarr.db")),
-            "media_path": missing,
+            "media_path": [missing],
             "logger": logger,
         }
         run(**kwargs)
@@ -306,12 +306,49 @@ class TestMediaPathValidation:
         logger = _make_logger()
         kwargs = {
             **_run_kwargs(tmp_path, dry_run=False, db_path=str(tmp_path / "trimarr.db")),
-            "media_path": str(file_path),
+            "media_path": [str(file_path)],
             "logger": logger,
         }
         run(**kwargs)
         error_msgs = _logged_messages(logger.error)
         assert any("not a directory" in msg for msg in error_msgs)
+
+    def test_invalid_path_in_list_continues_with_valid(self, tmp_path: Path) -> None:
+        """A bad path in a multi-path list should be logged; valid paths are still processed."""
+        valid_dir = tmp_path / "valid"
+        valid_dir.mkdir()
+        missing = str(tmp_path / "does_not_exist")
+        logger = _make_logger()
+        kwargs = {
+            **_run_kwargs(tmp_path, dry_run=True, db_path=str(tmp_path / "trimarr.db")),
+            "media_path": [missing, str(valid_dir)],
+            "logger": logger,
+        }
+        run(**kwargs)
+        error_msgs = _logged_messages(logger.error)
+        assert any("does not exist" in msg for msg in error_msgs)
+
+    def test_multiple_paths_both_scanned(self, tmp_path: Path) -> None:
+        """All valid paths in a list are scanned for MKV files."""
+        dir_a = tmp_path / "movies"
+        dir_b = tmp_path / "tv"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        (dir_a / "film.mkv").write_bytes(b"fake")
+        (dir_b / "episode.mkv").write_bytes(b"fake")
+        logger = _make_logger()
+        kwargs = {
+            **_run_kwargs(tmp_path, dry_run=True, db_path=str(tmp_path / "trimarr.db")),
+            "media_path": [str(dir_a), str(dir_b)],
+            "logger": logger,
+        }
+        run(**kwargs)
+        info_msgs = _logged_messages(logger.info)
+        # Exactly two "Found N .mkv file(s)" messages — one per scanned directory.
+        found_msgs = [m for m in info_msgs if ".mkv file(s)" in m]
+        assert len(found_msgs) == 2
+        assert any(str(dir_a) in m for m in found_msgs)
+        assert any(str(dir_b) in m for m in found_msgs)
 
 
 # ---------------------------------------------------------------------------
