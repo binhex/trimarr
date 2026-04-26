@@ -591,6 +591,7 @@ def process_file(
     command: list[str],
     no_backup: bool,
     logger: Logger,
+    skip_size_check: bool = False,
 ) -> str | None:
     """Execute a pre-built mkvmerge command and safely replace *file_path*.
 
@@ -609,6 +610,10 @@ def process_file(
         command: Full mkvmerge argv as returned by :func:`build_mkvmerge_command`.
         no_backup: When *True*, delete the original instead of renaming to ``.bak``.
         logger: Loguru logger instance.
+        skip_size_check: When *True*, bypass the suspiciously-small output size
+            guard.  Use when legitimate remuxes are expected to produce output
+            significantly smaller than 50 % of the source (e.g. files with very
+            large audio/subtitle payloads relative to video).
 
     Returns:
         *None* on success, or a concise single-line error reason string on failure.
@@ -654,8 +659,13 @@ def process_file(
             logger.error(f"mkvmerge produced no output file for '{file_path}'.")
             return "mkvmerge produced no output file"
         output_size = tmp_path.stat().st_size
+        # Zero-byte guard is unconditional — an empty file is never valid regardless
+        # of --skip-size-check.  The ratio check below is the heuristic that flag bypasses.
+        if output_size == 0:
+            logger.error(f"mkvmerge produced an empty output file for '{file_path}'; rejecting to avoid data loss.")
+            return "mkvmerge produced empty output file"
         min_acceptable = max(1, int(input_size * _MIN_OUTPUT_RATIO))
-        if output_size < min_acceptable:
+        if not skip_size_check and output_size < min_acceptable:
             logger.error(
                 f"mkvmerge output for '{file_path}' is suspiciously small "
                 f"({output_size} B vs {input_size} B input); rejecting to avoid data loss."

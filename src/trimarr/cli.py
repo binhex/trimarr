@@ -24,6 +24,36 @@ _DEFAULT_DB_PATH = str(_APP_DATA_DIR / "db" / "trimarr.db")
 _DEFAULT_LOGS_PATH = str(_APP_DATA_DIR / "logs" / "trimarr.log")
 
 
+class _CommaSeparatedPaths(click.ParamType):
+    """Accept one or more comma-separated directory paths.
+
+    Each entry is trimmed of whitespace and validated as a directory using
+    ``click.Path(file_okay=False, dir_okay=True, resolve_path=True)``.
+    """
+
+    name = "path"
+
+    def convert(
+        self,
+        value: str | list[str],
+        param: click.Parameter | None,
+        ctx: click.Context | None,
+    ) -> list[str]:
+        """Split *value* on commas and resolve each entry as a directory path."""
+        if isinstance(value, list):
+            return value
+        path_type = click.Path(file_okay=False, dir_okay=True, resolve_path=True)
+        results: list[str] = []
+        for entry in value.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            results.append(str(path_type.convert(entry, param, ctx)))
+        if not results:
+            self.fail("at least one non-empty path is required", param, ctx)
+        return results
+
+
 class _CliCommand(click.Command):
     """Custom Click Command subclass that stores CLI examples and renders the epilog without indentation."""
 
@@ -69,6 +99,12 @@ Examples:
       --media-path /mnt/media/movies \\
       --mkvmerge-path /usr/bin/mkvmerge \\
       --database-path /var/lib/trimarr/trimarr.db
+
+\b
+  Process multiple media directories in a single run:
+    {prog} \\
+      --language eng \\
+      --media-path /mnt/media/movies,/mnt/media/tv
 
 \b
   Run every 6 hours, processing immediately on startup:
@@ -131,10 +167,10 @@ Examples:
 )
 @click.option(
     "--media-path",
-    type=click.Path(file_okay=False, dir_okay=True, resolve_path=True),
+    type=_CommaSeparatedPaths(),
     required=True,
-    metavar="<media path>",
-    help="Path to the directory containing media files.",
+    metavar="<path[,path...]>",
+    help="Path(s) to directory/directories containing media files. Accepts a single path or a comma-separated list of paths. Note: directory paths that contain literal commas are not supported.",
 )
 @click.option(
     "--mkvmerge-path",
@@ -240,6 +276,16 @@ Examples:
     ),
 )
 @click.option(
+    "--skip-size-check",
+    is_flag=True,
+    default=False,
+    help=(
+        "If specified, bypass the output size guard that rejects mkvmerge results smaller than"
+        " 50 % of the source file.  Use when legitimate remuxes are expected to produce"
+        " significantly smaller output (e.g. files with very large audio/subtitle payloads)."
+    ),
+)
+@click.option(
     "--run-on-start",
     is_flag=True,
     default=False,
@@ -255,7 +301,7 @@ def cli(
     delete_metadata_title: bool,
     keep_subtitles: bool,
     keep_audio: bool,
-    media_path: str,
+    media_path: list[str],
     mkvmerge_path: str | None,
     database_path: str,
     log_path: str,
@@ -265,6 +311,7 @@ def cli(
     no_update_check: bool,
     strip_lower_channels: bool,
     strip_commentary: bool,
+    skip_size_check: bool,
     schedule: str | None,
     run_on_start: bool,
 ) -> None:
@@ -351,12 +398,12 @@ def cli(
             logger=logger,
             strip_lower_channels=strip_lower_channels,
             strip_commentary=strip_commentary,
+            skip_size_check=skip_size_check,
         )
 
-    if schedule is not None:
+    if interval_seconds is not None:
         from trimarr.scheduler import run_scheduled
 
-        assert interval_seconds is not None  # guaranteed by early validation block above
         run_scheduled(_run, interval_seconds=interval_seconds, run_on_start=run_on_start, logger=logger)
     else:
         _run()

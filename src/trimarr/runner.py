@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -148,7 +149,7 @@ def run(
     delete_metadata_title: bool,
     keep_subtitles: bool,
     keep_audio: bool,
-    media_path: str,
+    media_path: list[str] | str | os.PathLike[str],
     mkvmerge_path: str,
     database_path: str,
     no_backup: bool,
@@ -156,8 +157,9 @@ def run(
     logger: Logger,
     strip_lower_channels: bool = False,
     strip_commentary: bool = False,
+    skip_size_check: bool = False,
 ) -> None:
-    """Scan *media_path* and trim unwanted tracks from every MKV file found.
+    """Scan one or more *media_path* directories and trim unwanted tracks from every MKV file found.
 
     Files that have already been processed (same path **and** same content
     fingerprint) are silently skipped.  On dry-run the planned mkvmerge command
@@ -170,7 +172,9 @@ def run(
         delete_metadata_title: Clear each file's container title.
         keep_subtitles: Retain all subtitle tracks regardless of language.
         keep_audio: Retain all audio tracks regardless of language.
-        media_path: Root directory to search for ``.mkv`` files recursively.
+        media_path: One or more root directories to search for ``.mkv`` files
+            recursively.  Invalid or missing entries are logged and skipped so
+            that remaining valid paths are still processed.
         mkvmerge_path: Path to the mkvmerge binary.
         database_path: Path to the SQLite tracking database.
         no_backup: When *True*, delete the original instead of renaming it to
@@ -183,23 +187,40 @@ def run(
         strip_commentary: When *True*, audio and subtitle tracks whose name
             contains "commentary" (case-insensitive) are removed after language
             filtering and safety fallbacks.  Standard safety fallbacks apply.
+        skip_size_check: When *True*, bypass the suspiciously-small output size
+            guard that rejects files whose mkvmerge output is less than 50 % of
+            the source size.
     """
-    root = Path(media_path)
+    if isinstance(media_path, (str, os.PathLike)):
+        media_path = [str(media_path)]
 
-    if not root.exists():
-        logger.error(f"Media path '{media_path}' does not exist.")
+    all_files: list[tuple[Path, Path]] = []  # (mkv_file, its_root)
+    for path_str in media_path:
+        root = Path(path_str)
+        if not root.exists():
+            logger.error(f"Media path '{path_str}' does not exist.")
+            continue
+        if not root.is_dir():
+            logger.error(f"Media path '{path_str}' is not a directory.")
+            continue
+        files = sorted(p for p in root.rglob("*") if p.suffix.lower() == ".mkv")
+        if not files:
+            logger.warning(f"No .mkv files found under '{path_str}'.")
+        else:
+            logger.info(f"Found {len(files)} .mkv file(s) under '{path_str}'.")
+            all_files.extend((f, root) for f in files)
+
+    # Deduplicate by resolved path to handle overlapping roots and symlinks.
+    seen: set[Path] = set()
+    unique_files: list[tuple[Path, Path]] = []
+    for f, r in all_files:
+        resolved = f.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            unique_files.append((f, r))
+
+    if not unique_files:
         return
-    if not root.is_dir():
-        logger.error(f"Media path '{media_path}' is not a directory.")
-        return
-
-    mkv_files = sorted(p for p in root.rglob("*") if p.suffix.lower() == ".mkv")
-
-    if not mkv_files:
-        logger.warning(f"No .mkv files found under '{media_path}'.")
-        return
-
-    logger.info(f"Found {len(mkv_files)} .mkv file(s) under '{media_path}'.")
 
     if dry_run:
         logger.opt(colors=True).info(
@@ -216,7 +237,7 @@ def run(
         strip_commentary=strip_commentary,
     )
 
-    total = len(mkv_files)
+    total = len(unique_files)
     counts: dict[str, int] = {"processed": 0, "skipped": 0, "failed": 0, "no_change": 0}
     session_bytes_saved: int = 0
     interrupted = False
@@ -224,7 +245,7 @@ def run(
 
     try:
         with Database(database_path) as db:
-            for idx, file_path in enumerate(mkv_files, 1):
+            for idx, (file_path, root) in enumerate(unique_files, 1):
                 try:
                     # Skip unchanged files processed with the same profile
                     if db.is_processed(file_path, profile_hash=profile_hash):
@@ -291,6 +312,7 @@ def run(
                         command=cmd,
                         no_backup=no_backup,
                         logger=logger,
+                        skip_size_check=skip_size_check,
                     )
                     if error is None:
                         bytes_saved = max(0, size_before - file_path.stat().st_size)

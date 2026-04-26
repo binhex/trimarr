@@ -10,7 +10,7 @@ import pytest
 from loguru import logger as _real_loguru_logger
 
 from trimarr.processor import MkvTrack
-from trimarr.runner import run
+from trimarr.runner import _fmt_bytes, run
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,7 +45,7 @@ def _run_kwargs(tmp_path: Path, *, dry_run: bool, db_path: str) -> dict:
         "delete_metadata_title": False,
         "keep_subtitles": False,
         "keep_audio": False,
-        "media_path": str(tmp_path),
+        "media_path": [str(tmp_path)],
         "mkvmerge_path": "/usr/bin/mkvmerge",
         "database_path": db_path,
         "no_backup": True,
@@ -292,7 +292,7 @@ class TestMediaPathValidation:
         logger = _make_logger()
         kwargs = {
             **_run_kwargs(tmp_path, dry_run=False, db_path=str(tmp_path / "trimarr.db")),
-            "media_path": missing,
+            "media_path": [missing],
             "logger": logger,
         }
         run(**kwargs)
@@ -306,12 +306,49 @@ class TestMediaPathValidation:
         logger = _make_logger()
         kwargs = {
             **_run_kwargs(tmp_path, dry_run=False, db_path=str(tmp_path / "trimarr.db")),
-            "media_path": str(file_path),
+            "media_path": [str(file_path)],
             "logger": logger,
         }
         run(**kwargs)
         error_msgs = _logged_messages(logger.error)
         assert any("not a directory" in msg for msg in error_msgs)
+
+    def test_invalid_path_in_list_continues_with_valid(self, tmp_path: Path) -> None:
+        """A bad path in a multi-path list should be logged; valid paths are still processed."""
+        valid_dir = tmp_path / "valid"
+        valid_dir.mkdir()
+        missing = str(tmp_path / "does_not_exist")
+        logger = _make_logger()
+        kwargs = {
+            **_run_kwargs(tmp_path, dry_run=True, db_path=str(tmp_path / "trimarr.db")),
+            "media_path": [missing, str(valid_dir)],
+            "logger": logger,
+        }
+        run(**kwargs)
+        error_msgs = _logged_messages(logger.error)
+        assert any("does not exist" in msg for msg in error_msgs)
+
+    def test_multiple_paths_both_scanned(self, tmp_path: Path) -> None:
+        """All valid paths in a list are scanned for MKV files."""
+        dir_a = tmp_path / "movies"
+        dir_b = tmp_path / "tv"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        (dir_a / "film.mkv").write_bytes(b"fake")
+        (dir_b / "episode.mkv").write_bytes(b"fake")
+        logger = _make_logger()
+        kwargs = {
+            **_run_kwargs(tmp_path, dry_run=True, db_path=str(tmp_path / "trimarr.db")),
+            "media_path": [str(dir_a), str(dir_b)],
+            "logger": logger,
+        }
+        run(**kwargs)
+        info_msgs = _logged_messages(logger.info)
+        # Exactly two "Found N .mkv file(s)" messages — one per scanned directory.
+        found_msgs = [m for m in info_msgs if ".mkv file(s)" in m]
+        assert len(found_msgs) == 2
+        assert any(str(dir_a) in m for m in found_msgs)
+        assert any(str(dir_b) in m for m in found_msgs)
 
 
 # ---------------------------------------------------------------------------
@@ -614,3 +651,112 @@ class TestFailureReport:
         assert summary_idx is not None, "Summary must be logged"
         assert failure_idx is not None, "Failure report must be logged"
         assert summary_idx < failure_idx, "Summary must come before failure report"
+
+
+# ---------------------------------------------------------------------------
+# No MKV files in directory
+# ---------------------------------------------------------------------------
+
+
+class TestNoMkvFiles:
+    """Verify that run() logs a warning and returns early when no .mkv files are found."""
+
+    def test_empty_directory_logs_warning_and_returns(self, tmp_path: Path) -> None:
+        """An existing but empty directory (no .mkv files) logs a warning and returns."""
+        db_path = str(tmp_path / "trimarr.db")
+        logger = _make_logger()
+        run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
+        warning_msgs = _logged_messages(logger.warning)
+        assert any("No .mkv files" in msg for msg in warning_msgs)
+
+
+# ---------------------------------------------------------------------------
+# Already-processed skip
+# ---------------------------------------------------------------------------
+
+
+class TestAlreadyProcessedSkip:
+    """Verify that files already processed with the same profile are skipped."""
+
+    def test_already_processed_file_is_skipped(self, tmp_path: Path) -> None:
+        """Files returning True from is_processed must be skipped; probe_file never called."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        db_path = str(tmp_path / "trimarr.db")
+        logger = _make_logger()
+
+        with (
+            patch("trimarr.database.Database.is_processed", return_value=True),
+            patch("trimarr.runner.probe_file") as mock_probe,
+        ):
+            run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
+
+        mock_probe.assert_not_called()
+        debug_msgs = _logged_messages(logger.debug)
+        assert any("Already processed" in msg for msg in debug_msgs)
+
+
+# ---------------------------------------------------------------------------
+# CorruptOutputError halt
+# ---------------------------------------------------------------------------
+
+
+class TestCorruptOutputError:
+    """Verify that CorruptOutputError from process_file halts all processing."""
+
+    def test_corrupt_output_error_logs_critical_and_exits_2(self, tmp_path: Path) -> None:
+        """CorruptOutputError must log a critical diagnostic block and exit with code 2."""
+        from trimarr.processor import CorruptOutputError
+
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        db_path = str(tmp_path / "trimarr.db")
+        fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), str(mkv)]
+        logger = _make_logger()
+
+        corrupt_tmp = tmp_path / "movie.mkv.trimarr_tmp"
+        corrupt_tmp.write_bytes(b"corrupt output")
+        err = CorruptOutputError(
+            file_path=mkv,
+            tmp_path=corrupt_tmp,
+            probe_returncode=1,
+            probe_output="Invalid MKV structure",
+            output_size=corrupt_tmp.stat().st_size,
+            input_size=mkv.stat().st_size,
+            mkvmerge_path="/usr/bin/mkvmerge",
+        )
+
+        with (
+            patch("trimarr.runner.probe_file", return_value=[]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=fake_cmd),
+            patch("trimarr.runner.process_file", side_effect=err),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
+
+        assert exc_info.value.code == 2
+        assert logger.critical.called
+
+
+# ---------------------------------------------------------------------------
+# _fmt_bytes helper
+# ---------------------------------------------------------------------------
+
+
+class TestFmtBytes:
+    """Tests for the _fmt_bytes byte-formatting helper."""
+
+    def test_bytes(self) -> None:
+        assert _fmt_bytes(512) == "512.00 B"
+
+    def test_kilobytes(self) -> None:
+        assert _fmt_bytes(1024) == "1.00 KB"
+
+    def test_megabytes(self) -> None:
+        assert _fmt_bytes(1024 * 1024) == "1.00 MB"
+
+    def test_gigabytes(self) -> None:
+        assert _fmt_bytes(1024 * 1024 * 1024) == "1.00 GB"
+
+    def test_terabytes(self) -> None:
+        assert "TB" in _fmt_bytes(1024**4)

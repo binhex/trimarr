@@ -4,7 +4,7 @@ Removes (trims) unwanted audio and subtitles from matroska container format vide
 
 ## Features
 
-- **Recursive scan** — finds all `.mkv` files under the specified directory tree.
+- **Recursive scan** — finds all `.mkv` files under one or more specified directory trees. Pass a comma-separated list to `--media-path` to process multiple roots in a single run; duplicate files (from overlapping paths or symlinks) are automatically deduplicated.
 - **Smart skip** — tracks processed files in SQLite using a fingerprint (size + mtime + partial
   hash); only reprocesses a file if its content has changed.
 - **Commentary track safety** — if the default audio or subtitle track is a commentary track,
@@ -25,7 +25,9 @@ Removes (trims) unwanted audio and subtitles from matroska container format vide
 - **Corrupt output safeguard** — before replacing the original, trimarr probes the output with
   `mkvmerge -J` to confirm it is a structurally valid MKV and rejects any output smaller than 50 %
   of the source. If either check fails, all processing halts immediately, the temp file is preserved
-  for inspection, and the original file is left untouched.
+  for inspection, and the original file is left untouched. The size guard can be bypassed with
+  `--skip-size-check` when legitimate remuxes are expected to produce significantly smaller output
+  (e.g. files with very large audio or subtitle payloads).
 - **BCP-47 / ISO 639-1 language tag support** — files using IETF `language_ietf` tags (e.g. `en`,
   `en-US`, `fr`) are automatically mapped to ISO 639-2 codes before matching, so `--language eng`
   correctly matches tracks tagged as either `eng` or `en`.
@@ -69,7 +71,7 @@ trimarr --help
 | Option | Description | Default | Example | Type |
 | ------ | ----------- | ------- | ------- | ---- |
 | `--language` ✱ | One or more ISO 639-2 language codes (comma-separated) for the audio/subtitle tracks to keep. See [ISO 639-2 codes](http://en.wikipedia.org/wiki/List_of_ISO_639-2_codes). | — | `eng` or `eng,fre` | `string` |
-| `--media-path` ✱ | Path to the directory containing media files to process (scanned recursively). | — | `/mnt/media/movies` | `path` |
+| `--media-path` ✱ | Path(s) to the directory/directories containing media files to process (scanned recursively). Accepts a single path or a comma-separated list of paths. Directories with literal commas in their name are not supported. | — | `/mnt/media/movies` or `/mnt/media/movies,/mnt/media/tv` | `path` |
 | `--mkvmerge-path` | Path to the mkvmerge executable. When omitted, trimarr manages its own binary and auto-updates it. | Linux: `~/.local/share/trimarr/bin/mkvmerge`<br>Windows: `%LOCALAPPDATA%\trimarr\bin\mkvmerge.exe` | `/usr/bin/mkvmerge` | `path` |
 | `--database-path` | Path to the SQLite database file used for tracking processed files. | Linux: `~/.local/share/trimarr/db/trimarr.db`<br>Windows: `%LOCALAPPDATA%\trimarr\db\trimarr.db` | `/var/lib/trimarr/trimarr.db` | `path` |
 | `--log-path` | Path to the log file for tracking application events. | Linux: `~/.local/share/trimarr/logs/trimarr.log`<br>Windows: `%LOCALAPPDATA%\trimarr\logs\trimarr.log` | `/var/log/trimarr.log` | `path` |
@@ -85,6 +87,7 @@ trimarr --help
 | `--dry-run` | Log planned changes without modifying any files. Processed files are not recorded to the database in this mode. | `false` | — | `flag` |
 | `--schedule` | Run on a repeating schedule. Format: `<N><unit>` where unit is `m` (minutes), `h` (hours), `d` (days), or `w` (weeks). Examples: `30m`, `6h`, `1d`, `2w`. When omitted, trimarr runs once and exits. | — | `6h` | `string` |
 | `--run-on-start` | When used with `--schedule`, execute an immediate run before the first scheduled interval. Without `--schedule` this flag is an error. | `false` | — | `flag` |
+| `--skip-size-check` | Bypass the output size guard that rejects mkvmerge results smaller than 50 % of the source file. Use when legitimate remuxes are expected to produce significantly smaller output (e.g. files with very large audio or subtitle payloads). The structural validity check (`mkvmerge -J`) is never bypassed. | `false` | — | `flag` |
 
 ✱ Required.
 
