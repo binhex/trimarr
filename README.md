@@ -1,6 +1,6 @@
 # Trimarr
 
-![Trimarr logo](images/trimarr-logo.png "Trimarr Logo")
+![Trimarr logo](images/trimarr-logo-medium.png "Trimarr Logo")
 
 Removes (trims) unwanted audio and subtitles from matroska container format video files.
 
