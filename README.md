@@ -1,12 +1,12 @@
 # Trimarr
 
-![Trimarr logo](images/trimarr-logo-medium.png "Trimarr Logo")
-
 Removes (trims) unwanted audio and subtitles from matroska container format video files.
 
 ## Features
 
-- **Recursive scan** — finds all `.mkv` files under one or more specified directory trees. Pass a comma-separated list to `--media-path` to process multiple roots in a single run; duplicate files (from overlapping paths or symlinks) are automatically deduplicated.
+- **Recursive scan** — finds all `.mkv` files under one or more specified directory trees. Pass a comma-separated list
+to `--media-path` to process multiple roots in a single run; duplicate files (from overlapping paths or symlinks) are
+automatically deduplicated.
 - **Smart skip** — tracks processed files in SQLite using a fingerprint (size + mtime + partial
   hash); only reprocesses a file if its content has changed.
 - **Commentary track safety** — if the default audio or subtitle track is a commentary track,
