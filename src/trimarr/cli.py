@@ -60,6 +60,15 @@ class _CliCommand(click.Command):
     EXAMPLES = """
 \b
 Examples:
+  Keep only English audio and subtitles, strip commentary and lower-channel tracks, and delete original files after successful processing:
+    {prog} \\
+      --language eng \\
+      --strip-commentary \\
+      --strip-lower-channels \\
+      --no-backup \\
+      --media-path /mnt/media/movies
+
+\b
   Keep only English audio and subtitles:
     {prog} \\
       --language eng \\
