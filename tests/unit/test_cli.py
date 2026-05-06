@@ -389,6 +389,22 @@ class TestMkvmergeUpdateCheck:
         mock_logger.warning.assert_called_once()
         mock_run.assert_called_once()
 
+    def test_no_update_when_already_up_to_date(self, tmp_path: Path) -> None:
+        """When installed tag equals the latest tag, no download occurs."""
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+        with (
+            patch("trimarr.cli._DEFAULT_MKVMERGE_PATH", str(fake_mkvmerge)),
+            patch("trimarr.downloader.get_installed_mkvmerge_tag", return_value="v82.0.0"),
+            patch("trimarr.downloader.get_latest_mkvmerge_tag", return_value="v82.0.0"),
+            patch("trimarr.downloader.download_mkvmerge") as mock_dl,
+            patch("trimarr.runner.run") as mock_run,
+        ):
+            result = CliRunner().invoke(cli, _base_args(str(tmp_path)))
+        assert result.exit_code == 0, result.output
+        mock_dl.assert_not_called()
+        mock_run.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # --media-path option: comma-separated multi-path support
@@ -461,3 +477,18 @@ class TestMediaPathOption:
         assert result.exit_code == 0, result.output
         _, kwargs = mock_run.call_args
         assert kwargs["media_path"] == [str(tmp_path)]
+
+    def test_all_blank_segments_rejected(self) -> None:
+        """When every comma-separated entry is blank, fail with a usage error."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--language", "eng", "--media-path", "  ,  ,  "])
+        assert result.exit_code != 0
+
+    def test_already_list_passthrough(self) -> None:
+        """When convert() receives an already-converted list, it returns it unchanged."""
+        from trimarr.cli import _CommaSeparatedPaths
+
+        param_type = _CommaSeparatedPaths()
+        paths = ["/tmp/dir1", "/tmp/dir2"]
+        result = param_type.convert(paths, None, None)
+        assert result is paths

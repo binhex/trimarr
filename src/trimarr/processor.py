@@ -530,10 +530,11 @@ def build_mkvmerge_command(
         cmd += ["--title", ""]
 
     # Audio track selection
+    # Note: the safety fallbacks above guarantee that audio_keep is always
+    # non-empty when needs_audio_change is True, so this condition always holds
+    # when audio changes are needed.
     if needs_audio_change and audio_keep:
         cmd += ["--audio-tracks", ",".join(str(i) for i in audio_keep)]
-    elif needs_audio_change and not audio_keep:
-        cmd += ["--no-audio"]
 
     # Subtitle track selection
     if needs_sub_change and sub_keep:

@@ -286,6 +286,27 @@ class TestKeyboardInterruptHandling:
 class TestMediaPathValidation:
     """Verify that invalid media_path values produce clear error messages."""
 
+    def test_string_media_path_normalised_to_list(self, tmp_path: Path) -> None:
+        """A plain string passed as media_path is coerced to a one-element list."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        logger = _make_logger()
+        db_path = str(tmp_path / "trimarr.db")
+        with (
+            patch("trimarr.runner.probe_file", return_value=[]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=None),
+        ):
+            run(
+                **{
+                    **_run_kwargs(tmp_path, dry_run=True, db_path=db_path),
+                    "media_path": str(tmp_path),
+                    "logger": logger,
+                }
+            )
+        # No exception means the string path was converted and processed normally.
+        info_msgs = _logged_messages(logger.info)
+        assert any(".mkv" in msg or "Found" in msg for msg in info_msgs)
+
     def test_nonexistent_path_logs_error_and_returns(self, tmp_path: Path) -> None:
         """A path that does not exist at all should log an error without crashing."""
         missing = str(tmp_path / "does_not_exist")
@@ -736,6 +757,41 @@ class TestCorruptOutputError:
 
         assert exc_info.value.code == 2
         assert logger.critical.called
+
+    def test_corrupt_output_disk_usage_oserror_shows_unavailable(self, tmp_path: Path) -> None:
+        """When shutil.disk_usage raises OSError, the diagnostic message shows 'unavailable'."""
+        from trimarr.processor import CorruptOutputError
+
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        db_path = str(tmp_path / "trimarr.db")
+        fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), str(mkv)]
+        logger = _make_logger()
+
+        corrupt_tmp = tmp_path / "movie.mkv.trimarr_tmp"
+        corrupt_tmp.write_bytes(b"corrupt output")
+        err = CorruptOutputError(
+            file_path=mkv,
+            tmp_path=corrupt_tmp,
+            probe_returncode=1,
+            probe_output="Invalid MKV structure",
+            output_size=corrupt_tmp.stat().st_size,
+            input_size=mkv.stat().st_size,
+            mkvmerge_path="/usr/bin/mkvmerge",
+        )
+
+        with (
+            patch("trimarr.runner.probe_file", return_value=[]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=fake_cmd),
+            patch("trimarr.runner.process_file", side_effect=err),
+            patch("trimarr.runner.shutil.disk_usage", side_effect=OSError("permission denied")),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
+
+        assert exc_info.value.code == 2
+        critical_msg = logger.opt.return_value.critical.call_args.args[0]
+        assert "unavailable" in critical_msg
 
 
 # ---------------------------------------------------------------------------

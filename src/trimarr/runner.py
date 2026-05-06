@@ -15,6 +15,9 @@ from typing import TYPE_CHECKING
 from trimarr.database import Database
 from trimarr.processor import CorruptOutputError, build_mkvmerge_command, probe_file, process_file
 
+# Width of the separator line used in critical diagnostic messages.
+_LOG_SEPARATOR_WIDTH = 80
+
 if TYPE_CHECKING:
     from loguru import Logger
 
@@ -342,7 +345,7 @@ def run(
             free_str = f"{disk.free:,} bytes ({_fmt_bytes(disk.free)}) on '{exc.tmp_path.parent}'"
         except OSError:
             free_str = "unavailable"
-        sep = "=" * 80
+        sep = "=" * _LOG_SEPARATOR_WIDTH
         logger.opt(colors=False).critical(
             f"\n{sep}\n"
             "TRIMARR ABORTED — CORRUPT OUTPUT DETECTED\n"
