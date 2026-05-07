@@ -429,6 +429,19 @@ def cli(
     if not languages:
         raise click.UsageError("--language requires at least one non-empty language code, e.g. --language eng")
 
+    # Validate language codes: accept any 3-letter lowercase alpha code
+    # (ISO 639-2 codes are all 3-letter).  This catches common mistakes
+    # like passing "en" (ISO 639-1) instead of "eng" without rejecting
+    # valid codes absent from our internal mapping.  Codes that pass the
+    # format check but don't match any track will trigger the safety
+    # fallback (keeping all tracks) and log a warning from the processor.
+    for code in languages:
+        if not (len(code) == 3 and code.isascii() and code.isalpha()):
+            raise click.UsageError(
+                f"Language codes must be 3-letter ISO 639-2 values, got '{code}'. "
+                "See http://en.wikipedia.org/wiki/List_of_ISO_639-2_codes for valid codes."
+            )
+
     if run_on_start and schedule is None:
         raise click.UsageError("--run-on-start requires --schedule.")
 

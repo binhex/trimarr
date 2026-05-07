@@ -83,12 +83,17 @@ def _build_profile_hash(
     Returns:
         64-character lowercase hex string.
     """
+    # Normalise language codes to their bibliographic ISO 639-2 form so that
+    # equivalent aliases (e.g. "fre" and "fra") produce the same profile hash.
+    from trimarr.processor import _ISO_639_2_T_TO_B
+
+    canonical_language = sorted(_ISO_639_2_T_TO_B.get(c, c) for c in language)
     profile = {
         "delete_metadata_title": delete_metadata_title,
         "edit_metadata_title": edit_metadata_title,
         "keep_audio": keep_audio,
         "keep_subtitles": keep_subtitles,
-        "language": sorted(language),
+        "language": canonical_language,
         "strip_commentary": strip_commentary,
         "strip_lower_channels": strip_lower_channels,
     }

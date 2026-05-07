@@ -117,6 +117,58 @@ _ISO_639_1_TO_2: dict[str, str] = {
     "vi": "vie",
     "cy": "wel",
 }
+# ISO 639-2 terminologic (T) to bibliographic (B) mapping.
+# ISO 639-2 defines two sets of 3-letter codes for some languages: the
+# bibliographic (B) set and the terminologic (T) set.  mkvmerge metadata may
+# contain either form, and users may supply either.  Normalise both to the B
+# form so that matching works regardless of which variant is used.
+_ISO_639_2_T_TO_B: dict[str, str] = {
+    "sqi": "alb",
+    "hye": "arm",
+    "eus": "baq",
+    "mya": "bur",
+    "zho": "chi",
+    "ces": "cze",
+    "nld": "dut",
+    "fra": "fre",
+    "kat": "geo",
+    "deu": "ger",
+    "ell": "gre",
+    "isl": "ice",
+    "mri": "mao",
+    "msa": "may",
+    "mkd": "mac",
+    "fas": "per",
+    "ron": "rum",
+    "slk": "slo",
+    "cym": "wel",
+    "bod": "tib",
+}
+
+
+@dataclass
+class _FilterResult:
+    """Mutable state accumulated during audio/subtitle track filtering.
+
+    Instances are created by :func:`_apply_language_filter` and then modified
+    in-place by each subsequent phase of :func:`build_mkvmerge_command`.
+    """
+
+    audio_keep: list[int] = field(default_factory=list)
+    audio_drop: list[int] = field(default_factory=list)
+    sub_keep: list[int] = field(default_factory=list)
+    sub_drop: list[int] = field(default_factory=list)
+    audio_fallback_fired: bool = False
+    sub_fallback_fired: bool = False
+    # Immutable snapshots taken right after language filtering, before any fallback
+    # modifies the drop lists.  Used only for logging so the summary shows the
+    # tracks dropped *because of language* rather than by later phases.
+    language_audio_drop_ids: frozenset[int] = field(default_factory=frozenset)
+    language_sub_drop_ids: frozenset[int] = field(default_factory=frozenset)
+    # Track IDs removed specifically by the strip-commentary phase.
+    commentary_audio_drop_ids: set[int] = field(default_factory=set)
+    commentary_sub_drop_ids: set[int] = field(default_factory=set)
+
 
 
 @dataclass
@@ -288,11 +340,15 @@ def probe_file(mkvmerge_path: str, file_path: Path) -> list[MkvTrack]:
             lang = None
         # Normalise BCP-47 / ISO 639-1 tags to ISO 639-2 so that files using
         # "language_ietf" (e.g. "en", "en-US") match user-supplied codes like
-        # "eng".  3-char codes are already ISO 639-2 and pass through unchanged.
+        # "eng".  3-char codes are already ISO 639-2 and pass through unchanged,
+        # but ISO 639-2 terminologic variants (e.g. "fra" for French) are
+        # normalised to their bibliographic form ("fre") so either form matches.
         if lang:
             base = lang.split("-")[0]
             if len(base) == 2:
                 lang = _ISO_639_1_TO_2.get(base, base)
+            elif len(base) == 3:
+                lang = _ISO_639_2_T_TO_B.get(base, base)
         tracks.append(
             MkvTrack(
                 id=raw["id"],
@@ -325,6 +381,10 @@ def _apply_language_filter(
     - ``language_audio_drop_ids`` / ``language_sub_drop_ids``: immutable
       snapshots of the drop sets *before* any fallback can modify them.
     """
+    # Normalise user-supplied language codes: ISO 639-2 terminologic variants
+    # (e.g. "fra" for French) are mapped to their bibliographic form ("fre")
+    # so they match track languages normalised in probe_file().
+    language = [_ISO_639_2_T_TO_B.get(c, c) for c in language]
     result = _FilterResult()
     for track in tracks:
         if track.type == "audio":

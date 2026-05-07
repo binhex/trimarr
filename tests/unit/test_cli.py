@@ -67,6 +67,22 @@ class TestLanguageOption:
         result = runner.invoke(cli, ["--media-path", str(tmp_path)])
         assert result.exit_code != 0
 
+    def test_two_letter_code_exits_with_error(self, tmp_path: Path) -> None:
+        """ISO 639-1 two-letter codes like 'en' are rejected; users must use 3-letter 639-2 codes."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--language", "en", "--media-path", str(tmp_path)])
+        assert result.exit_code != 0
+        assert "3-letter" in result.output.lower() or "language" in result.output.lower()
+
+    def test_terminologic_code_accepted(self, tmp_path: Path) -> None:
+        """ISO 639-2 terminologic codes (e.g. 'fra', 'deu') must be accepted."""
+        runner = CliRunner()
+        with patch("trimarr.runner.run") as mock_run:
+            result = runner.invoke(cli, ["--language", "fra", "--media-path", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_run.call_args
+        assert kwargs["language"] == ["fra"]
+
 
 # ---------------------------------------------------------------------------
 # Mutually exclusive metadata flags
