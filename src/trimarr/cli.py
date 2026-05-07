@@ -1,13 +1,19 @@
 """Command-line interface for trimarr."""
 
+from __future__ import annotations
+
 import platform
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 
 from trimarr.downloader import get_app_data_dir
 from trimarr.logger import create_logger
+
+if TYPE_CHECKING:
+    from loguru import Logger
 
 try:
     _VERSION = version("Trimarr")
@@ -22,6 +28,92 @@ _MKVMERGE_BIN = "mkvmerge.exe" if platform.system() == "Windows" else "mkvmerge"
 _DEFAULT_MKVMERGE_PATH = str(_APP_DATA_DIR / "bin" / _MKVMERGE_BIN)
 _DEFAULT_DB_PATH = str(_APP_DATA_DIR / "db" / "trimarr.db")
 _DEFAULT_LOGS_PATH = str(_APP_DATA_DIR / "logs" / "trimarr.log")
+
+
+def _check_for_mkvmerge_update(current_path: str, logger: Logger) -> str:
+    """Check for a newer managed mkvmerge release and update if one is available.
+
+    Args:
+        current_path: Filesystem path to the currently installed binary.
+        logger: Loguru logger for status messages.
+
+    Returns:
+        Path to the binary to use (updated path on success, *current_path* if
+        the check fails or the installed version is already up to date).
+    """
+    from trimarr.downloader import get_installed_mkvmerge_tag, get_latest_mkvmerge_tag
+
+    try:
+        installed_tag = get_installed_mkvmerge_tag(_APP_DATA_DIR / "bin")
+        latest_tag = get_latest_mkvmerge_tag()
+    except Exception as exc:
+        logger.warning(f"mkvmerge update check failed ({exc}). Proceeding with installed version.")
+        return current_path
+
+    if installed_tag is not None and installed_tag == latest_tag:
+        logger.debug(f"mkvmerge is up to date ({installed_tag}).")
+        return current_path
+
+    if installed_tag is None:
+        # No version file: binary predates version tracking; update to establish the baseline.
+        logger.info(f"mkvmerge version unknown (pre-versioning install), updating to {latest_tag}...")
+    else:
+        logger.info(f"mkvmerge update available ({installed_tag} \u2192 {latest_tag}). Updating...")
+
+    from trimarr.downloader import download_mkvmerge
+
+    try:
+        new_path = str(download_mkvmerge(dest_dir=_APP_DATA_DIR / "bin"))
+    except Exception as exc:
+        logger.warning(f"mkvmerge download failed ({exc}). Proceeding with installed version.")
+        return current_path
+    logger.success(f"mkvmerge updated to {latest_tag}.")
+    return new_path
+
+
+def _resolve_mkvmerge_path(
+    mkvmerge_path: str | None,
+    no_update_check: bool,
+    logger: Logger,
+) -> str:
+    """Return the mkvmerge binary path to use, downloading or updating as needed.
+
+    When the user has not supplied a path, the managed binary at
+    ``_DEFAULT_MKVMERGE_PATH`` is used.  If it is absent it is downloaded
+    automatically.  When it is present and ``no_update_check`` is *False*, a
+    lightweight release-tag check is performed and an update is triggered if a
+    newer version is available.
+
+    Args:
+        mkvmerge_path: Explicit user-supplied path, or *None* to use the managed binary.
+        no_update_check: When *True*, skip the automatic update check.
+        logger: Loguru logger for status and error messages.
+
+    Returns:
+        Resolved path string to the mkvmerge binary.
+
+    Raises:
+        click.UsageError: If a user-supplied path does not point to an existing file.
+        click.ClickException: If the managed binary cannot be downloaded.
+    """
+    user_supplied = mkvmerge_path is not None
+    resolved = mkvmerge_path if mkvmerge_path is not None else _DEFAULT_MKVMERGE_PATH
+
+    if not Path(resolved).is_file():
+        if user_supplied:
+            raise click.UsageError(f"mkvmerge not found at the specified path: '{resolved}'")
+        from trimarr.downloader import download_mkvmerge
+
+        logger.info(f"mkvmerge not found at '{resolved}', downloading latest binary...")
+        try:
+            resolved = str(download_mkvmerge(dest_dir=_APP_DATA_DIR / "bin"))
+            logger.success(f"mkvmerge installed at: {resolved}")
+        except Exception as exc:
+            raise click.ClickException(f"Could not download mkvmerge: {exc}") from exc
+    elif not user_supplied and not no_update_check:
+        resolved = _check_for_mkvmerge_update(resolved, logger)
+
+    return resolved
 
 
 class _CommaSeparatedPaths(click.ParamType):
@@ -330,7 +422,6 @@ def cli(
     user-defined criteria. It uses matroska CLI tools for processing the video files and SQLite for tracking which files
     have already been processed to avoid redundant work.
     """
-    from trimarr.downloader import download_mkvmerge, get_installed_mkvmerge_tag, get_latest_mkvmerge_tag
     from trimarr.runner import run
 
     # Parse comma-separated language codes into a normalised list.
@@ -359,38 +450,7 @@ def cli(
     if edit_metadata_title and delete_metadata_title:
         raise click.UsageError("--edit-metadata-title and --delete-metadata-title are mutually exclusive.")
 
-    # Determine whether we are managing the binary ourselves or the user supplied their own.
-    user_supplied_mkvmerge = mkvmerge_path is not None
-    if mkvmerge_path is None:
-        mkvmerge_path = _DEFAULT_MKVMERGE_PATH
-
-    if not Path(mkvmerge_path).is_file():
-        if user_supplied_mkvmerge:
-            raise click.UsageError(f"mkvmerge not found at the specified path: '{mkvmerge_path}'")
-        logger.info(f"mkvmerge not found at '{mkvmerge_path}', downloading latest binary...")
-        try:
-            mkvmerge_path = str(download_mkvmerge(dest_dir=_APP_DATA_DIR / "bin"))
-            logger.success(f"mkvmerge installed at: {mkvmerge_path}")
-        except Exception as exc:
-            raise click.ClickException(f"Could not download mkvmerge: {exc}") from exc
-    elif not user_supplied_mkvmerge and not no_update_check:
-        # Lightweight update check — only the release tag JSON is fetched (~few KB), no binary download.
-        try:
-            installed_tag = get_installed_mkvmerge_tag(_APP_DATA_DIR / "bin")
-            latest_tag = get_latest_mkvmerge_tag()
-            if installed_tag is None:
-                # No version file — binary predates version tracking; update to establish the baseline.
-                logger.info(f"mkvmerge version unknown (pre-versioning install), updating to {latest_tag}...")
-                mkvmerge_path = str(download_mkvmerge(dest_dir=_APP_DATA_DIR / "bin"))
-                logger.success(f"mkvmerge updated to {latest_tag}.")
-            elif installed_tag != latest_tag:
-                logger.info(f"mkvmerge update available ({installed_tag} → {latest_tag}). Updating...")
-                mkvmerge_path = str(download_mkvmerge(dest_dir=_APP_DATA_DIR / "bin"))
-                logger.success(f"mkvmerge updated to {latest_tag}.")
-            else:
-                logger.debug(f"mkvmerge is up to date ({installed_tag}).")
-        except Exception as exc:
-            logger.warning(f"mkvmerge update check failed ({exc}). Proceeding with installed version.")
+    mkvmerge_path = _resolve_mkvmerge_path(mkvmerge_path, no_update_check, logger)
 
     def _run() -> None:
         run(

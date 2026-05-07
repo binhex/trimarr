@@ -388,6 +388,45 @@ class TestMkvmergeUpdateCheck:
         assert result.exit_code == 0, result.output
         mock_logger.warning.assert_called_once()
         mock_run.assert_called_once()
+        _, kwargs = mock_run.call_args
+        assert kwargs["mkvmerge_path"] == str(fake_mkvmerge)
+
+    def test_update_check_failure_on_latest_tag_call_continues(self, tmp_path: Path) -> None:
+        """A failure from get_latest_mkvmerge_tag also triggers the 'check failed' fallback."""
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+        mock_logger = MagicMock()
+        with (
+            patch("trimarr.cli._DEFAULT_MKVMERGE_PATH", str(fake_mkvmerge)),
+            patch("trimarr.cli.create_logger", return_value=mock_logger),
+            patch("trimarr.downloader.get_installed_mkvmerge_tag", return_value="v80.0.0"),
+            patch("trimarr.downloader.get_latest_mkvmerge_tag", side_effect=OSError("DNS failure")),
+            patch("trimarr.runner.run") as mock_run,
+        ):
+            result = CliRunner().invoke(cli, _base_args(str(tmp_path)))
+        assert result.exit_code == 0, result.output
+        mock_logger.warning.assert_called_once()
+        mock_run.assert_called_once()
+        _, kwargs = mock_run.call_args
+        assert kwargs["mkvmerge_path"] == str(fake_mkvmerge)
+
+    def test_no_update_check_flag_skips_update_check(self, tmp_path: Path) -> None:
+        """--no-update-check must prevent _check_for_mkvmerge_update from running at all."""
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+        with (
+            patch("trimarr.cli._DEFAULT_MKVMERGE_PATH", str(fake_mkvmerge)),
+            patch("trimarr.downloader.get_installed_mkvmerge_tag") as mock_tag,
+            patch("trimarr.downloader.get_latest_mkvmerge_tag") as mock_latest,
+            patch("trimarr.runner.run") as mock_run,
+        ):
+            result = CliRunner().invoke(cli, _base_args(str(tmp_path)) + ["--no-update-check"])
+        assert result.exit_code == 0, result.output
+        mock_tag.assert_not_called()
+        mock_latest.assert_not_called()
+        mock_run.assert_called_once()
+        _, kwargs = mock_run.call_args
+        assert kwargs["mkvmerge_path"] == str(fake_mkvmerge)
 
     def test_no_update_when_already_up_to_date(self, tmp_path: Path) -> None:
         """When installed tag equals the latest tag, no download occurs."""
@@ -404,6 +443,29 @@ class TestMkvmergeUpdateCheck:
         assert result.exit_code == 0, result.output
         mock_dl.assert_not_called()
         mock_run.assert_called_once()
+
+    def test_download_failure_continues_with_installed_version(self, tmp_path: Path) -> None:
+        """If the download itself fails (not the check), a warning is logged and run proceeds."""
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+        mock_logger = MagicMock()
+        with (
+            patch("trimarr.cli._DEFAULT_MKVMERGE_PATH", str(fake_mkvmerge)),
+            patch("trimarr.cli.create_logger", return_value=mock_logger),
+            patch("trimarr.downloader.get_installed_mkvmerge_tag", return_value="v80.0.0"),
+            patch("trimarr.downloader.get_latest_mkvmerge_tag", return_value="v82.0.0"),
+            patch("trimarr.downloader.download_mkvmerge", side_effect=RuntimeError("network timeout")),
+            patch("trimarr.runner.run") as mock_run,
+        ):
+            result = CliRunner().invoke(cli, _base_args(str(tmp_path)))
+        assert result.exit_code == 0, result.output
+        warning_calls = [c.args[0] for c in mock_logger.warning.call_args_list if c.args]
+        assert any("download failed" in m.lower() for m in warning_calls), (
+            "Expected a warning about download failure, not update check failure"
+        )
+        mock_run.assert_called_once()
+        _, kwargs = mock_run.call_args
+        assert kwargs["mkvmerge_path"] == str(fake_mkvmerge)
 
 
 # ---------------------------------------------------------------------------

@@ -170,7 +170,7 @@ class TestDryRunDoesNotRecordToDatabase:
 
         def fake_process_file(*_args: object, file_path: object = None, **_kwargs: object) -> str | None:
             assert hasattr(file_path, "write_bytes")
-            file_path.write_bytes(b"B" * 500)  # noqa: PGH003
+            file_path.write_bytes(b"B" * 500)
             return None
 
         with (
@@ -193,7 +193,7 @@ class TestDryRunDoesNotRecordToDatabase:
 
         def fake_process_file(*_args: object, file_path: object = None, **_kwargs: object) -> str | None:
             assert hasattr(file_path, "write_bytes")
-            file_path.write_bytes(b"B" * 2000)  # output larger than input  # noqa: PGH003
+            file_path.write_bytes(b"B" * 2000)  # output larger than input
             return None
 
         with (

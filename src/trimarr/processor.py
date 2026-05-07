@@ -118,6 +118,31 @@ _ISO_639_1_TO_2: dict[str, str] = {
     "cy": "wel",
 }
 
+
+@dataclass
+class _FilterResult:
+    """Mutable state accumulated during audio/subtitle track filtering.
+
+    Instances are created by :func:`_apply_language_filter` and then modified
+    in-place by each subsequent phase of :func:`build_mkvmerge_command`.
+    """
+
+    audio_keep: list[int] = field(default_factory=list)
+    audio_drop: list[int] = field(default_factory=list)
+    sub_keep: list[int] = field(default_factory=list)
+    sub_drop: list[int] = field(default_factory=list)
+    audio_fallback_fired: bool = False
+    sub_fallback_fired: bool = False
+    # Immutable snapshots taken right after language filtering, before any fallback
+    # modifies the drop lists.  Used only for logging so the summary shows the
+    # tracks dropped *because of language* rather than by later phases.
+    language_audio_drop_ids: frozenset[int] = field(default_factory=frozenset)
+    language_sub_drop_ids: frozenset[int] = field(default_factory=frozenset)
+    # Track IDs removed specifically by the strip-commentary phase.
+    commentary_audio_drop_ids: set[int] = field(default_factory=set)
+    commentary_sub_drop_ids: set[int] = field(default_factory=set)
+
+
 # Minimum acceptable output-to-input size ratio.  A legitimate remux strips
 # audio/subtitle tracks but the video stream (the bulk of any MKV) is always
 # retained — typically 90 %+ of the source size.  50 % is a very conservative
@@ -281,6 +306,280 @@ def probe_file(mkvmerge_path: str, file_path: Path) -> list[MkvTrack]:
     return tracks
 
 
+# ---------------------------------------------------------------------------
+# Internal filtering helpers used by build_mkvmerge_command()
+# ---------------------------------------------------------------------------
+
+
+def _apply_language_filter(
+    tracks: list[MkvTrack],
+    language: list[str],
+    keep_audio: bool,
+    keep_subtitles: bool,
+) -> _FilterResult:
+    """Phase 1 — classify each track as keep or drop based on language.
+
+    Returns a :class:`_FilterResult` with:
+    - ``audio_keep`` / ``audio_drop``: track IDs for the audio decision.
+    - ``sub_keep`` / ``sub_drop``: track IDs for the subtitle decision.
+    - ``language_audio_drop_ids`` / ``language_sub_drop_ids``: immutable
+      snapshots of the drop sets *before* any fallback can modify them.
+    """
+    result = _FilterResult()
+    for track in tracks:
+        if track.type == "audio":
+            if keep_audio or track.language in language:
+                result.audio_keep.append(track.id)
+            else:
+                result.audio_drop.append(track.id)
+        elif track.type == "subtitles":
+            if keep_subtitles or track.language in language:
+                result.sub_keep.append(track.id)
+            else:
+                result.sub_drop.append(track.id)
+    # Snapshot before fallbacks modify the drop lists (used for logging only).
+    result.language_audio_drop_ids = frozenset(result.audio_drop)
+    result.language_sub_drop_ids = frozenset(result.sub_drop)
+    return result
+
+
+def _apply_audio_fallbacks(
+    result: _FilterResult,
+    tracks: list[MkvTrack],
+    language: list[str],
+    logger: Logger,
+    input_path: Path,
+) -> None:
+    """Phase 2 — apply audio safety fallbacks to prevent a silent output file.
+
+    Primary fallback: if no audio track matches the language, keep every
+    audio track.  Secondary fallback: if every *matching* audio track is a
+    commentary track, also keep everything (the user almost certainly wants
+    the main foreign-language audio rather than commentary-only output).
+    Either fallback sets ``result.audio_fallback_fired = True``.
+    """
+    lang_desc = f"'{language[0]}'" if len(language) == 1 else str(language)
+    if result.audio_drop and not result.audio_keep:
+        logger.warning(
+            f"No audio tracks match language {lang_desc} in '{input_path.name}' "
+            f"\u2014 keeping all audio to prevent silent data loss."
+        )
+        result.audio_drop.clear()
+        result.audio_fallback_fired = True
+    elif result.audio_drop:
+        audio_commentary_ids = {t.id for t in tracks if t.type == "audio" and _is_commentary(t.name)}
+        if all(tid in audio_commentary_ids for tid in result.audio_keep):
+            logger.warning(
+                f"All audio tracks matching language {lang_desc} in '{input_path.name}' are commentary "
+                f"\u2014 keeping all audio to avoid commentary-only audio."
+            )
+            result.audio_drop.clear()
+            result.audio_fallback_fired = True
+
+
+def _apply_subtitle_fallback(
+    result: _FilterResult,
+    language: list[str],
+    logger: Logger,
+    input_path: Path,
+) -> None:
+    """Phase 3 — apply the subtitle safety fallback.
+
+    If filtering would drop every subtitle track (none match the language),
+    keep all subtitles and set ``result.sub_fallback_fired = True``.
+    """
+    lang_desc = f"'{language[0]}'" if len(language) == 1 else str(language)
+    if result.sub_drop and not result.sub_keep:
+        logger.warning(
+            f"No subtitle tracks match language {lang_desc} in '{input_path.name}' \u2014 keeping all subtitles."
+        )
+        result.sub_drop.clear()
+        result.sub_fallback_fired = True
+
+
+def _apply_strip_commentary(
+    result: _FilterResult,
+    tracks: list[MkvTrack],
+    keep_audio: bool,
+    keep_subtitles: bool,
+    logger: Logger,
+    input_path: Path,
+    strip_commentary: bool,
+) -> None:
+    """Phase 4 — remove commentary tracks after all language/safety fallbacks have resolved.
+
+    Guards (type skipped entirely):
+    - Audio: ``keep_audio`` is *True*, or the audio safety fallback fired.
+    - Subtitles: ``keep_subtitles`` is *True*, or the subtitle safety fallback fired.
+
+    Audio final gate: if stripping would remove *all* remaining audio, keep
+    everything and log a warning instead.  A silent file is never acceptable.
+    Subtitles have no equivalent gate (subtitle-free output is acceptable).
+    """
+    if not strip_commentary:
+        return
+
+    if not keep_audio and not result.audio_fallback_fired and result.audio_keep:
+        audio_keep_set = set(result.audio_keep)
+        audio_commentary_to_drop = [
+            t.id for t in tracks if t.type == "audio" and t.id in audio_keep_set and _is_commentary(t.name)
+        ]
+        if audio_commentary_to_drop:
+            remaining = [i for i in result.audio_keep if i not in set(audio_commentary_to_drop)]
+            if not remaining:
+                logger.warning(
+                    f"All audio tracks in '{input_path.name}' are commentary "
+                    f"\u2014 keeping all audio to prevent silent output."
+                )
+            else:
+                result.commentary_audio_drop_ids = set(audio_commentary_to_drop)
+                for tid in audio_commentary_to_drop:
+                    result.audio_keep.remove(tid)
+                    result.audio_drop.append(tid)
+
+    if not keep_subtitles and not result.sub_fallback_fired and result.sub_keep:
+        sub_keep_set = set(result.sub_keep)
+        sub_commentary_to_drop = [
+            t.id for t in tracks if t.type == "subtitles" and t.id in sub_keep_set and _is_commentary(t.name)
+        ]
+        if sub_commentary_to_drop:
+            result.commentary_sub_drop_ids = set(sub_commentary_to_drop)
+            for tid in sub_commentary_to_drop:
+                result.sub_keep.remove(tid)
+                result.sub_drop.append(tid)
+
+
+def _apply_strip_lower_channels(
+    result: _FilterResult,
+    tracks: list[MkvTrack],
+    keep_audio: bool,
+    strip_lower_channels: bool,
+    logger: Logger,
+) -> None:
+    """Phase 5 — drop lower-channel-count audio tracks within each language group.
+
+    Skipped when ``keep_audio`` is *True*, the flag is off, there are no kept
+    audio tracks, or the audio safety fallback fired.
+
+    Commentary tracks are excluded from the max-channel calculation so that a
+    high-channel commentary track never causes the main audio to be dropped.
+    Tracks with unknown channel counts (``channels=None``) are always kept.
+    """
+    if not strip_lower_channels or keep_audio or not result.audio_keep or result.audio_fallback_fired:
+        return
+
+    keep_set = set(result.audio_keep)
+    surviving = [t for t in tracks if t.type == "audio" and t.id in keep_set]
+    lang_groups: dict[str | None, list[MkvTrack]] = {}
+    for t in surviving:
+        lang_groups.setdefault(t.language, []).append(t)
+
+    channel_drop: list[int] = []
+    for group_tracks in lang_groups.values():
+        non_commentary = [t for t in group_tracks if not _is_commentary(t.name)]
+        known = [t.channels for t in non_commentary if t.channels is not None]
+        if not known:
+            continue
+        max_ch = max(known)
+        if any(ch < max_ch for ch in known):
+            channel_drop.extend(t.id for t in non_commentary if t.channels is not None and t.channels < max_ch)
+
+    if channel_drop:
+        channel_drop_set = set(channel_drop)
+        for tid in channel_drop:
+            result.audio_keep.remove(tid)
+            result.audio_drop.append(tid)
+        descs = ", ".join(_fmt_track(t) for t in surviving if t.id in channel_drop_set)
+        logger.info(f"  Dropping {len(channel_drop)} audio track(s) with fewer channels than the per-language maximum.")
+        logger.debug(f"  Dropping lower-channel audio track(s): {descs}")
+
+
+def _log_filter_changes(
+    result: _FilterResult,
+    tracks: list[MkvTrack],
+    language: list[str],
+    edit_metadata_title: bool,
+    delete_metadata_title: bool,
+    input_path: Path,
+    logger: Logger,
+    needs_audio_change: bool,
+    needs_sub_change: bool,
+) -> None:
+    """Log a human-readable summary of the track changes that will be applied."""
+    lang_filter = f"\u2260 '{language[0]}'" if len(language) == 1 else f"not in {language}"
+    if result.language_audio_drop_ids and needs_audio_change:
+        logger.info(f"  Dropping {len(result.language_audio_drop_ids)} audio track(s) (language {lang_filter}).")
+        descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "audio" and t.id in result.language_audio_drop_ids)
+        logger.debug(f"  Dropping audio track(s): {descs}")
+    if result.language_sub_drop_ids and needs_sub_change:
+        logger.info(f"  Dropping {len(result.language_sub_drop_ids)} subtitle track(s) (language {lang_filter}).")
+        descs = ", ".join(
+            _fmt_track(t) for t in tracks if t.type == "subtitles" and t.id in result.language_sub_drop_ids
+        )
+        logger.debug(f"  Dropping subtitle track(s): {descs}")
+    if result.commentary_audio_drop_ids:
+        logger.info(f"  Dropping {len(result.commentary_audio_drop_ids)} audio commentary track(s).")
+        descs = ", ".join(
+            _fmt_track(t) for t in tracks if t.type == "audio" and t.id in result.commentary_audio_drop_ids
+        )
+        logger.debug(f"  Dropping audio commentary track(s): {descs}")
+    if result.commentary_sub_drop_ids:
+        logger.info(f"  Dropping {len(result.commentary_sub_drop_ids)} subtitle commentary track(s).")
+        descs = ", ".join(
+            _fmt_track(t) for t in tracks if t.type == "subtitles" and t.id in result.commentary_sub_drop_ids
+        )
+        logger.debug(f"  Dropping subtitle commentary track(s): {descs}")
+    if edit_metadata_title:
+        logger.info(f"  Metadata: setting title to '{input_path.stem}'")
+    elif delete_metadata_title:
+        logger.info("  Metadata: clearing title")
+
+
+def _compute_default_track_flags(
+    tracks: list[MkvTrack],
+    result: _FilterResult,
+    needs_audio_change: bool,
+    needs_sub_change: bool,
+    logger: Logger,
+    input_path: Path,
+) -> list[str]:
+    """Compute ``--default-track`` flags for commentary / non-commentary reassignment.
+
+    When tracks are being removed for a given type, make sure no commentary track
+    remains the default.  Promote the first non-commentary track to default (unless
+    one already is) and demote any commentary track that holds the default flag.
+    Returns a flat list of flag pairs ready for appending to the mkvmerge argv.
+    """
+    default_flags: list[str] = []
+    for track_type, needs_change, keep_ids in (
+        ("audio", needs_audio_change, result.audio_keep),
+        ("subtitles", needs_sub_change, result.sub_keep),
+    ):
+        if not needs_change:
+            continue
+        keep_set = set(keep_ids)
+        kept_tracks = [t for t in tracks if t.type == track_type and t.id in keep_set]
+        commentary_kept = [t for t in kept_tracks if _is_commentary(t.name)]
+        if not commentary_kept:
+            continue
+        non_commentary = [t for t in kept_tracks if not _is_commentary(t.name)]
+        if non_commentary:
+            if not any(t.default_track for t in non_commentary):
+                default_flags += ["--default-track", f"{non_commentary[0].id}:1"]
+            for t in commentary_kept:
+                if t.default_track:
+                    default_flags += ["--default-track", f"{t.id}:0"]
+        else:
+            for t in commentary_kept:
+                if t.default_track:
+                    default_flags += ["--default-track", f"{t.id}:0"]
+            logger.warning(
+                f"All remaining {track_type} tracks in '{input_path.name}' are commentary "
+                f"\u2014 cannot reassign default {track_type} track."
+            )
+    return default_flags
+
+
 def build_mkvmerge_command(
     mkvmerge_path: str,
     input_path: Path,
@@ -343,245 +642,47 @@ def build_mkvmerge_command(
         A list of strings suitable for :func:`subprocess.run`, or *None* if
         mkvmerge does not need to be invoked.
     """
-    audio_keep: list[int] = []
-    audio_drop: list[int] = []
-    sub_keep: list[int] = []
-    sub_drop: list[int] = []
+    result = _apply_language_filter(tracks, language, keep_audio, keep_subtitles)
+    _apply_audio_fallbacks(result, tracks, language, logger, input_path)
+    _apply_subtitle_fallback(result, language, logger, input_path)
+    _apply_strip_commentary(result, tracks, keep_audio, keep_subtitles, logger, input_path, strip_commentary)
+    _apply_strip_lower_channels(result, tracks, keep_audio, strip_lower_channels, logger)
 
-    for track in tracks:
-        if track.type == "audio":
-            if keep_audio or track.language in language:
-                audio_keep.append(track.id)
-            else:
-                audio_drop.append(track.id)
-        elif track.type == "subtitles":
-            if keep_subtitles or track.language in language:
-                sub_keep.append(track.id)
-            else:
-                sub_drop.append(track.id)
-        # Video tracks are always kept; no action needed.
-
-    # Snapshot the language-filtered drops before fallbacks or channel-strip can
-    # modify audio_drop.  The final summary log uses this to report only the
-    # tracks genuinely dropped for language reasons — channel-strip drops are
-    # logged separately by the channel-strip block below.
-    language_audio_drop_ids: set[int] = set(audio_drop)
-    language_sub_drop_ids: set[int] = set(sub_drop)
-
-    # Safety fallback: if filtering would drop ALL audio tracks (none match the
-    # language), keep everything rather than produce a silent file.
-    # Channel-strip is also skipped when a fallback fires — when we're already
-    # in a "best effort, keep everything" state there is no benefit in pruning
-    # further by channel count.
-    lang_desc = f"'{language[0]}'" if len(language) == 1 else str(language)
-    audio_fallback_fired = False
-    if audio_drop and not audio_keep:
-        logger.warning(
-            f"No audio tracks match language {lang_desc} in '{input_path.name}' "
-            f"— keeping all audio to prevent silent data loss."
-        )
-        audio_drop.clear()
-        audio_fallback_fired = True
-    elif audio_drop:
-        # Secondary fallback: every audio track that *does* match the language is
-        # commentary.  Stripping the other tracks would leave the viewer with only
-        # director's commentary (typical for a foreign-language film where the
-        # preferred-language audio is the commentary track, not the main dub).
-        audio_commentary_ids = {t.id for t in tracks if t.type == "audio" and _is_commentary(t.name)}
-        if all(tid in audio_commentary_ids for tid in audio_keep):
-            logger.warning(
-                f"All audio tracks matching language {lang_desc} in '{input_path.name}' are commentary "
-                f"— keeping all audio to avoid commentary-only audio."
-            )
-            audio_drop.clear()
-            audio_fallback_fired = True
-
-    # Same safety fallback for subtitles.
-    sub_fallback_fired = False
-    if sub_drop and not sub_keep:
-        logger.warning(f"No subtitle tracks match language {lang_desc} in '{input_path.name}' — keeping all subtitles.")
-        sub_drop.clear()
-        sub_fallback_fired = True
-
-    # Commentary-track stripping: runs after ALL language/safety fallbacks so we
-    # only operate on tracks that have already passed the language filter and
-    # survived the fallback logic.
-    #
-    # Guards (skipping strip-commentary entirely for a type):
-    #   • Audio:     keep_audio is True  OR  audio_fallback_fired
-    #   • Subtitles: keep_subtitles is True  OR  sub_fallback_fired
-    #
-    # Audio final gate: if stripping all commentary audio tracks would leave
-    # zero audio, skip audio stripping and warn.  A silent file is never
-    # acceptable.  Subtitle-free output is acceptable (commentary-only subtitle
-    # tracks are still removed unconditionally).
-    #
-    # Ordering matters: strip-commentary runs BEFORE strip-lower-channels so
-    # that commentary tracks do not inflate the max-channel calculation.
-    commentary_audio_drop_ids: set[int] = set()
-    commentary_sub_drop_ids: set[int] = set()
-    if strip_commentary:
-        if not keep_audio and not audio_fallback_fired and audio_keep:
-            audio_keep_set = set(audio_keep)
-            audio_commentary_to_drop = [
-                t.id for t in tracks if t.type == "audio" and t.id in audio_keep_set and _is_commentary(t.name)
-            ]
-            if audio_commentary_to_drop:
-                remaining = [i for i in audio_keep if i not in set(audio_commentary_to_drop)]
-                if not remaining:
-                    # Final gate: stripping would leave zero audio — keep all and warn.
-                    logger.warning(
-                        f"All audio tracks in '{input_path.name}' are commentary "
-                        f"— keeping all audio to prevent silent output."
-                    )
-                else:
-                    commentary_audio_drop_ids = set(audio_commentary_to_drop)
-                    for tid in audio_commentary_to_drop:
-                        audio_keep.remove(tid)
-                        audio_drop.append(tid)
-
-        if not keep_subtitles and not sub_fallback_fired and sub_keep:
-            sub_keep_set = set(sub_keep)
-            sub_commentary_to_drop = [
-                t.id for t in tracks if t.type == "subtitles" and t.id in sub_keep_set and _is_commentary(t.name)
-            ]
-            if sub_commentary_to_drop:
-                commentary_sub_drop_ids = set(sub_commentary_to_drop)
-                for tid in sub_commentary_to_drop:
-                    sub_keep.remove(tid)
-                    sub_drop.append(tid)
-
-    # only evaluate tracks that have already survived the language filter.
-    # Skipped when keep_audio is True, the flag is off, or a safety fallback
-    # fired — pruning by channel count is pointless when we're already in
-    # "keep everything" mode.
-    # Filtering is applied per-language-group so that a track from one language
-    # is never dropped because a different language has a higher channel count.
-    if strip_lower_channels and not keep_audio and audio_keep and not audio_fallback_fired:
-        keep_set = set(audio_keep)
-        surviving = [t for t in tracks if t.type == "audio" and t.id in keep_set]
-        # Group surviving tracks by language (None treated as its own group).
-        lang_groups: dict[str | None, list[MkvTrack]] = {}
-        for t in surviving:
-            lang_groups.setdefault(t.language, []).append(t)
-
-        channel_drop: list[int] = []
-        for group_tracks in lang_groups.values():
-            # Commentary tracks are excluded from both the max-channel calculation
-            # and the drop candidates.  A commentary track's channel count must
-            # never cause a main audio track to be removed — otherwise a 2ch
-            # commentary alongside a 1ch main track would cause the main track
-            # to be dropped, leaving only commentary.
-            non_commentary = [t for t in group_tracks if not _is_commentary(t.name)]
-            known = [t.channels for t in non_commentary if t.channels is not None]
-            if not known:
-                continue
-            max_ch = max(known)
-            if any(ch < max_ch for ch in known):
-                channel_drop.extend(t.id for t in non_commentary if t.channels is not None and t.channels < max_ch)
-
-        if channel_drop:
-            channel_drop_set = set(channel_drop)
-            for tid in channel_drop:
-                audio_keep.remove(tid)
-                audio_drop.append(tid)
-            descs = ", ".join(_fmt_track(t) for t in surviving if t.id in channel_drop_set)
-            logger.info(
-                f"  Dropping {len(channel_drop)} audio track(s) with fewer channels than the per-language maximum."
-            )
-            logger.debug(f"  Dropping lower-channel audio track(s): {descs}")
-
-    needs_audio_change = bool(audio_drop)
-    needs_sub_change = bool(sub_drop)
+    needs_audio_change = bool(result.audio_drop)
+    needs_sub_change = bool(result.sub_drop)
     needs_metadata_change = edit_metadata_title or delete_metadata_title
 
     if not needs_audio_change and not needs_sub_change and not needs_metadata_change:
         return None
 
-    # Log what is being changed and why, so the user has full visibility.
-    lang_filter = f"≠ '{language[0]}'" if len(language) == 1 else f"not in {language}"
-    if language_audio_drop_ids and needs_audio_change:
-        logger.info(f"  Dropping {len(language_audio_drop_ids)} audio track(s) (language {lang_filter}).")
-        descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "audio" and t.id in language_audio_drop_ids)
-        logger.debug(f"  Dropping audio track(s): {descs}")
-    if language_sub_drop_ids and needs_sub_change:
-        logger.info(f"  Dropping {len(language_sub_drop_ids)} subtitle track(s) (language {lang_filter}).")
-        descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "subtitles" and t.id in language_sub_drop_ids)
-        logger.debug(f"  Dropping subtitle track(s): {descs}")
-    if commentary_audio_drop_ids:
-        logger.info(f"  Dropping {len(commentary_audio_drop_ids)} audio commentary track(s).")
-        descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "audio" and t.id in commentary_audio_drop_ids)
-        logger.debug(f"  Dropping audio commentary track(s): {descs}")
-    if commentary_sub_drop_ids:
-        logger.info(f"  Dropping {len(commentary_sub_drop_ids)} subtitle commentary track(s).")
-        descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "subtitles" and t.id in commentary_sub_drop_ids)
-        logger.debug(f"  Dropping subtitle commentary track(s): {descs}")
-    if edit_metadata_title:
-        logger.info(f"  Metadata: setting title to '{input_path.stem}'")
-    elif delete_metadata_title:
-        logger.info("  Metadata: clearing title")
+    _log_filter_changes(
+        result,
+        tracks,
+        language,
+        edit_metadata_title,
+        delete_metadata_title,
+        input_path,
+        logger,
+        needs_audio_change,
+        needs_sub_change,
+    )
 
     cmd: list[str] = [mkvmerge_path, "-o", str(output_path)]
 
-    # Metadata title edit
     if edit_metadata_title:
         cmd += ["--title", input_path.stem]
     elif delete_metadata_title:
         cmd += ["--title", ""]
 
-    # Audio track selection
-    # Note: the safety fallbacks above guarantee that audio_keep is always
-    # non-empty when needs_audio_change is True, so this condition always holds
-    # when audio changes are needed.
-    if needs_audio_change and audio_keep:
-        cmd += ["--audio-tracks", ",".join(str(i) for i in audio_keep)]
+    if needs_audio_change and result.audio_keep:
+        cmd += ["--audio-tracks", ",".join(str(i) for i in result.audio_keep)]
 
-    # Subtitle track selection
-    if needs_sub_change and sub_keep:
-        cmd += ["--subtitle-tracks", ",".join(str(i) for i in sub_keep)]
-    elif needs_sub_change and not sub_keep:
+    if needs_sub_change and result.sub_keep:
+        cmd += ["--subtitle-tracks", ",".join(str(i) for i in result.sub_keep)]
+    elif needs_sub_change and not result.sub_keep:
         cmd += ["--no-subtitles"]
 
-    # Commentary default-track reassignment.
-    # When we ARE removing tracks of a type, make sure no commentary track
-    # remains (or becomes) the default.  If commentary tracks are kept alongside
-    # non-commentary tracks, promote the first non-commentary track to default
-    # (unless one already is).  Always demote any commentary track that currently
-    # holds the default flag.
-    default_flags: list[str] = []
-    for track_type, needs_change, keep_ids in (
-        ("audio", needs_audio_change, audio_keep),
-        ("subtitles", needs_sub_change, sub_keep),
-    ):
-        if not needs_change:
-            continue
-        keep_set = set(keep_ids)
-        kept_tracks = [t for t in tracks if t.type == track_type and t.id in keep_set]
-        commentary_kept = [t for t in kept_tracks if _is_commentary(t.name)]
-        if not commentary_kept:
-            continue  # No commentary tracks among the kept set — nothing to do.
-        non_commentary = [t for t in kept_tracks if not _is_commentary(t.name)]
-        if non_commentary:
-            # Promote the first non-commentary track to default, unless one
-            # already holds that flag in the source file.
-            if not any(t.default_track for t in non_commentary):
-                default_flags += ["--default-track", f"{non_commentary[0].id}:1"]
-            # Demote any commentary track that is incorrectly flagged as default.
-            for t in commentary_kept:
-                if t.default_track:
-                    default_flags += ["--default-track", f"{t.id}:0"]
-        else:
-            # All remaining tracks are commentary — still unset their default
-            # flags so no commentary track is marked as default in the output.
-            for t in commentary_kept:
-                if t.default_track:
-                    default_flags += ["--default-track", f"{t.id}:0"]
-            logger.warning(
-                f"All remaining {track_type} tracks in '{input_path.name}' are commentary "
-                f"— cannot reassign default {track_type} track."
-            )
-
-    cmd += default_flags
+    cmd += _compute_default_track_flags(tracks, result, needs_audio_change, needs_sub_change, logger, input_path)
     cmd.append(str(input_path))
     return cmd
 
@@ -732,7 +833,7 @@ def process_file(
 
         return None
 
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.error(f"Unexpected error processing '{file_path}': {exc}")
         logger.debug("", exc_info=True)
         return f"unexpected error: {str(exc).splitlines()[0].strip()}"
