@@ -525,6 +525,15 @@ dev = [
 requires-dist = [
     { name = "click" },
     { name = "loguru" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.5.0" },
+    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.6.0" },
+    { name = "pylsp-mypy", marker = "extra == 'dev'", specifier = ">=0.7.1" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.1.0" },
+    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.11.1" },
+    { name = "python-lsp-ruff", marker = "extra == 'dev'", specifier = ">=2.3.1" },
+    { name = "python-lsp-server", marker = "extra == 'dev'", specifier = ">=1.14.0" },
     { name = "requests" },
     { name = "urllib3" },
 ]
