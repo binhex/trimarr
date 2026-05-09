@@ -570,3 +570,84 @@ class TestMediaPathOption:
         paths = ["/tmp/dir1", "/tmp/dir2"]
         result = param_type.convert(paths, None, None)
         assert result is paths
+
+
+# ---------------------------------------------------------------------------
+# Branch coverage: _parse_and_validate_languages missing branches
+# ---------------------------------------------------------------------------
+
+
+class TestParseAndValidateLanguagesBranches:
+    """Branch-coverage tests for _parse_and_validate_languages."""
+
+    def test_trailing_comma_filtered_out(self, tmp_path: Path) -> None:
+        """A trailing comma produces an empty entry that is filtered by the comprehension."""
+        runner = CliRunner()
+        with patch("trimarr.runner.run") as mock_run:
+            result = runner.invoke(cli, ["--language", "eng,", "--media-path", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_run.call_args
+        assert kwargs["language"] == ["eng"]
+
+    def test_all_whitespace_language_raises(self, tmp_path: Path) -> None:
+        """A language value containing only commas/spaces produces an empty list -> UsageError."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--language", " , ", "--media-path", str(tmp_path)])
+        assert result.exit_code != 0
+        assert "language" in result.output.lower()
+
+    def test_non_ascii_three_char_code_rejected(self, tmp_path: Path) -> None:
+        """A 3-char code with non-ASCII characters is rejected."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--language", "\u00e9ng", "--media-path", str(tmp_path)])
+        assert result.exit_code != 0
+
+    def test_numeric_three_char_code_rejected(self, tmp_path: Path) -> None:
+        """A 3-char code containing digits is rejected."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--language", "en1", "--media-path", str(tmp_path)])
+        assert result.exit_code != 0
+        assert "3-letter" in result.output or "language" in result.output.lower()
+
+    def test_multiple_valid_codes_all_forwarded(self, tmp_path: Path) -> None:
+        """Multiple valid codes all pass the for-loop validation."""
+        runner = CliRunner()
+        with patch("trimarr.runner.run") as mock_run:
+            result = runner.invoke(cli, ["--language", "eng,fre,ger", "--media-path", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_run.call_args
+        assert kwargs["language"] == ["eng", "fre", "ger"]
+
+
+# ---------------------------------------------------------------------------
+# Branch coverage: _resolve_mkvmerge_path missing branches
+# ---------------------------------------------------------------------------
+
+
+class TestResolveMkvmergePathBranches:
+    """Branch-coverage tests for _resolve_mkvmerge_path."""
+
+    def test_download_failure_raises_click_exception(self, tmp_path: Path) -> None:
+        """When the managed binary is absent and download fails, CLI exits non-zero."""
+        runner = CliRunner()
+        with (
+            patch("trimarr.cli._DEFAULT_MKVMERGE_PATH", "/nonexistent/mkvmerge"),
+            patch("trimarr.downloader.download_mkvmerge", side_effect=RuntimeError("network error")),
+        ):
+            result = runner.invoke(cli, _base_args(str(tmp_path)))
+        assert result.exit_code != 0
+        assert "mkvmerge" in result.output.lower() or "network" in result.output.lower()
+
+    def test_no_update_check_flag_skips_update(self, tmp_path: Path) -> None:
+        """--no-update-check with an existing managed binary skips the update check."""
+        fake_mkvmerge = tmp_path / "mkvmerge_managed"
+        fake_mkvmerge.touch()
+        runner = CliRunner()
+        with (
+            patch("trimarr.cli._DEFAULT_MKVMERGE_PATH", str(fake_mkvmerge)),
+            patch("trimarr.cli._check_for_mkvmerge_update") as mock_update,
+            patch("trimarr.runner.run"),
+        ):
+            result = runner.invoke(cli, _base_args(str(tmp_path)) + ["--no-update-check"])
+        assert result.exit_code == 0, result.output
+        mock_update.assert_not_called()

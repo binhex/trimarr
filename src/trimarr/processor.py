@@ -146,29 +146,9 @@ _ISO_639_2_T_TO_B: dict[str, str] = {
 }
 
 
-@dataclass
-class _FilterResult:
-    """Mutable state accumulated during audio/subtitle track filtering.
-
-    Instances are created by :func:`_apply_language_filter` and then modified
-    in-place by each subsequent phase of :func:`build_mkvmerge_command`.
-    """
-
-    audio_keep: list[int] = field(default_factory=list)
-    audio_drop: list[int] = field(default_factory=list)
-    sub_keep: list[int] = field(default_factory=list)
-    sub_drop: list[int] = field(default_factory=list)
-    audio_fallback_fired: bool = False
-    sub_fallback_fired: bool = False
-    # Immutable snapshots taken right after language filtering, before any fallback
-    # modifies the drop lists.  Used only for logging so the summary shows the
-    # tracks dropped *because of language* rather than by later phases.
-    language_audio_drop_ids: frozenset[int] = field(default_factory=frozenset)
-    language_sub_drop_ids: frozenset[int] = field(default_factory=frozenset)
-    # Track IDs removed specifically by the strip-commentary phase.
-    commentary_audio_drop_ids: set[int] = field(default_factory=set)
-    commentary_sub_drop_ids: set[int] = field(default_factory=set)
-
+def normalize_language_code(code: str) -> str:
+    """Normalise an ISO 639-2 code to its bibliographic (B) form."""
+    return _ISO_639_2_T_TO_B.get(code, code)
 
 
 @dataclass
@@ -201,6 +181,23 @@ class _FilterResult:
 # lower bound that catches catastrophically truncated or partial writes while
 # still allowing files with unusually large audio/subtitle payloads.
 _MIN_OUTPUT_RATIO: float = 0.5
+
+
+# Singular display names for log messages (track type → operator-facing label).
+_TRACK_LOG_NAME: dict[str, str] = {
+    "audio": "audio",
+    "subtitles": "subtitle",
+}
+
+# Track type string constants matching mkvmerge -J output.
+_TRACK_AUDIO = "audio"
+_TRACK_SUBTITLES = "subtitles"
+_TRACK_VIDEO = "video"
+
+# Timeout in seconds for mkvmerge -J probing (per file).
+_PROBE_TIMEOUT = 60
+# Timeout in seconds for the full mkvmerge remux (generous for large files).
+_PROCESS_TIMEOUT = 3600
 
 
 class CorruptOutputError(BaseException):
@@ -297,26 +294,54 @@ def _spinner(message: str) -> Iterator[None]:
         thread.join()
 
 
+# ---------------------------------------------------------------------------
+# Language normalisation helpers
+# ---------------------------------------------------------------------------
+
+
+def _normalize_language_code(lang: str | None) -> str | None:
+    """Normalise a raw mkvmerge language tag to an ISO 639-2/B code.
+
+    Converts the mkvmerge ``"und"`` sentinel to *None*, maps ISO 639-1 2-char
+    codes to their ISO 639-2 equivalents, and converts ISO 639-2 terminologic
+    (T) codes to bibliographic (B) form.  Unknown codes are returned unchanged.
+    """
+    if lang is None or lang == "und":
+        return None
+    base = lang.split("-")[0]
+    if len(base) == 2:
+        return _ISO_639_1_TO_2.get(base, base)
+    if len(base) == 3:
+        return _ISO_639_2_T_TO_B.get(base, base)
+    return lang
+
+
+def _parse_track(raw: dict) -> MkvTrack:
+    """Parse a single track entry from ``mkvmerge -J`` JSON output."""
+    props = raw.get("properties", {})
+    lang_raw = props.get("language") or props.get("language_ietf")
+    lang = _normalize_language_code(lang_raw)
+    return MkvTrack(
+        id=raw["id"],
+        type=raw["type"],
+        language=lang,
+        name=props.get("track_name") or None,
+        default_track=bool(props.get("default_track", False)),
+        channels=props.get("audio_channels") if raw["type"] == _TRACK_AUDIO else None,
+    )
+
+
 def probe_file(mkvmerge_path: str, file_path: Path) -> list[MkvTrack]:
-    """Return the list of tracks inside *file_path* by running ``mkvmerge -J``.
+    """Run ``mkvmerge -J`` on *file_path* and return the list of :class:`MkvTrack` objects.
 
-    Args:
-        mkvmerge_path: Path to the mkvmerge binary.
-        file_path: Path to the MKV file to inspect.
-
-    Returns:
-        List of :class:`MkvTrack` objects, one per track.
-
-    Raises:
-        RuntimeError: If mkvmerge exits with a non-zero code, times out, raises
-            an OS-level error, or its output cannot be parsed as JSON.
+    Raises :exc:`RuntimeError` on non-zero exit, timeout, OS error, or JSON parse failure.
     """
     try:
         result = subprocess.run(
             [mkvmerge_path, "-J", str(file_path)],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=_PROBE_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"mkvmerge -J timed out (>60s) for '{file_path}'.") from None
@@ -330,41 +355,36 @@ def probe_file(mkvmerge_path: str, file_path: Path) -> list[MkvTrack]:
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"Could not parse mkvmerge JSON output for '{file_path}': {exc}") from exc
 
-    tracks: list[MkvTrack] = []
-    for raw in info.get("tracks", []):
-        props = raw.get("properties", {})
-        lang = props.get("language") or props.get("language_ietf")
-        # Normalise the mkvmerge "und" (undetermined) sentinel to None so
-        # callers can treat it the same as missing language information.
-        if lang == "und":
-            lang = None
-        # Normalise BCP-47 / ISO 639-1 tags to ISO 639-2 so that files using
-        # "language_ietf" (e.g. "en", "en-US") match user-supplied codes like
-        # "eng".  3-char codes are already ISO 639-2 and pass through unchanged,
-        # but ISO 639-2 terminologic variants (e.g. "fra" for French) are
-        # normalised to their bibliographic form ("fre") so either form matches.
-        if lang:
-            base = lang.split("-")[0]
-            if len(base) == 2:
-                lang = _ISO_639_1_TO_2.get(base, base)
-            elif len(base) == 3:
-                lang = _ISO_639_2_T_TO_B.get(base, base)
-        tracks.append(
-            MkvTrack(
-                id=raw["id"],
-                type=raw["type"],
-                language=lang,
-                name=props.get("track_name") or None,
-                default_track=bool(props.get("default_track", False)),
-                channels=props.get("audio_channels") if raw["type"] == "audio" else None,
-            )
-        )
-    return tracks
+    return [_parse_track(raw) for raw in info.get("tracks", [])]
 
 
 # ---------------------------------------------------------------------------
 # Internal filtering helpers used by build_mkvmerge_command()
 # ---------------------------------------------------------------------------
+
+
+def _classify_track_by_language(
+    track: MkvTrack,
+    language: list[str],
+    keep_audio: bool,
+    keep_subtitles: bool,
+    result: _FilterResult,
+) -> None:
+    """Classify a single track as keep or drop based on language rules.
+
+    Mutates *result* in place by appending the track ID to the appropriate
+    keep/drop list.
+    """
+    if track.type == _TRACK_AUDIO:
+        if keep_audio or track.language in language:
+            result.audio_keep.append(track.id)
+        else:
+            result.audio_drop.append(track.id)
+    elif track.type == _TRACK_SUBTITLES:
+        if keep_subtitles or track.language in language:
+            result.sub_keep.append(track.id)
+        else:
+            result.sub_drop.append(track.id)
 
 
 def _apply_language_filter(
@@ -387,20 +407,22 @@ def _apply_language_filter(
     language = [_ISO_639_2_T_TO_B.get(c, c) for c in language]
     result = _FilterResult()
     for track in tracks:
-        if track.type == "audio":
-            if keep_audio or track.language in language:
-                result.audio_keep.append(track.id)
-            else:
-                result.audio_drop.append(track.id)
-        elif track.type == "subtitles":
-            if keep_subtitles or track.language in language:
-                result.sub_keep.append(track.id)
-            else:
-                result.sub_drop.append(track.id)
+        _classify_track_by_language(track, language, keep_audio, keep_subtitles, result)
     # Snapshot before fallbacks modify the drop lists (used for logging only).
     result.language_audio_drop_ids = frozenset(result.audio_drop)
     result.language_sub_drop_ids = frozenset(result.sub_drop)
     return result
+
+
+def _all_kept_audio_is_commentary(result: _FilterResult, tracks: list[MkvTrack]) -> bool:
+    """Return *True* when every kept audio track is a commentary track."""
+    audio_commentary_ids = {t.id for t in tracks if t.type == _TRACK_AUDIO and _is_commentary(t.name)}
+    return all(tid in audio_commentary_ids for tid in result.audio_keep)
+
+
+def _lang_desc(language: list[str]) -> str:
+    """Format language filter description for log messages."""
+    return f"'{language[0]}'" if len(language) == 1 else str(language)
 
 
 def _apply_audio_fallbacks(
@@ -418,7 +440,7 @@ def _apply_audio_fallbacks(
     the main foreign-language audio rather than commentary-only output).
     Either fallback sets ``result.audio_fallback_fired = True``.
     """
-    lang_desc = f"'{language[0]}'" if len(language) == 1 else str(language)
+    lang_desc = _lang_desc(language)
     if result.audio_drop and not result.audio_keep:
         logger.warning(
             f"No audio tracks match language {lang_desc} in '{input_path.name}' "
@@ -426,15 +448,13 @@ def _apply_audio_fallbacks(
         )
         result.audio_drop.clear()
         result.audio_fallback_fired = True
-    elif result.audio_drop:
-        audio_commentary_ids = {t.id for t in tracks if t.type == "audio" and _is_commentary(t.name)}
-        if all(tid in audio_commentary_ids for tid in result.audio_keep):
-            logger.warning(
-                f"All audio tracks matching language {lang_desc} in '{input_path.name}' are commentary "
-                f"\u2014 keeping all audio to avoid commentary-only audio."
-            )
-            result.audio_drop.clear()
-            result.audio_fallback_fired = True
+    elif result.audio_drop and _all_kept_audio_is_commentary(result, tracks):
+        logger.warning(
+            f"All audio tracks matching language {lang_desc} in '{input_path.name}' are commentary "
+            f"\u2014 keeping all audio to avoid commentary-only audio."
+        )
+        result.audio_drop.clear()
+        result.audio_fallback_fired = True
 
 
 def _apply_subtitle_fallback(
@@ -448,13 +468,66 @@ def _apply_subtitle_fallback(
     If filtering would drop every subtitle track (none match the language),
     keep all subtitles and set ``result.sub_fallback_fired = True``.
     """
-    lang_desc = f"'{language[0]}'" if len(language) == 1 else str(language)
+    lang_desc = _lang_desc(language)
     if result.sub_drop and not result.sub_keep:
         logger.warning(
             f"No subtitle tracks match language {lang_desc} in '{input_path.name}' \u2014 keeping all subtitles."
         )
         result.sub_drop.clear()
         result.sub_fallback_fired = True
+
+
+def _find_audio_commentary_to_drop(tracks: list[MkvTrack], audio_keep_set: set[int]) -> list[int]:
+    """Return IDs of kept audio tracks that are commentary tracks."""
+    return [t.id for t in tracks if t.type == _TRACK_AUDIO and t.id in audio_keep_set and _is_commentary(t.name)]
+
+
+def _strip_audio_commentary_unsafe(
+    result: _FilterResult,
+    tracks: list[MkvTrack],
+    logger: Logger,
+    input_path: Path,
+) -> None:
+    """Strip audio commentary tracks after all safety guards have been checked.
+
+    Guards are verified by the caller (:func:`_apply_strip_commentary`).
+    Applies the final gate: if stripping would remove all remaining audio,
+    keep everything and log a warning instead.
+    """
+    audio_keep_set = set(result.audio_keep)
+    audio_commentary_to_drop = _find_audio_commentary_to_drop(tracks, audio_keep_set)
+    if audio_commentary_to_drop:
+        remaining = [i for i in result.audio_keep if i not in set(audio_commentary_to_drop)]
+        if not remaining:
+            logger.warning(
+                f"All audio tracks in '{input_path.name}' are commentary "
+                f"\u2014 keeping all audio to prevent silent output."
+            )
+        else:
+            result.commentary_audio_drop_ids = set(audio_commentary_to_drop)
+            for tid in audio_commentary_to_drop:
+                result.audio_keep.remove(tid)
+                result.audio_drop.append(tid)
+
+
+def _strip_subtitle_commentary_unsafe(
+    result: _FilterResult,
+    tracks: list[MkvTrack],
+) -> None:
+    """Strip subtitle commentary tracks after all safety guards have been checked.
+
+    Guards are verified by the caller (:func:`_apply_strip_commentary`).
+    Unlike audio, there is no final gate — subtitle-free output is acceptable.
+    """
+    sub_keep_set = set(result.sub_keep)
+    sub_commentary_to_drop = [
+        t.id for t in tracks if t.type == _TRACK_SUBTITLES and t.id in sub_keep_set and _is_commentary(t.name)
+    ]
+    if sub_commentary_to_drop:
+        result.commentary_sub_drop_ids = set(sub_commentary_to_drop)
+        for tid in sub_commentary_to_drop:
+            result.sub_keep.remove(tid)
+            result.sub_drop.append(tid)
 
 
 def _apply_strip_commentary(
@@ -466,47 +539,72 @@ def _apply_strip_commentary(
     input_path: Path,
     strip_commentary: bool,
 ) -> None:
-    """Phase 4 — remove commentary tracks after all language/safety fallbacks have resolved.
-
-    Guards (type skipped entirely):
-    - Audio: ``keep_audio`` is *True*, or the audio safety fallback fired.
-    - Subtitles: ``keep_subtitles`` is *True*, or the subtitle safety fallback fired.
-
-    Audio final gate: if stripping would remove *all* remaining audio, keep
-    everything and log a warning instead.  A silent file is never acceptable.
-    Subtitles have no equivalent gate (subtitle-free output is acceptable).
-    """
+    """Phase 4 — strip commentary tracks after all language/safety fallbacks have resolved."""
     if not strip_commentary:
         return
 
     if not keep_audio and not result.audio_fallback_fired and result.audio_keep:
-        audio_keep_set = set(result.audio_keep)
-        audio_commentary_to_drop = [
-            t.id for t in tracks if t.type == "audio" and t.id in audio_keep_set and _is_commentary(t.name)
-        ]
-        if audio_commentary_to_drop:
-            remaining = [i for i in result.audio_keep if i not in set(audio_commentary_to_drop)]
-            if not remaining:
-                logger.warning(
-                    f"All audio tracks in '{input_path.name}' are commentary "
-                    f"\u2014 keeping all audio to prevent silent output."
-                )
-            else:
-                result.commentary_audio_drop_ids = set(audio_commentary_to_drop)
-                for tid in audio_commentary_to_drop:
-                    result.audio_keep.remove(tid)
-                    result.audio_drop.append(tid)
+        _strip_audio_commentary_unsafe(result, tracks, logger, input_path)
 
     if not keep_subtitles and not result.sub_fallback_fired and result.sub_keep:
-        sub_keep_set = set(result.sub_keep)
-        sub_commentary_to_drop = [
-            t.id for t in tracks if t.type == "subtitles" and t.id in sub_keep_set and _is_commentary(t.name)
-        ]
-        if sub_commentary_to_drop:
-            result.commentary_sub_drop_ids = set(sub_commentary_to_drop)
-            for tid in sub_commentary_to_drop:
-                result.sub_keep.remove(tid)
-                result.sub_drop.append(tid)
+        _strip_subtitle_commentary_unsafe(result, tracks)
+
+
+def _group_kept_audio_by_language(
+    tracks: list[MkvTrack],
+    keep_set: set[int],
+) -> tuple[dict[str | None, list[MkvTrack]], list[MkvTrack]]:
+    """Group kept audio tracks by language and return (lang_groups, surviving).
+
+    Returns both the per-language groups and the flat list of all surviving
+    audio tracks so callers avoid recomputing the filter.
+    """
+    surviving = [t for t in tracks if t.type == _TRACK_AUDIO and t.id in keep_set]
+    lang_groups: dict[str | None, list[MkvTrack]] = {}
+    for t in surviving:
+        lang_groups.setdefault(t.language, []).append(t)
+    return lang_groups, surviving
+
+
+def _find_non_commentary_with_known_channels(
+    group_tracks: list[MkvTrack],
+) -> tuple[list[MkvTrack], list[int]]:
+    """Return (non_commentary_tracks, known_channel_counts) for *group_tracks*.
+
+    Commentary tracks are excluded so they do not inflate the max-channel
+    calculation used by :func:`_compute_channel_drops_per_group`.
+    """
+    non_commentary = [t for t in group_tracks if not _is_commentary(t.name)]
+    known = [t.channels for t in non_commentary if t.channels is not None]
+    return non_commentary, known
+
+
+def _compute_channel_drops_per_group(group_tracks: list[MkvTrack]) -> list[int]:
+    """Return IDs of lower-channel non-commentary tracks to drop within *group_tracks*."""
+    non_commentary, known = _find_non_commentary_with_known_channels(group_tracks)
+    if not known:
+        return []
+    max_ch = max(known)
+    if any(ch < max_ch for ch in known):
+        return [t.id for t in non_commentary if t.channels is not None and t.channels < max_ch]
+    return []
+
+
+def _apply_channel_drop_changes(
+    channel_drop: list[int],
+    result: _FilterResult,
+    surviving: list[MkvTrack],
+    logger: Logger,
+) -> None:
+    """Apply channel-based drop decisions to *result* and emit log messages."""
+    if channel_drop:
+        channel_drop_set = set(channel_drop)
+        for tid in channel_drop:
+            result.audio_keep.remove(tid)
+            result.audio_drop.append(tid)
+        descs = ", ".join(_fmt_track(t) for t in surviving if t.id in channel_drop_set)
+        logger.info(f"  Dropping {len(channel_drop)} audio track(s) with fewer channels than the per-language maximum.")
+        logger.debug(f"  Dropping lower-channel audio track(s): {descs}")
 
 
 def _apply_strip_lower_channels(
@@ -525,33 +623,72 @@ def _apply_strip_lower_channels(
     high-channel commentary track never causes the main audio to be dropped.
     Tracks with unknown channel counts (``channels=None``) are always kept.
     """
-    if not strip_lower_channels or keep_audio or not result.audio_keep or result.audio_fallback_fired:
+    if not strip_lower_channels:
+        return
+    if keep_audio:
+        return
+    if not result.audio_keep:
+        return
+    if result.audio_fallback_fired:
         return
 
     keep_set = set(result.audio_keep)
-    surviving = [t for t in tracks if t.type == "audio" and t.id in keep_set]
-    lang_groups: dict[str | None, list[MkvTrack]] = {}
-    for t in surviving:
-        lang_groups.setdefault(t.language, []).append(t)
+    lang_groups, surviving = _group_kept_audio_by_language(tracks, keep_set)
 
     channel_drop: list[int] = []
     for group_tracks in lang_groups.values():
-        non_commentary = [t for t in group_tracks if not _is_commentary(t.name)]
-        known = [t.channels for t in non_commentary if t.channels is not None]
-        if not known:
-            continue
-        max_ch = max(known)
-        if any(ch < max_ch for ch in known):
-            channel_drop.extend(t.id for t in non_commentary if t.channels is not None and t.channels < max_ch)
+        channel_drop.extend(_compute_channel_drops_per_group(group_tracks))
 
-    if channel_drop:
-        channel_drop_set = set(channel_drop)
-        for tid in channel_drop:
-            result.audio_keep.remove(tid)
-            result.audio_drop.append(tid)
-        descs = ", ".join(_fmt_track(t) for t in surviving if t.id in channel_drop_set)
-        logger.info(f"  Dropping {len(channel_drop)} audio track(s) with fewer channels than the per-language maximum.")
-        logger.debug(f"  Dropping lower-channel audio track(s): {descs}")
+    _apply_channel_drop_changes(channel_drop, result, surviving, logger)
+
+
+# ---------------------------------------------------------------------------
+# Logging helpers used by _log_filter_changes()
+# ---------------------------------------------------------------------------
+
+
+def _log_language_drops(
+    drop_ids: frozenset[int],
+    track_type: str,
+    tracks: list[MkvTrack],
+    language: list[str],
+    needs_change: bool,
+    logger: Logger,
+) -> None:
+    """Log language-filtered track drops for one track type."""
+    if drop_ids and needs_change:
+        lang_filter = f"\u2260 {_lang_desc(language)}" if len(language) == 1 else f"not in {language}"
+        display = _TRACK_LOG_NAME.get(track_type, track_type)
+        logger.info(f"  Dropping {len(drop_ids)} {display} track(s) (language {lang_filter}).")
+        descs = ", ".join(_fmt_track(t) for t in tracks if t.type == track_type and t.id in drop_ids)
+        logger.debug(f"  Dropping {display} track(s): {descs}")
+
+
+def _log_commentary_drops(
+    drop_ids: set[int],
+    track_type: str,
+    tracks: list[MkvTrack],
+    logger: Logger,
+) -> None:
+    """Log commentary track drops for one track type."""
+    if drop_ids:
+        display = _TRACK_LOG_NAME.get(track_type, track_type)
+        logger.info(f"  Dropping {len(drop_ids)} {display} commentary track(s).")
+        descs = ", ".join(_fmt_track(t) for t in tracks if t.type == track_type and t.id in drop_ids)
+        logger.debug(f"  Dropping {display} commentary track(s): {descs}")
+
+
+def _log_metadata_title_change(
+    edit_metadata_title: bool,
+    delete_metadata_title: bool,
+    input_path: Path,
+    logger: Logger,
+) -> None:
+    """Log the metadata title operation that will be applied."""
+    if edit_metadata_title:
+        logger.info(f"  Metadata: setting title to '{input_path.stem}'")
+    elif delete_metadata_title:
+        logger.info("  Metadata: clearing title")
 
 
 def _log_filter_changes(
@@ -566,33 +703,55 @@ def _log_filter_changes(
     needs_sub_change: bool,
 ) -> None:
     """Log a human-readable summary of the track changes that will be applied."""
-    lang_filter = f"\u2260 '{language[0]}'" if len(language) == 1 else f"not in {language}"
-    if result.language_audio_drop_ids and needs_audio_change:
-        logger.info(f"  Dropping {len(result.language_audio_drop_ids)} audio track(s) (language {lang_filter}).")
-        descs = ", ".join(_fmt_track(t) for t in tracks if t.type == "audio" and t.id in result.language_audio_drop_ids)
-        logger.debug(f"  Dropping audio track(s): {descs}")
-    if result.language_sub_drop_ids and needs_sub_change:
-        logger.info(f"  Dropping {len(result.language_sub_drop_ids)} subtitle track(s) (language {lang_filter}).")
-        descs = ", ".join(
-            _fmt_track(t) for t in tracks if t.type == "subtitles" and t.id in result.language_sub_drop_ids
+    _log_language_drops(result.language_audio_drop_ids, _TRACK_AUDIO, tracks, language, needs_audio_change, logger)
+    _log_language_drops(result.language_sub_drop_ids, _TRACK_SUBTITLES, tracks, language, needs_sub_change, logger)
+    _log_commentary_drops(result.commentary_audio_drop_ids, _TRACK_AUDIO, tracks, logger)
+    _log_commentary_drops(result.commentary_sub_drop_ids, _TRACK_SUBTITLES, tracks, logger)
+    _log_metadata_title_change(edit_metadata_title, delete_metadata_title, input_path, logger)
+
+
+# ---------------------------------------------------------------------------
+# Default-track flag helpers used by _compute_default_track_flags()
+# ---------------------------------------------------------------------------
+
+
+def _find_commentary_and_non(
+    track_type: str,
+    keep_ids: list[int],
+    tracks: list[MkvTrack],
+) -> tuple[list[MkvTrack], list[MkvTrack]]:
+    """Return (commentary_kept, non_commentary_kept) for *track_type* among *keep_ids*."""
+    keep_set = set(keep_ids)
+    kept_tracks = [t for t in tracks if t.type == track_type and t.id in keep_set]
+    commentary_kept = [t for t in kept_tracks if _is_commentary(t.name)]
+    non_commentary = [t for t in kept_tracks if not _is_commentary(t.name)]
+    return commentary_kept, non_commentary
+
+
+def _default_flags_for_commentary_tracks(
+    commentary_kept: list[MkvTrack],
+    non_commentary: list[MkvTrack],
+    track_type: str,
+    logger: Logger,
+    input_path: Path,
+) -> list[str]:
+    """Build ``--default-track`` flags; demotes commentary defaults, promotes non-commentary."""
+    flags: list[str] = []
+    if non_commentary:
+        if not any(t.default_track for t in non_commentary):
+            flags += ["--default-track", f"{non_commentary[0].id}:1"]
+        for t in commentary_kept:
+            if t.default_track:
+                flags += ["--default-track", f"{t.id}:0"]
+    else:
+        for t in commentary_kept:
+            if t.default_track:
+                flags += ["--default-track", f"{t.id}:0"]
+        logger.warning(
+            f"All remaining {track_type} tracks in '{input_path.name}' are commentary "
+            f"\u2014 cannot reassign default {track_type} track."
         )
-        logger.debug(f"  Dropping subtitle track(s): {descs}")
-    if result.commentary_audio_drop_ids:
-        logger.info(f"  Dropping {len(result.commentary_audio_drop_ids)} audio commentary track(s).")
-        descs = ", ".join(
-            _fmt_track(t) for t in tracks if t.type == "audio" and t.id in result.commentary_audio_drop_ids
-        )
-        logger.debug(f"  Dropping audio commentary track(s): {descs}")
-    if result.commentary_sub_drop_ids:
-        logger.info(f"  Dropping {len(result.commentary_sub_drop_ids)} subtitle commentary track(s).")
-        descs = ", ".join(
-            _fmt_track(t) for t in tracks if t.type == "subtitles" and t.id in result.commentary_sub_drop_ids
-        )
-        logger.debug(f"  Dropping subtitle commentary track(s): {descs}")
-    if edit_metadata_title:
-        logger.info(f"  Metadata: setting title to '{input_path.stem}'")
-    elif delete_metadata_title:
-        logger.info("  Metadata: clearing title")
+    return flags
 
 
 def _compute_default_track_flags(
@@ -612,32 +771,57 @@ def _compute_default_track_flags(
     """
     default_flags: list[str] = []
     for track_type, needs_change, keep_ids in (
-        ("audio", needs_audio_change, result.audio_keep),
-        ("subtitles", needs_sub_change, result.sub_keep),
+        (_TRACK_AUDIO, needs_audio_change, result.audio_keep),
+        (_TRACK_SUBTITLES, needs_sub_change, result.sub_keep),
     ):
         if not needs_change:
             continue
-        keep_set = set(keep_ids)
-        kept_tracks = [t for t in tracks if t.type == track_type and t.id in keep_set]
-        commentary_kept = [t for t in kept_tracks if _is_commentary(t.name)]
+        commentary_kept, non_commentary = _find_commentary_and_non(track_type, keep_ids, tracks)
         if not commentary_kept:
             continue
-        non_commentary = [t for t in kept_tracks if not _is_commentary(t.name)]
-        if non_commentary:
-            if not any(t.default_track for t in non_commentary):
-                default_flags += ["--default-track", f"{non_commentary[0].id}:1"]
-            for t in commentary_kept:
-                if t.default_track:
-                    default_flags += ["--default-track", f"{t.id}:0"]
-        else:
-            for t in commentary_kept:
-                if t.default_track:
-                    default_flags += ["--default-track", f"{t.id}:0"]
-            logger.warning(
-                f"All remaining {track_type} tracks in '{input_path.name}' are commentary "
-                f"\u2014 cannot reassign default {track_type} track."
-            )
+        default_flags += _default_flags_for_commentary_tracks(
+            commentary_kept, non_commentary, track_type, logger, input_path
+        )
     return default_flags
+
+
+# ---------------------------------------------------------------------------
+# mkvmerge command assembly helpers used by build_mkvmerge_command()
+# ---------------------------------------------------------------------------
+
+
+def _assemble_metadata_args(
+    edit_metadata_title: bool,
+    delete_metadata_title: bool,
+    input_path: Path,
+) -> list[str]:
+    """Return the ``--title`` argv fragment for the requested metadata operation."""
+    if edit_metadata_title:
+        return ["--title", input_path.stem]
+    if delete_metadata_title:
+        return ["--title", ""]
+    return []
+
+
+def _format_track_ids(ids: list[int]) -> str:
+    """Format a list of track IDs as a comma-separated string."""
+    return ",".join(str(i) for i in ids)
+
+
+def _assemble_track_args(
+    result: _FilterResult,
+    needs_audio_change: bool,
+    needs_sub_change: bool,
+) -> list[str]:
+    """Return audio and subtitle inclusion/exclusion argv fragments."""
+    args: list[str] = []
+    if needs_audio_change and result.audio_keep:
+        args += ["--audio-tracks", _format_track_ids(result.audio_keep)]
+    if needs_sub_change and result.sub_keep:
+        args += ["--subtitle-tracks", _format_track_ids(result.sub_keep)]
+    elif needs_sub_change and not result.sub_keep:
+        args += ["--no-subtitles"]
+    return args
 
 
 def build_mkvmerge_command(
@@ -654,53 +838,11 @@ def build_mkvmerge_command(
     strip_lower_channels: bool = False,
     strip_commentary: bool = False,
 ) -> list[str] | None:
-    """Build the mkvmerge argv needed to produce a trimmed copy of *input_path*.
+    """Build the mkvmerge argv for *input_path*; return *None* if no changes are needed.
 
-    The function returns *None* when no changes are required (the file already
-    contains only the desired tracks and no metadata operations are requested).
-    Callers should skip mkvmerge and mark the file as processed when *None* is
-    returned.
-
-    Audio and subtitle tracks that do **not** match the requested language are
-    dropped, unless the ``keep_audio`` / ``keep_subtitles`` overrides are set.
-    If filtering would remove **all** tracks of a given type (i.e. no track
-    matches the language), that type is left untouched and a warning is logged.
-    Audio filtering is also left untouched when every matching audio track is a
-    commentary track — stripping non-commentary audio in that case would leave
-    the viewer with only director's commentary, which is almost always wrong.
-    Video tracks are always kept.
-
-    Args:
-        mkvmerge_path: Path to the mkvmerge binary.
-        input_path: Source MKV file.
-        output_path: Destination path for the trimmed file (usually a temp path).
-        tracks: Track list as returned by :func:`probe_file`.
-        language: One or more ISO 639-2 language codes to retain (e.g. ``["eng"]``
-            or ``["eng", "fre"]``).
-        keep_audio: When *True*, retain all audio tracks regardless of language.
-        keep_subtitles: When *True*, retain all subtitle tracks regardless of language.
-        edit_metadata_title: When *True*, set the container title to the file stem.
-        delete_metadata_title: When *True*, clear the container title.
-        logger: Optional loguru logger; used to emit warnings when the safety
-            fallback is triggered (no tracks match the language filter).
-        strip_lower_channels: When *True*, after all other filtering, drop any
-            audio tracks whose channel count is strictly below the maximum
-            channel count of the surviving audio tracks.  Tracks with unknown
-            channel counts (``channels=None``) are always preserved.  Skipped
-            when *keep_audio* is *True*.
-        strip_commentary: When *True*, audio and subtitle tracks whose name
-            contains the word "commentary" (case-insensitive) are removed after
-            language filtering and all safety fallbacks have resolved.  Skipped
-            for audio when *keep_audio* is *True* or the audio safety fallback
-            fired; skipped for subtitles when *keep_subtitles* is *True* or the
-            subtitle safety fallback fired.  Audio has a final gate: if stripping
-            would leave zero audio tracks, all audio is kept and a warning is
-            logged — a silent file is never acceptable.  Subtitles have no such
-            gate; commentary-only subtitle tracks are stripped unconditionally.
-
-    Returns:
-        A list of strings suitable for :func:`subprocess.run`, or *None* if
-        mkvmerge does not need to be invoked.
+    Runs all filtering phases (language, fallbacks, commentary, channel), then assembles
+    the final command.  Returns *None* when no track or metadata changes are required
+    so callers can skip mkvmerge and mark the file as already processed.
     """
     result = _apply_language_filter(tracks, language, keep_audio, keep_subtitles)
     _apply_audio_fallbacks(result, tracks, language, logger, input_path)
@@ -728,23 +870,128 @@ def build_mkvmerge_command(
     )
 
     cmd: list[str] = [mkvmerge_path, "-o", str(output_path)]
-
-    if edit_metadata_title:
-        cmd += ["--title", input_path.stem]
-    elif delete_metadata_title:
-        cmd += ["--title", ""]
-
-    if needs_audio_change and result.audio_keep:
-        cmd += ["--audio-tracks", ",".join(str(i) for i in result.audio_keep)]
-
-    if needs_sub_change and result.sub_keep:
-        cmd += ["--subtitle-tracks", ",".join(str(i) for i in result.sub_keep)]
-    elif needs_sub_change and not result.sub_keep:
-        cmd += ["--no-subtitles"]
-
+    cmd += _assemble_metadata_args(edit_metadata_title, delete_metadata_title, input_path)
+    cmd += _assemble_track_args(result, needs_audio_change, needs_sub_change)
     cmd += _compute_default_track_flags(tracks, result, needs_audio_change, needs_sub_change, logger, input_path)
     cmd.append(str(input_path))
     return cmd
+
+
+# ---------------------------------------------------------------------------
+# process_file() helpers
+# ---------------------------------------------------------------------------
+
+
+def _check_exit_code(
+    result: subprocess.CompletedProcess[str],
+    file_path: Path,
+    logger: Logger,
+) -> str | None:
+    """Validate the mkvmerge exit code and log accordingly.
+
+    Returns an error reason string when the remux failed (exit code >= 2),
+    *None* when the exit code indicates success (0) or warnings (1).
+    Logs a warning for exit code 1 (completed with warnings).
+    """
+    if result.returncode not in (0, 1):
+        stderr = result.stderr.strip() or result.stdout.strip()
+        logger.error(f"mkvmerge failed for '{file_path}' (exit {result.returncode}).\n{stderr}")
+        first_stderr = stderr.splitlines()[0].strip() if stderr else ""
+        reason = f"mkvmerge failed (exit {result.returncode})"
+        if first_stderr:
+            reason += f": {first_stderr}"
+        return reason
+    if result.returncode == 1:
+        logger.warning(
+            f"mkvmerge reported warnings for '{file_path}' (exit 1) — output validated and accepted.\n"
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    return None
+
+
+def _check_output_size(
+    tmp_path: Path,
+    input_size: int,
+    skip_size_check: bool,
+    file_path: Path,
+    logger: Logger,
+) -> tuple[str | None, int]:
+    """Validate the output file exists and has an acceptable size.
+
+    Returns ``(error_reason, output_size)`` where *error_reason* is *None* on
+    success or a non-empty string describing the rejection reason on failure.
+    *output_size* is 0 when an error is returned.
+    """
+    if not tmp_path.exists():
+        logger.error(f"mkvmerge produced no output file for '{file_path}'.")
+        return "mkvmerge produced no output file", 0
+    output_size = tmp_path.stat().st_size
+    # Zero-byte guard is unconditional — an empty file is never valid regardless
+    # of --skip-size-check.  The ratio check below is the heuristic that flag bypasses.
+    if output_size == 0:
+        logger.error(f"mkvmerge produced an empty output file for '{file_path}'; rejecting to avoid data loss.")
+        return "mkvmerge produced empty output file", 0
+    min_acceptable = max(1, int(input_size * _MIN_OUTPUT_RATIO))
+    if not skip_size_check and output_size < min_acceptable:
+        logger.error(
+            f"mkvmerge output for '{file_path}' is suspiciously small "
+            f"({output_size} B vs {input_size} B input); rejecting to avoid data loss."
+        )
+        return f"mkvmerge output suspiciously small ({output_size} B vs {input_size} B input)", 0
+    return None, output_size
+
+
+def _atomic_file_replace(
+    tmp_path: Path,
+    file_path: Path,
+    no_backup: bool,
+    logger: Logger,
+) -> None:
+    """Atomically replace *file_path* with *tmp_path*, optionally keeping a backup.
+
+    For backup mode: rename original → .bak, then atomically replace with temp.
+    If the second step fails, roll back the backup rename.
+    For no-backup mode: directly replace the original with the temp atomically.
+
+    Raises:
+        Any :class:`BaseException` raised by the file operations, after attempting
+        rollback when in backup mode.
+    """
+    backup_path = file_path.with_suffix(file_path.suffix + ".bak")
+    if no_backup:
+        # os.replace / Path.replace is atomic on POSIX; overwrites the destination.
+        tmp_path.replace(file_path)
+    else:
+        # Path.replace() overwrites an existing destination on all platforms.
+        # Path.rename() would raise FileExistsError on Windows if a .bak
+        # file already exists from a previous run.
+        file_path.replace(backup_path)
+        try:
+            tmp_path.replace(file_path)
+        except BaseException:
+            # Always attempt rollback when the backup exists.  The original
+            # condition (`if not file_path.exists()`) was unsafe on Windows where
+            # a partial write can leave a corrupt file at file_path.  Using
+            # Path.replace() (not rename) overwrites any partial file atomically.
+            if backup_path.exists():
+                try:
+                    backup_path.replace(file_path)
+                except Exception as restore_exc:
+                    logger.critical(
+                        f"Could not restore original from backup '{backup_path}': {restore_exc}. "
+                        f"Original is at '{backup_path}'."
+                    )
+            raise
+        logger.debug(f"Original backed up to '{backup_path}'.")
+
+
+def _cleanup_tmp_file(tmp_path: Path | None, logger: Logger) -> None:
+    """Remove *tmp_path* if it still exists (best-effort; logs on failure)."""
+    if tmp_path is not None and tmp_path.exists():
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError as cleanup_exc:
+            logger.warning(f"Could not remove temp file '{tmp_path}': {cleanup_exc}")
 
 
 def process_file(
@@ -755,30 +1002,11 @@ def process_file(
     logger: Logger,
     skip_size_check: bool = False,
 ) -> str | None:
-    """Execute a pre-built mkvmerge command and safely replace *file_path*.
+    """Execute *command* and atomically replace *file_path* with the result.
 
-    The workflow is:
-    1. Run mkvmerge to a temporary file in the same directory.
-    2. Validate the output (non-zero size; exit codes 0 and 1 are both
-       accepted — 0 means success, 1 means "completed with warnings" and
-       the output is still considered valid; anything else is a failure).
-    3. On success: rename original to ``<path>.bak`` (unless *no_backup*) then
-       rename temp to original.
-    4. On any failure: remove the temp file and leave the original untouched.
-
-    Args:
-        mkvmerge_path: Path to the mkvmerge binary (used only for logging).
-        file_path: Path to the MKV file being processed.
-        command: Full mkvmerge argv as returned by :func:`build_mkvmerge_command`.
-        no_backup: When *True*, delete the original instead of renaming to ``.bak``.
-        logger: Loguru logger instance.
-        skip_size_check: When *True*, bypass the suspiciously-small output size
-            guard.  Use when legitimate remuxes are expected to produce output
-            significantly smaller than 50 % of the source (e.g. files with very
-            large audio/subtitle payloads relative to video).
-
-    Returns:
-        *None* on success, or a concise single-line error reason string on failure.
+    Writes to a temp file, validates exit code, size, and structure, then
+    renames into place.  Returns *None* on success or an error reason string.
+    Original is never touched on failure; temp file is always cleaned up.
     """
     tmp_path: Path | None = None
     try:
@@ -796,43 +1024,15 @@ def process_file(
 
         logger.debug(f"Running: {' '.join(patched_cmd)}")
         with _spinner(f"Remuxing '{file_path.name}'..."):
-            result = subprocess.run(patched_cmd, capture_output=True, text=True, timeout=3600)
+            result = subprocess.run(patched_cmd, capture_output=True, text=True, timeout=_PROCESS_TIMEOUT)
 
-        if result.returncode not in (0, 1):
-            stderr = result.stderr.strip() or result.stdout.strip()
-            logger.error(f"mkvmerge failed for '{file_path}' (exit {result.returncode}).\n{stderr}")
-            first_stderr = stderr.splitlines()[0].strip() if stderr else ""
-            reason = f"mkvmerge failed (exit {result.returncode})"
-            if first_stderr:
-                reason += f": {first_stderr}"
-            return reason
+        exit_error = _check_exit_code(result, file_path, logger)
+        if exit_error is not None:
+            return exit_error
 
-        # mkvmerge exit 1 means "completed with warnings" — the output is still valid.
-        # Log the warning but continue; the output file check below confirms usability.
-        if result.returncode == 1:
-            logger.warning(
-                f"mkvmerge reported warnings for '{file_path}' (exit 1) — output validated and accepted.\n"
-                f"{result.stderr.strip() or result.stdout.strip()}"
-            )
-
-        # Validate output file: must exist, be non-empty, and not suspiciously small.
-        # A zero-size or heavily truncated file indicates a crashed/partial write.
-        if not tmp_path.exists():
-            logger.error(f"mkvmerge produced no output file for '{file_path}'.")
-            return "mkvmerge produced no output file"
-        output_size = tmp_path.stat().st_size
-        # Zero-byte guard is unconditional — an empty file is never valid regardless
-        # of --skip-size-check.  The ratio check below is the heuristic that flag bypasses.
-        if output_size == 0:
-            logger.error(f"mkvmerge produced an empty output file for '{file_path}'; rejecting to avoid data loss.")
-            return "mkvmerge produced empty output file"
-        min_acceptable = max(1, int(input_size * _MIN_OUTPUT_RATIO))
-        if not skip_size_check and output_size < min_acceptable:
-            logger.error(
-                f"mkvmerge output for '{file_path}' is suspiciously small "
-                f"({output_size} B vs {input_size} B input); rejecting to avoid data loss."
-            )
-            return f"mkvmerge output suspiciously small ({output_size} B vs {input_size} B input)"
+        size_error, output_size = _check_output_size(tmp_path, input_size, skip_size_check, file_path, logger)
+        if size_error is not None:
+            return size_error
 
         # Structural validation: probe the output with mkvmerge -J to confirm
         # it is a well-formed MKV container.  This catches partial writes and
@@ -844,7 +1044,7 @@ def process_file(
             [mkvmerge_path, "-J", str(tmp_path)],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=_PROBE_TIMEOUT,
         )
         if probe.returncode != 0:
             corrupt_tmp = tmp_path
@@ -860,35 +1060,7 @@ def process_file(
             )
 
         # Replace original atomically.
-        # For backup mode: rename original → .bak, then atomically replace with temp.
-        # If the second step fails, roll back the backup rename.
-        # For no-backup mode: directly replace the original with the temp in one atomic step.
-        backup_path = file_path.with_suffix(file_path.suffix + ".bak")
-        if no_backup:
-            # os.replace / Path.replace is atomic on POSIX; overwrites the destination.
-            tmp_path.replace(file_path)
-        else:
-            # Path.replace() overwrites an existing destination on all platforms.
-            # Path.rename() would raise FileExistsError on Windows if a .bak
-            # file already exists from a previous run.
-            file_path.replace(backup_path)
-            try:
-                tmp_path.replace(file_path)
-            except BaseException:
-                # Always attempt rollback when the backup exists.  The original
-                # condition (`if not file_path.exists()`) was unsafe on Windows where
-                # a partial write can leave a corrupt file at file_path.  Using
-                # Path.replace() (not rename) overwrites any partial file atomically.
-                if backup_path.exists():
-                    try:
-                        backup_path.replace(file_path)
-                    except Exception as restore_exc:
-                        logger.critical(
-                            f"Could not restore original from backup '{backup_path}': {restore_exc}. "
-                            f"Original is at '{backup_path}'."
-                        )
-                raise
-            logger.debug(f"Original backed up to '{backup_path}'.")
+        _atomic_file_replace(tmp_path, file_path, no_backup, logger)
         tmp_path = None  # Ownership transferred; do not delete in finally block.
 
         return None
@@ -898,8 +1070,4 @@ def process_file(
         logger.debug("", exc_info=True)
         return f"unexpected error: {str(exc).splitlines()[0].strip()}"
     finally:
-        if tmp_path is not None and tmp_path.exists():
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError as cleanup_exc:
-                logger.warning(f"Could not remove temp file '{tmp_path}': {cleanup_exc}")
+        _cleanup_tmp_file(tmp_path, logger)

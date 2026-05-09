@@ -816,3 +816,101 @@ class TestFmtBytes:
 
     def test_terabytes(self) -> None:
         assert "TB" in _fmt_bytes(1024**4)
+
+
+# ---------------------------------------------------------------------------
+# Branch coverage: run() isinstance branch and discover_mkv_files
+# ---------------------------------------------------------------------------
+
+
+class TestRunIsinstanceBranch:
+    """run() normalises a single string media_path to a list."""
+
+    def test_string_media_path_accepted(self, tmp_path: Path) -> None:
+        """Passing media_path as a plain string (not a list) must be accepted."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        logger = _make_logger()
+        db_path = str(tmp_path / "db.sqlite")
+        with patch("trimarr.runner.probe_file", side_effect=RuntimeError("probe failed")):
+            run(
+                **{
+                    **_run_kwargs(tmp_path, dry_run=True, db_path=db_path),
+                    "media_path": str(tmp_path),  # single string, not list
+                    "logger": logger,
+                }
+            )
+        # probe failure must be reported
+        assert logger.warning.called or logger.error.called
+
+
+class TestDiscoverMkvFilesDeduplication:
+    """Duplicate files across overlapping roots are deduplicated."""
+
+    def test_same_file_in_two_roots_counted_once(self, tmp_path: Path) -> None:
+        """When two media_paths point to overlapping directories, files appear only once."""
+        media = tmp_path / "media"
+        media.mkdir()
+        mkv = media / "movie.mkv"
+        mkv.write_bytes(b"fake")
+        logger = _make_logger()
+        db_path = str(tmp_path / "db.sqlite")
+        # Both paths resolve to the same directory — file should only be processed once
+        with patch("trimarr.runner.probe_file", side_effect=RuntimeError("stop")):
+            run(
+                **{
+                    **_run_kwargs(tmp_path, dry_run=False, db_path=db_path),
+                    "media_path": [str(media), str(media)],  # same dir twice
+                    "logger": logger,
+                }
+            )
+        # Exactly one probe attempt → at most one "Could not probe" warning (not two)
+        all_msgs = _logged_messages(logger.warning) + _logged_messages(logger.error)
+        # Per-attempt failure message starts with "Could not probe" — must appear at most once
+        probe_attempt_msgs = [m for m in all_msgs if m.startswith("Could not probe")]
+        assert len(probe_attempt_msgs) == 1
+
+
+class TestDiscoverMkvFilesNonMkvMixed:
+    """Directories with non-.mkv files only yield the .mkv files."""
+
+    def test_non_mkv_files_ignored(self, tmp_path: Path) -> None:
+        """Text files and other formats in the media dir are silently ignored."""
+        media = tmp_path / "media"
+        media.mkdir()
+        (media / "movie.mkv").write_bytes(b"fake")
+        (media / "subtitle.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nHello")
+        (media / "readme.txt").write_text("hello")
+        logger = _make_logger()
+        db_path = str(tmp_path / "db.sqlite")
+        with patch("trimarr.runner.probe_file", side_effect=RuntimeError("stop")):
+            run(
+                **{
+                    **_run_kwargs(tmp_path, dry_run=False, db_path=db_path),
+                    "media_path": [str(media)],
+                    "logger": logger,
+                }
+            )
+        # Only .mkv files are processed; probe failure from the single .mkv is expected
+        assert logger.warning.called or logger.error.called
+
+
+class TestRunStripCommentaryWithNoMatchingAudio:
+    """Verify run() completes when strip_commentary=True and probe fails."""
+
+    def test_run_with_strip_commentary_and_probe_failure(self, tmp_path: Path) -> None:
+        """When probe fails and strip_commentary=True, run exits cleanly."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake")
+        logger = _make_logger()
+        db_path = str(tmp_path / "db.sqlite")
+        with patch("trimarr.runner.probe_file", side_effect=RuntimeError("probe stop")):
+            run(
+                **{
+                    **_run_kwargs(tmp_path, dry_run=True, db_path=db_path),
+                    "strip_commentary": True,
+                    "logger": logger,
+                }
+            )
+        # probe failure must be reported
+        assert logger.warning.called or logger.error.called

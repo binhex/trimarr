@@ -559,3 +559,58 @@ class TestExtractFromZipSecurity:
         # The dangerous path outside dest must not exist
         escape_path = tmp_path / "mkvmerge"
         assert not escape_path.exists(), "Zip Slip: file written outside extraction directory!"
+
+
+# ---------------------------------------------------------------------------
+# Branch coverage: _get_latest_release_info non-matching first asset
+# ---------------------------------------------------------------------------
+
+
+class TestGetLatestReleaseInfoMultiAsset:
+    """When multiple assets exist, the loop skips non-matching ones."""
+
+    def _release_multi(self, asset_url: str) -> dict:
+        return {
+            "tag_name": "v2.0",
+            "assets": [
+                {"name": "other-asset.zip", "browser_download_url": "https://github.com/other"},
+                {"name": "asset.tar.xz", "browser_download_url": asset_url},
+            ],
+        }
+
+    def test_skips_non_matching_asset_and_finds_correct_one(self) -> None:
+        """When the first asset name does not match, the loop continues to find the right one."""
+        release = self._release_multi("https://github.com/owner/repo/releases/download/v2.0/asset.tar.xz")
+        with patch("trimarr.downloader._fetch_latest_release", return_value=release):
+            url, tag = _get_latest_release_info("owner/repo", "asset.tar.xz")
+        assert tag == "v2.0"
+        assert url.startswith("https://github.com")
+
+
+# ---------------------------------------------------------------------------
+# Branch coverage: _get_platform_asset linux amd64 alias
+# ---------------------------------------------------------------------------
+
+
+class TestGetPlatformAssetAliases:
+    """Test platform machine aliases."""
+
+    def test_linux_amd64_alias_accepted(self) -> None:
+        """On Linux, 'amd64' is an alias for 'x86_64' and must be accepted."""
+        with (
+            patch("trimarr.downloader.platform.system", return_value="Linux"),
+            patch("trimarr.downloader.platform.machine", return_value="amd64"),
+        ):
+            asset, binary = _get_platform_asset()
+        assert asset == "mkvtoolnix-x86_64-linux.tar.xz"
+        assert binary == "mkvmerge"
+
+    def test_windows_x86_64_alias_accepted(self) -> None:
+        """On Windows, 'x86_64' is an alias for 'amd64' and must be accepted."""
+        with (
+            patch("trimarr.downloader.platform.system", return_value="Windows"),
+            patch("trimarr.downloader.platform.machine", return_value="x86_64"),
+        ):
+            asset, binary = _get_platform_asset()
+        assert asset == "mkvtoolnix-x86_64-win.zip"
+        assert binary == "mkvmerge.exe"

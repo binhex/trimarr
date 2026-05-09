@@ -106,6 +106,7 @@ markers = [
 [tool.coverage.run]
 source = ["src"]
 omit = ["tests/*"]
+branch = true
 
 [tool.coverage.report]
 exclude_lines = [

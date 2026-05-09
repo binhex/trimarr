@@ -57,16 +57,8 @@ _VERSION_FILE = "mkvmerge.version"
 def _get_platform_asset() -> tuple[str, str]:
     """Return ``(asset_filename, binary_name)`` for the current OS and CPU architecture.
 
-    Supported platforms:
-
-    * **Linux x86_64** — ``mkvtoolnix-x86_64-linux.tar.xz`` / ``mkvmerge``
-    * **Windows x86_64** — ``mkvtoolnix-x86_64-win.zip`` / ``mkvmerge.exe``
-
-    Returns:
-        Tuple of ``(asset_filename, binary_name)``.
-
-    Raises:
-        RuntimeError: If the current platform has no pre-built binary available.
+    Supports Linux x86_64 and Windows x86_64.
+    Raises :exc:`RuntimeError` for unsupported platforms.
     """
     system = platform.system()
     machine = platform.machine().lower()
@@ -132,16 +124,8 @@ def _fetch_latest_release(repo: str) -> dict:
 def _get_latest_release_info(repo: str, asset_name: str) -> tuple[str, str]:
     """Return ``(browser_download_url, tag_name)`` for *asset_name* in the latest release of *repo*.
 
-    Args:
-        repo: GitHub repo in ``owner/name`` format.
-        asset_name: Exact filename of the release asset.
-
-    Returns:
-        Tuple of (validated HTTPS download URL, release tag string).
-
-    Raises:
-        RuntimeError: If the asset cannot be found in the latest release or the URL is not from GitHub.
-        requests.HTTPError: On non-2xx GitHub API responses.
+    Validates the URL is HTTPS from a trusted GitHub domain.
+    Raises :exc:`RuntimeError` when the asset is not found or the URL is untrusted.
     """
     release = _fetch_latest_release(repo)
     tag = str(release.get("tag_name", "unknown"))
@@ -197,6 +181,118 @@ def get_installed_mkvmerge_tag(dest_dir: str | Path | None = None) -> str | None
     return version_file.read_text(encoding="utf-8").strip() or None
 
 
+def _stream_to_file(url: str, dest_path: Path) -> None:
+    """Download *url* via streaming HTTP and write the content to *dest_path*.
+
+    Args:
+        url: HTTPS download URL.
+        dest_path: Local filesystem path to write the downloaded bytes to.
+
+    Raises:
+        RuntimeError: If the HTTP request fails.
+        requests.HTTPError: On non-2xx responses.
+    """
+    try:
+        response = requests.get(url, stream=True, timeout=120)
+    except requests.exceptions.RequestException as exc:
+        raise RuntimeError(f"Failed to download mkvmerge from '{url}': {exc}") from exc
+    response.raise_for_status()
+    with dest_path.open("wb") as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            f.write(chunk)
+
+
+def _extract_archive_binary(
+    archive_path: Path,
+    binary_name: str,
+    tmp_dir: Path,
+    is_windows: bool,
+) -> Path:
+    """Extract *binary_name* from *archive_path* and return the extracted path.
+
+    Dispatches to :func:`_extract_from_zip` on Windows and
+    :func:`_extract_from_tar` on other platforms.
+    """
+    if is_windows:
+        return _extract_from_zip(archive_path, binary_name, tmp_dir)
+    return _extract_from_tar(archive_path, binary_name, tmp_dir)
+
+
+def _validate_binary_header(extracted: Path, binary_name: str, is_windows: bool) -> None:
+    """Verify that *extracted* has the expected binary magic bytes and minimum size.
+
+    Args:
+        extracted: Path to the extracted binary file.
+        binary_name: Name of the binary (used in error messages).
+        is_windows: When *True*, expect a PE binary; otherwise expect ELF.
+
+    Raises:
+        RuntimeError: If the magic bytes do not match or the file is too small.
+    """
+    expected_magic = _PE_MAGIC if is_windows else _ELF_MAGIC
+    binary_type = "PE" if is_windows else "ELF"
+    with extracted.open("rb") as fh:
+        magic = fh.read(4)
+    if not magic.startswith(expected_magic):
+        raise RuntimeError(
+            f"Downloaded '{binary_name}' does not appear to be a valid {binary_type} binary (magic={magic!r})."
+        )
+    extracted_size = extracted.stat().st_size
+    if extracted_size < _MIN_BINARY_BYTES:
+        raise RuntimeError(
+            f"Extracted '{binary_name}' is only {extracted_size} bytes; "
+            f"download appears truncated (expected >= {_MIN_BINARY_BYTES} bytes)."
+        )
+
+
+def _atomic_install_binary(
+    extracted: Path,
+    dest_binary: Path,
+    dest_dir: Path,
+    is_windows: bool,
+) -> None:
+    """Atomically install *extracted* as *dest_binary* using a temp-then-rename strategy.
+
+    Sets executable permissions on non-Windows platforms.  Cleans up the temp
+    file on failure before re-raising the exception.
+    """
+    # Atomically install the binary: write to a uniquely-named temp file in dest_dir,
+    # set permissions, then rename into place so concurrent readers never observe a
+    # partial write and concurrent trimarr processes do not clobber each other.
+    tmp_bin_fd, tmp_bin_str = tempfile.mkstemp(dir=dest_dir, prefix=".mkvmerge.bin.", suffix=".tmp")
+    os.close(tmp_bin_fd)
+    tmp_bin = Path(tmp_bin_str)
+    try:
+        tmp_bin.write_bytes(extracted.read_bytes())
+        if not is_windows:
+            tmp_bin.chmod(tmp_bin.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        os.replace(tmp_bin, dest_binary)
+    except Exception:
+        with contextlib.suppress(OSError):
+            tmp_bin.unlink(missing_ok=True)
+        raise
+
+
+def _write_version_file_atomically(release_tag: str, dest_dir: Path) -> None:
+    """Atomically write the release tag to the version file in *dest_dir*.
+
+    Uses a temp-then-rename strategy so the binary and version are never mismatched,
+    even if concurrent trimarr processes are running.
+    """
+    # Atomically write the version file so the binary and version are never mismatched.
+    # Use a unique temp name to prevent concurrent trimarr processes clobbering each other.
+    tmp_ver_fd, tmp_ver_str = tempfile.mkstemp(dir=dest_dir, prefix=".mkvmerge.version.", suffix=".tmp")
+    os.close(tmp_ver_fd)
+    tmp_ver = Path(tmp_ver_str)
+    try:
+        tmp_ver.write_text(release_tag, encoding="utf-8")
+        os.replace(tmp_ver, dest_dir / _VERSION_FILE)
+    except Exception:
+        with contextlib.suppress(OSError):
+            tmp_ver.unlink(missing_ok=True)
+        raise
+
+
 def download_mkvmerge(dest_dir: str | Path | None = None) -> Path:
     """Download the latest statically compiled mkvmerge binary and install it.
 
@@ -233,67 +329,10 @@ def download_mkvmerge(dest_dir: str | Path | None = None) -> Path:
     # Download archive into a temp directory
     with tempfile.TemporaryDirectory() as tmp:
         archive_path = Path(tmp) / asset_name
+        _stream_to_file(download_url, archive_path)
+        extracted = _extract_archive_binary(archive_path, binary_name, Path(tmp), is_windows)
+        _validate_binary_header(extracted, binary_name, is_windows)
+        _atomic_install_binary(extracted, dest_binary, dest_dir, is_windows)
 
-        try:
-            response = requests.get(download_url, stream=True, timeout=120)
-        except requests.exceptions.RequestException as exc:
-            raise RuntimeError(f"Failed to download mkvmerge from '{download_url}': {exc}") from exc
-        response.raise_for_status()
-
-        with archive_path.open("wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-
-        # Extract the mkvmerge binary from the archive
-        if is_windows:
-            extracted = _extract_from_zip(archive_path, binary_name, Path(tmp))
-        else:
-            extracted = _extract_from_tar(archive_path, binary_name, Path(tmp))
-
-        # Sanity-check: validate the binary header matches the expected format
-        expected_magic = _PE_MAGIC if is_windows else _ELF_MAGIC
-        binary_type = "PE" if is_windows else "ELF"
-        with extracted.open("rb") as fh:
-            magic = fh.read(4)
-        if not magic.startswith(expected_magic):
-            raise RuntimeError(
-                f"Downloaded '{binary_name}' does not appear to be a valid {binary_type} binary (magic={magic!r})."
-            )
-
-        extracted_size = extracted.stat().st_size
-        if extracted_size < _MIN_BINARY_BYTES:
-            raise RuntimeError(
-                f"Extracted '{binary_name}' is only {extracted_size} bytes; "
-                f"download appears truncated (expected >= {_MIN_BINARY_BYTES} bytes)."
-            )
-
-        # Atomically install the binary: write to a uniquely-named temp file in dest_dir,
-        # set permissions, then rename into place so concurrent readers never observe a
-        # partial write and concurrent trimarr processes do not clobber each other.
-        tmp_bin_fd, tmp_bin_str = tempfile.mkstemp(dir=dest_dir, prefix=".mkvmerge.bin.", suffix=".tmp")
-        os.close(tmp_bin_fd)
-        tmp_bin = Path(tmp_bin_str)
-        try:
-            tmp_bin.write_bytes(extracted.read_bytes())
-            if not is_windows:
-                tmp_bin.chmod(tmp_bin.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-            os.replace(tmp_bin, dest_binary)
-        except Exception:
-            with contextlib.suppress(OSError):
-                tmp_bin.unlink(missing_ok=True)
-            raise
-
-    # Atomically write the version file so the binary and version are never mismatched.
-    # Use a unique temp name to prevent concurrent trimarr processes clobbering each other.
-    tmp_ver_fd, tmp_ver_str = tempfile.mkstemp(dir=dest_dir, prefix=".mkvmerge.version.", suffix=".tmp")
-    os.close(tmp_ver_fd)
-    tmp_ver = Path(tmp_ver_str)
-    try:
-        tmp_ver.write_text(release_tag, encoding="utf-8")
-        os.replace(tmp_ver, dest_dir / _VERSION_FILE)
-    except Exception:
-        with contextlib.suppress(OSError):
-            tmp_ver.unlink(missing_ok=True)
-        raise
-
+    _write_version_file_atomically(release_tag, dest_dir)
     return dest_binary

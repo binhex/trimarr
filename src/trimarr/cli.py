@@ -28,6 +28,8 @@ _MKVMERGE_BIN = "mkvmerge.exe" if platform.system() == "Windows" else "mkvmerge"
 _DEFAULT_MKVMERGE_PATH = str(_APP_DATA_DIR / "bin" / _MKVMERGE_BIN)
 _DEFAULT_DB_PATH = str(_APP_DATA_DIR / "db" / "trimarr.db")
 _DEFAULT_LOGS_PATH = str(_APP_DATA_DIR / "logs" / "trimarr.log")
+_LOG_FORMAT = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>"
+_ISO_639_2_CODES_URL = "http://en.wikipedia.org/wiki/List_of_ISO_639-2_codes"
 
 
 def _check_for_mkvmerge_update(current_path: str, logger: Logger) -> str:
@@ -76,25 +78,12 @@ def _resolve_mkvmerge_path(
     no_update_check: bool,
     logger: Logger,
 ) -> str:
-    """Return the mkvmerge binary path to use, downloading or updating as needed.
+    """Resolve the mkvmerge binary path; download or update if the managed binary is used.
 
-    When the user has not supplied a path, the managed binary at
-    ``_DEFAULT_MKVMERGE_PATH`` is used.  If it is absent it is downloaded
-    automatically.  When it is present and ``no_update_check`` is *False*, a
-    lightweight release-tag check is performed and an update is triggered if a
-    newer version is available.
-
-    Args:
-        mkvmerge_path: Explicit user-supplied path, or *None* to use the managed binary.
-        no_update_check: When *True*, skip the automatic update check.
-        logger: Loguru logger for status and error messages.
-
-    Returns:
-        Resolved path string to the mkvmerge binary.
-
-    Raises:
-        click.UsageError: If a user-supplied path does not point to an existing file.
-        click.ClickException: If the managed binary cannot be downloaded.
+    When *mkvmerge_path* is *None*, uses the managed binary at ``_DEFAULT_MKVMERGE_PATH``,
+    downloading it on first run and updating it unless *no_update_check* is *True*.
+    Raises :exc:`click.UsageError` if a user-supplied path does not exist, or
+    :exc:`click.ClickException` if a required download fails.
     """
     user_supplied = mkvmerge_path is not None
     resolved = mkvmerge_path if mkvmerge_path is not None else _DEFAULT_MKVMERGE_PATH
@@ -114,6 +103,40 @@ def _resolve_mkvmerge_path(
         resolved = _check_for_mkvmerge_update(resolved, logger)
 
     return resolved
+
+
+def _parse_and_validate_languages(language: str) -> list[str]:
+    languages = [code.strip().lower() for code in language.split(",") if code.strip()]
+    if not languages:
+        raise click.UsageError("--language requires at least one non-empty language code, e.g. --language eng")
+    for code in languages:
+        if not (len(code) == 3 and code.isascii() and code.isalpha()):
+            raise click.UsageError(
+                f"Language codes must be 3-letter ISO 639-2 values, got '{code}'. See {_ISO_639_2_CODES_URL} for valid codes."
+            )
+    return languages
+
+
+def _parse_schedule_interval(schedule: str | None) -> int | None:
+    """Parse and validate the ``--schedule`` CLI argument.
+
+    Args:
+        schedule: Interval string such as ``"6h"`` or ``"1d"``, or *None* for a one-shot run.
+
+    Returns:
+        Number of seconds between runs, or *None* when no schedule is set.
+
+    Raises:
+        click.BadParameter: If the interval string is not in a valid format.
+    """
+    if schedule is None:
+        return None
+    from trimarr.scheduler import parse_interval
+
+    try:
+        return parse_interval(schedule)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--schedule") from exc
 
 
 class _CommaSeparatedPaths(click.ParamType):
@@ -424,44 +447,17 @@ def cli(
     """
     from trimarr.runner import run
 
-    # Parse comma-separated language codes into a normalised list.
-    languages = [code.strip().lower() for code in language.split(",") if code.strip()]
-    if not languages:
-        raise click.UsageError("--language requires at least one non-empty language code, e.g. --language eng")
-
-    # Validate language codes: accept any 3-letter lowercase alpha code
-    # (ISO 639-2 codes are all 3-letter).  This catches common mistakes
-    # like passing "en" (ISO 639-1) instead of "eng" without rejecting
-    # valid codes absent from our internal mapping.  Codes that pass the
-    # format check but don't match any track will trigger the safety
-    # fallback (keeping all tracks) and log a warning from the processor.
-    for code in languages:
-        if not (len(code) == 3 and code.isascii() and code.isalpha()):
-            raise click.UsageError(
-                f"Language codes must be 3-letter ISO 639-2 values, got '{code}'. "
-                "See http://en.wikipedia.org/wiki/List_of_ISO_639-2_codes for valid codes."
-            )
+    languages = _parse_and_validate_languages(language)
 
     if run_on_start and schedule is None:
         raise click.UsageError("--run-on-start requires --schedule.")
 
-    if schedule is not None:
-        from trimarr.scheduler import parse_interval
-
-        try:
-            interval_seconds = parse_interval(schedule)
-        except ValueError as exc:
-            raise click.BadParameter(str(exc), param_hint="--schedule") from exc
-    else:
-        interval_seconds = None
-
-    # Logger format for consistent output styling
-    log_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>"
-
-    logger = create_logger(log_format=log_format, log_level=log_level, log_path=log_path)
+    interval_seconds = _parse_schedule_interval(schedule)
 
     if edit_metadata_title and delete_metadata_title:
         raise click.UsageError("--edit-metadata-title and --delete-metadata-title are mutually exclusive.")
+
+    logger = create_logger(log_format=_LOG_FORMAT, log_level=log_level, log_path=log_path)
 
     mkvmerge_path = _resolve_mkvmerge_path(mkvmerge_path, no_update_check, logger)
 
