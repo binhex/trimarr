@@ -288,3 +288,45 @@ class TestOverflowError:
         info_calls = [c.args[0] for c in logger.info.call_args_list if c.args]
         fallback_msgs = [m for m in info_calls if "Next run in" in m]
         assert fallback_msgs, "Expected fallback 'Next run in ...' message"
+
+
+# ---------------------------------------------------------------------------
+# Branch coverage: _format_duration seconds branch and parse_interval edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestFormatDurationSeconds:
+    """Additional _format_duration tests to cover the seconds (secs>0) branch."""
+
+    def test_seconds_only(self) -> None:
+        assert _format_duration(1) == "1s"
+
+    def test_seconds_with_minutes(self) -> None:
+        assert _format_duration(61) == "1m 1s"
+
+    def test_all_units(self) -> None:
+        total = 604800 + 86400 + 3600 + 60 + 1  # 1w 1d 1h 1m 1s
+        assert _format_duration(total) == "1w 1d 1h 1m 1s"
+
+    def test_hours_only(self) -> None:
+        assert _format_duration(3600) == "1h"
+
+
+class TestParseIntervalAdditional:
+    """Additional parse_interval tests to improve branch coverage."""
+
+    def test_unit_only_no_n_raises(self) -> None:
+        """A unit character with no leading N (empty n_str) raises ValueError."""
+        with pytest.raises(ValueError):
+            parse_interval("m")
+
+    def test_float_n_raises(self) -> None:
+        with pytest.raises(ValueError, match="not an integer"):
+            parse_interval("1.5h")
+
+    def test_large_minutes_valid(self) -> None:
+        assert parse_interval("1m") == 60
+
+    def test_boundary_max_interval(self) -> None:
+        """365d is exactly at the boundary — must be accepted."""
+        assert parse_interval("365d") == 365 * 86400

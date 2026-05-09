@@ -93,6 +93,14 @@ def _proc_cmd(input_path: Path, output_path: Path) -> list[str]:
     return [MKVMERGE, "-o", str(output_path), str(input_path)]
 
 
+def _fake_run_success_with_probe(args: list[str], **kwargs: object) -> MagicMock:
+    """Simulate mkvmerge: write processed bytes to output, return exit 0. Also handles -J probes."""
+    if args[1] == "-J":
+        return MagicMock(returncode=0, stdout="{}", stderr="")
+    Path(args[2]).write_bytes(b"processed")
+    return MagicMock(returncode=0, stdout="", stderr="")
+
+
 # ---------------------------------------------------------------------------
 # probe_file()
 # ---------------------------------------------------------------------------
@@ -1824,3 +1832,161 @@ class TestMissingOutputFile:
         assert result == "mkvmerge produced no output file"
         assert mkv.read_bytes() == b"A" * 10_000
         logger.error.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# Branch coverage: probe_file non-standard language passthrough
+# ---------------------------------------------------------------------------
+
+
+class TestNonStandardLanguageCode:
+    """Tracks with language tags that are neither 2-char nor 3-char pass through unchanged."""
+
+    def test_single_char_base_bcp47_language_passed_through(self, tmp_path: Path) -> None:
+        """A language tag with a 1-char base (e.g. 'x-private') is returned verbatim."""
+        raw_tracks = [{"id": 0, "type": "audio", "properties": {"language_ietf": "x-private"}}]
+        mkv = tmp_path / "movie.mkv"
+        mkv.touch()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps({"tracks": raw_tracks}), stderr="")
+            result = probe_file(MKVMERGE, mkv)
+        assert result[0].language == "x-private"
+
+    def test_four_char_language_code_passed_through(self, tmp_path: Path) -> None:
+        """A 4-character language code that doesn't map 2-char or 3-char is returned as-is."""
+        raw_tracks = [{"id": 0, "type": "audio", "properties": {"language": "abcd"}}]
+        mkv = tmp_path / "movie.mkv"
+        mkv.touch()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps({"tracks": raw_tracks}), stderr="")
+            result = probe_file(MKVMERGE, mkv)
+        assert result[0].language == "abcd"
+
+
+# ---------------------------------------------------------------------------
+# Branch coverage: _apply_strip_lower_channels with empty audio_keep
+# ---------------------------------------------------------------------------
+
+
+class TestStripLowerChannelsNoAudio:
+    """strip_lower_channels=True with no audio tracks must be a no-op."""
+
+    def test_subtitle_only_file_not_affected_by_strip_lower_channels(self) -> None:
+        """When there are no audio tracks, strip_lower_channels guard exits early."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="subtitles", language="eng"),
+            MkvTrack(id=2, type="subtitles", language="fre"),
+        ]
+        cmd = _build_cmd(tracks, strip_lower_channels=True)
+        assert cmd is not None
+        assert "--subtitle-tracks" in cmd
+        assert "--audio-tracks" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# Branch coverage: _default_flags_for_commentary_tracks else-branch false default
+# ---------------------------------------------------------------------------
+
+
+class TestCommentaryDefaultTrackFalseInElse:
+    """All remaining tracks are commentary, none has default_track=True — warning only, no flags."""
+
+    def test_all_subtitle_commentary_no_default_warns_but_no_flag_emitted(self) -> None:
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng"),
+            MkvTrack(id=2, type="subtitles", language="eng", name="Director Commentary", default_track=False),
+            MkvTrack(id=3, type="subtitles", language="fre"),
+        ]
+        logger = MagicMock()
+        cmd = _build_cmd(tracks, logger=logger)
+        assert cmd is not None
+        assert "--default-track" not in cmd
+        logger.warning.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# Branch coverage: process_file empty stderr on failure
+# ---------------------------------------------------------------------------
+
+
+class TestProcessFileEmptyStderr:
+    """mkvmerge exit >=2 with empty stderr must still return a reason string."""
+
+    def test_exit_code_2_empty_stderr_returns_reason_without_colon(self, tmp_path: Path) -> None:
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"original")
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
+        logger = _proc_logger()
+
+        def fake_run(args: list[str], **kwargs: object) -> MagicMock:
+            Path(args[2]).write_bytes(b"partial")
+            return MagicMock(returncode=2, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=False, logger=logger)
+
+        assert result is not None
+        assert "exit 2" in result
+        assert not result.endswith(": ")  # no trailing colon when stderr empty
+        logger.error.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Branch coverage: build_mkvmerge_command needs_audio_change with empty audio_keep
+# ---------------------------------------------------------------------------
+
+
+class TestBuildMkvmergeCommandAudioDropNoKeep:
+    """When audio_drop is non-empty but audio_keep is empty (fallback fired), no --audio-tracks arg."""
+
+    def test_metadata_only_change_triggers_command_without_audio_or_sub_args(self) -> None:
+        """edit_metadata_title=True with no track changes produces a command with only --title."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng"),
+        ]
+        inp = Path("/media/Movie.mkv")
+        cmd = _build_cmd(tracks, edit_metadata_title=True, input_path=inp)
+        assert cmd is not None
+        assert "--title" in cmd
+        assert "--audio-tracks" not in cmd
+        assert "--subtitle-tracks" not in cmd
+
+    def test_needs_metadata_change_true_via_delete_title(self) -> None:
+        """delete_metadata_title=True also sets needs_metadata_change."""
+        tracks = [MkvTrack(id=0, type="video", language=None)]
+        cmd = _build_cmd(tracks, delete_metadata_title=True)
+        assert cmd is not None
+        assert "--title" in cmd
+        idx = cmd.index("--title") + 1
+        assert cmd[idx] == ""
+
+
+# ---------------------------------------------------------------------------
+# Branch coverage: _compute_channel_drops_per_group all-unknown channels
+# ---------------------------------------------------------------------------
+
+
+class TestComputeChannelDropsAllUnknown:
+    """When all non-commentary tracks have channels=None, no drops are computed."""
+
+    def test_strip_lower_channels_all_unknown_no_drop(self) -> None:
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", channels=None),
+            MkvTrack(id=2, type="audio", language="eng", channels=None),
+        ]
+        cmd = _build_cmd(tracks, strip_lower_channels=True)
+        assert cmd is None
+
+    def test_strip_lower_channels_all_equal_no_drop(self) -> None:
+        """All non-commentary tracks at same channel count → no drop needed."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng", channels=6),
+            MkvTrack(id=2, type="audio", language="eng", channels=6),
+        ]
+        cmd = _build_cmd(tracks, strip_lower_channels=True)
+        assert cmd is None

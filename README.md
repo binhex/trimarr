@@ -10,7 +10,8 @@ automatically deduplicated.
 - **Smart skip** — tracks processed files in SQLite using a fingerprint (size + mtime + partial
   hash); only reprocesses a file if its content has changed.
 - **Commentary track safety** — if the default audio or subtitle track is a commentary track,
-  trimarr automatically demotes it and promotes the first non-commentary track to be the new default.
+  trimarr demotes it and promotes the first non-commentary track to be the new default
+  (whenever tracks of that type are being removed).
 - **Multi-language support** — keep tracks in any combination of languages with a single
   comma-separated value, e.g. `--language eng,fre` retains both English and French.
 - **Language safety fallbacks** — if *no* audio (or subtitle) tracks match the target language(s),

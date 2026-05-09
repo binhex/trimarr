@@ -170,7 +170,7 @@ class TestDryRunDoesNotRecordToDatabase:
 
         def fake_process_file(*_args: object, file_path: object = None, **_kwargs: object) -> str | None:
             assert hasattr(file_path, "write_bytes")
-            file_path.write_bytes(b"B" * 500)  # noqa: PGH003
+            file_path.write_bytes(b"B" * 500)
             return None
 
         with (
@@ -193,7 +193,7 @@ class TestDryRunDoesNotRecordToDatabase:
 
         def fake_process_file(*_args: object, file_path: object = None, **_kwargs: object) -> str | None:
             assert hasattr(file_path, "write_bytes")
-            file_path.write_bytes(b"B" * 2000)  # output larger than input  # noqa: PGH003
+            file_path.write_bytes(b"B" * 2000)  # output larger than input
             return None
 
         with (
@@ -285,6 +285,27 @@ class TestKeyboardInterruptHandling:
 
 class TestMediaPathValidation:
     """Verify that invalid media_path values produce clear error messages."""
+
+    def test_string_media_path_normalised_to_list(self, tmp_path: Path) -> None:
+        """A plain string passed as media_path is coerced to a one-element list."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        logger = _make_logger()
+        db_path = str(tmp_path / "trimarr.db")
+        with (
+            patch("trimarr.runner.probe_file", return_value=[]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=None),
+        ):
+            run(
+                **{
+                    **_run_kwargs(tmp_path, dry_run=True, db_path=db_path),
+                    "media_path": str(tmp_path),
+                    "logger": logger,
+                }
+            )
+        # No exception means the string path was converted and processed normally.
+        info_msgs = _logged_messages(logger.info)
+        assert any(".mkv" in msg or "Found" in msg for msg in info_msgs)
 
     def test_nonexistent_path_logs_error_and_returns(self, tmp_path: Path) -> None:
         """A path that does not exist at all should log an error without crashing."""
@@ -737,6 +758,41 @@ class TestCorruptOutputError:
         assert exc_info.value.code == 2
         assert logger.critical.called
 
+    def test_corrupt_output_disk_usage_oserror_shows_unavailable(self, tmp_path: Path) -> None:
+        """When shutil.disk_usage raises OSError, the diagnostic message shows 'unavailable'."""
+        from trimarr.processor import CorruptOutputError
+
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        db_path = str(tmp_path / "trimarr.db")
+        fake_cmd = ["/usr/bin/mkvmerge", "-o", str(mkv), str(mkv)]
+        logger = _make_logger()
+
+        corrupt_tmp = tmp_path / "movie.mkv.trimarr_tmp"
+        corrupt_tmp.write_bytes(b"corrupt output")
+        err = CorruptOutputError(
+            file_path=mkv,
+            tmp_path=corrupt_tmp,
+            probe_returncode=1,
+            probe_output="Invalid MKV structure",
+            output_size=corrupt_tmp.stat().st_size,
+            input_size=mkv.stat().st_size,
+            mkvmerge_path="/usr/bin/mkvmerge",
+        )
+
+        with (
+            patch("trimarr.runner.probe_file", return_value=[]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=fake_cmd),
+            patch("trimarr.runner.process_file", side_effect=err),
+            patch("trimarr.runner.shutil.disk_usage", side_effect=OSError("permission denied")),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
+
+        assert exc_info.value.code == 2
+        critical_msg = logger.opt.return_value.critical.call_args.args[0]
+        assert "unavailable" in critical_msg
+
 
 # ---------------------------------------------------------------------------
 # _fmt_bytes helper
@@ -760,3 +816,101 @@ class TestFmtBytes:
 
     def test_terabytes(self) -> None:
         assert "TB" in _fmt_bytes(1024**4)
+
+
+# ---------------------------------------------------------------------------
+# Branch coverage: run() isinstance branch and discover_mkv_files
+# ---------------------------------------------------------------------------
+
+
+class TestRunIsinstanceBranch:
+    """run() normalises a single string media_path to a list."""
+
+    def test_string_media_path_accepted(self, tmp_path: Path) -> None:
+        """Passing media_path as a plain string (not a list) must be accepted."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        logger = _make_logger()
+        db_path = str(tmp_path / "db.sqlite")
+        with patch("trimarr.runner.probe_file", side_effect=RuntimeError("probe failed")):
+            run(
+                **{
+                    **_run_kwargs(tmp_path, dry_run=True, db_path=db_path),
+                    "media_path": str(tmp_path),  # single string, not list
+                    "logger": logger,
+                }
+            )
+        # probe failure must be reported
+        assert logger.warning.called or logger.error.called
+
+
+class TestDiscoverMkvFilesDeduplication:
+    """Duplicate files across overlapping roots are deduplicated."""
+
+    def test_same_file_in_two_roots_counted_once(self, tmp_path: Path) -> None:
+        """When two media_paths point to overlapping directories, files appear only once."""
+        media = tmp_path / "media"
+        media.mkdir()
+        mkv = media / "movie.mkv"
+        mkv.write_bytes(b"fake")
+        logger = _make_logger()
+        db_path = str(tmp_path / "db.sqlite")
+        # Both paths resolve to the same directory — file should only be processed once
+        with patch("trimarr.runner.probe_file", side_effect=RuntimeError("stop")):
+            run(
+                **{
+                    **_run_kwargs(tmp_path, dry_run=False, db_path=db_path),
+                    "media_path": [str(media), str(media)],  # same dir twice
+                    "logger": logger,
+                }
+            )
+        # Exactly one probe attempt → at most one "Could not probe" warning (not two)
+        all_msgs = _logged_messages(logger.warning) + _logged_messages(logger.error)
+        # Per-attempt failure message starts with "Could not probe" — must appear at most once
+        probe_attempt_msgs = [m for m in all_msgs if m.startswith("Could not probe")]
+        assert len(probe_attempt_msgs) == 1
+
+
+class TestDiscoverMkvFilesNonMkvMixed:
+    """Directories with non-.mkv files only yield the .mkv files."""
+
+    def test_non_mkv_files_ignored(self, tmp_path: Path) -> None:
+        """Text files and other formats in the media dir are silently ignored."""
+        media = tmp_path / "media"
+        media.mkdir()
+        (media / "movie.mkv").write_bytes(b"fake")
+        (media / "subtitle.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nHello")
+        (media / "readme.txt").write_text("hello")
+        logger = _make_logger()
+        db_path = str(tmp_path / "db.sqlite")
+        with patch("trimarr.runner.probe_file", side_effect=RuntimeError("stop")):
+            run(
+                **{
+                    **_run_kwargs(tmp_path, dry_run=False, db_path=db_path),
+                    "media_path": [str(media)],
+                    "logger": logger,
+                }
+            )
+        # Only .mkv files are processed; probe failure from the single .mkv is expected
+        assert logger.warning.called or logger.error.called
+
+
+class TestRunStripCommentaryWithNoMatchingAudio:
+    """Verify run() completes when strip_commentary=True and probe fails."""
+
+    def test_run_with_strip_commentary_and_probe_failure(self, tmp_path: Path) -> None:
+        """When probe fails and strip_commentary=True, run exits cleanly."""
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake")
+        logger = _make_logger()
+        db_path = str(tmp_path / "db.sqlite")
+        with patch("trimarr.runner.probe_file", side_effect=RuntimeError("probe stop")):
+            run(
+                **{
+                    **_run_kwargs(tmp_path, dry_run=True, db_path=db_path),
+                    "strip_commentary": True,
+                    "logger": logger,
+                }
+            )
+        # probe failure must be reported
+        assert logger.warning.called or logger.error.called

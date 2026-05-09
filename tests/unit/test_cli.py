@@ -67,6 +67,22 @@ class TestLanguageOption:
         result = runner.invoke(cli, ["--media-path", str(tmp_path)])
         assert result.exit_code != 0
 
+    def test_two_letter_code_exits_with_error(self, tmp_path: Path) -> None:
+        """ISO 639-1 two-letter codes like 'en' are rejected; users must use 3-letter 639-2 codes."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--language", "en", "--media-path", str(tmp_path)])
+        assert result.exit_code != 0
+        assert "3-letter" in result.output.lower() or "language" in result.output.lower()
+
+    def test_terminologic_code_accepted(self, tmp_path: Path) -> None:
+        """ISO 639-2 terminologic codes (e.g. 'fra', 'deu') must be accepted."""
+        runner = CliRunner()
+        with patch("trimarr.runner.run") as mock_run:
+            result = runner.invoke(cli, ["--language", "fra", "--media-path", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_run.call_args
+        assert kwargs["language"] == ["fra"]
+
 
 # ---------------------------------------------------------------------------
 # Mutually exclusive metadata flags
@@ -388,6 +404,84 @@ class TestMkvmergeUpdateCheck:
         assert result.exit_code == 0, result.output
         mock_logger.warning.assert_called_once()
         mock_run.assert_called_once()
+        _, kwargs = mock_run.call_args
+        assert kwargs["mkvmerge_path"] == str(fake_mkvmerge)
+
+    def test_update_check_failure_on_latest_tag_call_continues(self, tmp_path: Path) -> None:
+        """A failure from get_latest_mkvmerge_tag also triggers the 'check failed' fallback."""
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+        mock_logger = MagicMock()
+        with (
+            patch("trimarr.cli._DEFAULT_MKVMERGE_PATH", str(fake_mkvmerge)),
+            patch("trimarr.cli.create_logger", return_value=mock_logger),
+            patch("trimarr.downloader.get_installed_mkvmerge_tag", return_value="v80.0.0"),
+            patch("trimarr.downloader.get_latest_mkvmerge_tag", side_effect=OSError("DNS failure")),
+            patch("trimarr.runner.run") as mock_run,
+        ):
+            result = CliRunner().invoke(cli, _base_args(str(tmp_path)))
+        assert result.exit_code == 0, result.output
+        mock_logger.warning.assert_called_once()
+        mock_run.assert_called_once()
+        _, kwargs = mock_run.call_args
+        assert kwargs["mkvmerge_path"] == str(fake_mkvmerge)
+
+    def test_no_update_check_flag_skips_update_check(self, tmp_path: Path) -> None:
+        """--no-update-check must prevent _check_for_mkvmerge_update from running at all."""
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+        with (
+            patch("trimarr.cli._DEFAULT_MKVMERGE_PATH", str(fake_mkvmerge)),
+            patch("trimarr.downloader.get_installed_mkvmerge_tag") as mock_tag,
+            patch("trimarr.downloader.get_latest_mkvmerge_tag") as mock_latest,
+            patch("trimarr.runner.run") as mock_run,
+        ):
+            result = CliRunner().invoke(cli, _base_args(str(tmp_path)) + ["--no-update-check"])
+        assert result.exit_code == 0, result.output
+        mock_tag.assert_not_called()
+        mock_latest.assert_not_called()
+        mock_run.assert_called_once()
+        _, kwargs = mock_run.call_args
+        assert kwargs["mkvmerge_path"] == str(fake_mkvmerge)
+
+    def test_no_update_when_already_up_to_date(self, tmp_path: Path) -> None:
+        """When installed tag equals the latest tag, no download occurs."""
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+        with (
+            patch("trimarr.cli._DEFAULT_MKVMERGE_PATH", str(fake_mkvmerge)),
+            patch("trimarr.downloader.get_installed_mkvmerge_tag", return_value="v82.0.0"),
+            patch("trimarr.downloader.get_latest_mkvmerge_tag", return_value="v82.0.0"),
+            patch("trimarr.downloader.download_mkvmerge") as mock_dl,
+            patch("trimarr.runner.run") as mock_run,
+        ):
+            result = CliRunner().invoke(cli, _base_args(str(tmp_path)))
+        assert result.exit_code == 0, result.output
+        mock_dl.assert_not_called()
+        mock_run.assert_called_once()
+
+    def test_download_failure_continues_with_installed_version(self, tmp_path: Path) -> None:
+        """If the download itself fails (not the check), a warning is logged and run proceeds."""
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+        mock_logger = MagicMock()
+        with (
+            patch("trimarr.cli._DEFAULT_MKVMERGE_PATH", str(fake_mkvmerge)),
+            patch("trimarr.cli.create_logger", return_value=mock_logger),
+            patch("trimarr.downloader.get_installed_mkvmerge_tag", return_value="v80.0.0"),
+            patch("trimarr.downloader.get_latest_mkvmerge_tag", return_value="v82.0.0"),
+            patch("trimarr.downloader.download_mkvmerge", side_effect=RuntimeError("network timeout")),
+            patch("trimarr.runner.run") as mock_run,
+        ):
+            result = CliRunner().invoke(cli, _base_args(str(tmp_path)))
+        assert result.exit_code == 0, result.output
+        warning_calls = [c.args[0] for c in mock_logger.warning.call_args_list if c.args]
+        assert any("download failed" in m.lower() for m in warning_calls), (
+            "Expected a warning about download failure, not update check failure"
+        )
+        mock_run.assert_called_once()
+        _, kwargs = mock_run.call_args
+        assert kwargs["mkvmerge_path"] == str(fake_mkvmerge)
 
 
 # ---------------------------------------------------------------------------
@@ -461,3 +555,99 @@ class TestMediaPathOption:
         assert result.exit_code == 0, result.output
         _, kwargs = mock_run.call_args
         assert kwargs["media_path"] == [str(tmp_path)]
+
+    def test_all_blank_segments_rejected(self) -> None:
+        """When every comma-separated entry is blank, fail with a usage error."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--language", "eng", "--media-path", "  ,  ,  "])
+        assert result.exit_code != 0
+
+    def test_already_list_passthrough(self) -> None:
+        """When convert() receives an already-converted list, it returns it unchanged."""
+        from trimarr.cli import _CommaSeparatedPaths
+
+        param_type = _CommaSeparatedPaths()
+        paths = ["/tmp/dir1", "/tmp/dir2"]
+        result = param_type.convert(paths, None, None)
+        assert result is paths
+
+
+# ---------------------------------------------------------------------------
+# Branch coverage: _parse_and_validate_languages missing branches
+# ---------------------------------------------------------------------------
+
+
+class TestParseAndValidateLanguagesBranches:
+    """Branch-coverage tests for _parse_and_validate_languages."""
+
+    def test_trailing_comma_filtered_out(self, tmp_path: Path) -> None:
+        """A trailing comma produces an empty entry that is filtered by the comprehension."""
+        runner = CliRunner()
+        with patch("trimarr.runner.run") as mock_run:
+            result = runner.invoke(cli, ["--language", "eng,", "--media-path", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_run.call_args
+        assert kwargs["language"] == ["eng"]
+
+    def test_all_whitespace_language_raises(self, tmp_path: Path) -> None:
+        """A language value containing only commas/spaces produces an empty list -> UsageError."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--language", " , ", "--media-path", str(tmp_path)])
+        assert result.exit_code != 0
+        assert "language" in result.output.lower()
+
+    def test_non_ascii_three_char_code_rejected(self, tmp_path: Path) -> None:
+        """A 3-char code with non-ASCII characters is rejected."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--language", "\u00e9ng", "--media-path", str(tmp_path)])
+        assert result.exit_code != 0
+
+    def test_numeric_three_char_code_rejected(self, tmp_path: Path) -> None:
+        """A 3-char code containing digits is rejected."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--language", "en1", "--media-path", str(tmp_path)])
+        assert result.exit_code != 0
+        assert "3-letter" in result.output or "language" in result.output.lower()
+
+    def test_multiple_valid_codes_all_forwarded(self, tmp_path: Path) -> None:
+        """Multiple valid codes all pass the for-loop validation."""
+        runner = CliRunner()
+        with patch("trimarr.runner.run") as mock_run:
+            result = runner.invoke(cli, ["--language", "eng,fre,ger", "--media-path", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_run.call_args
+        assert kwargs["language"] == ["eng", "fre", "ger"]
+
+
+# ---------------------------------------------------------------------------
+# Branch coverage: _resolve_mkvmerge_path missing branches
+# ---------------------------------------------------------------------------
+
+
+class TestResolveMkvmergePathBranches:
+    """Branch-coverage tests for _resolve_mkvmerge_path."""
+
+    def test_download_failure_raises_click_exception(self, tmp_path: Path) -> None:
+        """When the managed binary is absent and download fails, CLI exits non-zero."""
+        runner = CliRunner()
+        with (
+            patch("trimarr.cli._DEFAULT_MKVMERGE_PATH", "/nonexistent/mkvmerge"),
+            patch("trimarr.downloader.download_mkvmerge", side_effect=RuntimeError("network error")),
+        ):
+            result = runner.invoke(cli, _base_args(str(tmp_path)))
+        assert result.exit_code != 0
+        assert "mkvmerge" in result.output.lower() or "network" in result.output.lower()
+
+    def test_no_update_check_flag_skips_update(self, tmp_path: Path) -> None:
+        """--no-update-check with an existing managed binary skips the update check."""
+        fake_mkvmerge = tmp_path / "mkvmerge_managed"
+        fake_mkvmerge.touch()
+        runner = CliRunner()
+        with (
+            patch("trimarr.cli._DEFAULT_MKVMERGE_PATH", str(fake_mkvmerge)),
+            patch("trimarr.cli._check_for_mkvmerge_update") as mock_update,
+            patch("trimarr.runner.run"),
+        ):
+            result = runner.invoke(cli, _base_args(str(tmp_path)) + ["--no-update-check"])
+        assert result.exit_code == 0, result.output
+        mock_update.assert_not_called()
