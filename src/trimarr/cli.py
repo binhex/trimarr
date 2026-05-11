@@ -29,7 +29,7 @@ _DEFAULT_MKVMERGE_PATH = str(_APP_DATA_DIR / "bin" / _MKVMERGE_BIN)
 _DEFAULT_DB_PATH = str(_APP_DATA_DIR / "db" / "trimarr.db")
 _DEFAULT_LOGS_PATH = str(_APP_DATA_DIR / "logs" / "trimarr.log")
 _LOG_FORMAT = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>"
-_ISO_639_2_CODES_URL = "http://en.wikipedia.org/wiki/List_of_ISO_639-2_codes"
+_ISO_639_2_CODES_URL = "https://en.wikipedia.org/wiki/List_of_ISO_639-2_codes"
 
 
 def _check_for_mkvmerge_update(current_path: str, logger: Logger) -> str:
