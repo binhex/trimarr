@@ -139,8 +139,8 @@ def _parse_schedule_interval(schedule: str | None) -> int | None:
         raise click.BadParameter(str(exc), param_hint="--schedule") from exc
 
 
-class _CommaSeparatedPaths(click.ParamType):
-    """Accept one or more comma-separated directory paths.
+class _PipeSeparatedPaths(click.ParamType):
+    """Accept one or more pipe-separated directory paths.
 
     Each entry is trimmed of whitespace and validated as a directory using
     ``click.Path(file_okay=False, dir_okay=True, resolve_path=True)``.
@@ -154,12 +154,12 @@ class _CommaSeparatedPaths(click.ParamType):
         param: click.Parameter | None,
         ctx: click.Context | None,
     ) -> list[str]:
-        """Split *value* on commas and resolve each entry as a directory path."""
+        """Split *value* on pipes and resolve each entry as a directory path."""
         if isinstance(value, list):
             return value
         path_type = click.Path(file_okay=False, dir_okay=True, resolve_path=True)
         results: list[str] = []
-        for entry in value.split(","):
+        for entry in value.split("|"):
             entry = entry.strip()
             if not entry:
                 continue
@@ -228,7 +228,7 @@ Examples:
   Process multiple media directories in a single run:
     {prog} \\
       --language eng \\
-      --media-path /mnt/media/movies,/mnt/media/tv
+      --media-path /mnt/media/movies|/mnt/media/tv
 
 \b
   Run every 6 hours, processing immediately on startup:
@@ -291,10 +291,10 @@ Examples:
 )
 @click.option(
     "--media-path",
-    type=_CommaSeparatedPaths(),
+    type=_PipeSeparatedPaths(),
     required=True,
-    metavar="<path[,path...]>",
-    help="Path(s) to directory/directories containing media files. Accepts a single path or a comma-separated list of paths. Note: directory paths that contain literal commas are not supported.",
+    metavar="<path[|path...]>",
+    help="Path(s) to directory/directories containing media files. Accepts a single path or a pipe-separated list of paths (use | as delimiter, which is not valid in directory names).",
 )
 @click.option(
     "--mkvmerge-path",

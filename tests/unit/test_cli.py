@@ -485,7 +485,7 @@ class TestMkvmergeUpdateCheck:
 
 
 # ---------------------------------------------------------------------------
-# --media-path option: comma-separated multi-path support
+# --media-path option: pipe-separated multi-path support
 # ---------------------------------------------------------------------------
 
 
@@ -501,8 +501,8 @@ class TestMediaPathOption:
         _, kwargs = mock_run.call_args
         assert kwargs["media_path"] == [str(tmp_path)]
 
-    def test_comma_separated_paths_forwarded_as_list(self, tmp_path: Path) -> None:
-        """Comma-separated paths are split and forwarded as a list."""
+    def test_pipe_separated_paths_forwarded_as_list(self, tmp_path: Path) -> None:
+        """Pipe-separated paths are split and forwarded as a list."""
         dir_a = tmp_path / "a"
         dir_b = tmp_path / "b"
         dir_a.mkdir()
@@ -511,14 +511,14 @@ class TestMediaPathOption:
         with patch("trimarr.runner.run") as mock_run:
             result = runner.invoke(
                 cli,
-                ["--language", "eng", "--media-path", f"{dir_a},{dir_b}"],
+                ["--language", "eng", "--media-path", f"{dir_a}|{dir_b}"],
             )
         assert result.exit_code == 0, result.output
         _, kwargs = mock_run.call_args
         assert kwargs["media_path"] == [str(dir_a), str(dir_b)]
 
-    def test_whitespace_trimmed_around_commas(self, tmp_path: Path) -> None:
-        """Whitespace around comma-separated entries is stripped."""
+    def test_whitespace_trimmed_around_pipes(self, tmp_path: Path) -> None:
+        """Whitespace around pipe-separated entries is stripped."""
         dir_a = tmp_path / "a"
         dir_b = tmp_path / "b"
         dir_a.mkdir()
@@ -527,7 +527,7 @@ class TestMediaPathOption:
         with patch("trimarr.runner.run") as mock_run:
             result = runner.invoke(
                 cli,
-                ["--language", "eng", "--media-path", f"  {dir_a}  ,  {dir_b}  "],
+                ["--language", "eng", "--media-path", f"  {dir_a}  |  {dir_b}  "],
             )
         assert result.exit_code == 0, result.output
         _, kwargs = mock_run.call_args
@@ -550,23 +550,23 @@ class TestMediaPathOption:
         with patch("trimarr.runner.run") as mock_run:
             result = runner.invoke(
                 cli,
-                ["--language", "eng", "--media-path", f"{tmp_path}, ,"],
+                ["--language", "eng", "--media-path", f"{tmp_path}| |"],
             )
         assert result.exit_code == 0, result.output
         _, kwargs = mock_run.call_args
         assert kwargs["media_path"] == [str(tmp_path)]
 
     def test_all_blank_segments_rejected(self) -> None:
-        """When every comma-separated entry is blank, fail with a usage error."""
+        """When every pipe-separated entry is blank, fail with a usage error."""
         runner = CliRunner()
-        result = runner.invoke(cli, ["--language", "eng", "--media-path", "  ,  ,  "])
+        result = runner.invoke(cli, ["--language", "eng", "--media-path", "  |  |  "])
         assert result.exit_code != 0
 
     def test_already_list_passthrough(self) -> None:
         """When convert() receives an already-converted list, it returns it unchanged."""
-        from trimarr.cli import _CommaSeparatedPaths
+        from trimarr.cli import _PipeSeparatedPaths
 
-        param_type = _CommaSeparatedPaths()
+        param_type = _PipeSeparatedPaths()
         paths = ["/tmp/dir1", "/tmp/dir2"]
         result = param_type.convert(paths, None, None)
         assert result is paths

@@ -4,7 +4,7 @@ Removes (trims) unwanted audio and subtitles from matroska container format vide
 
 ## Features
 
-- **Recursive scan** — finds all `.mkv` files under one or more specified directory trees. Pass a comma-separated list
+- **Recursive scan** — finds all `.mkv` files under one or more specified directory trees. Pass a pipe-separated list
 to `--media-path` to process multiple roots in a single run; duplicate files (from overlapping paths or symlinks) are
 automatically deduplicated.
 - **Smart skip** — tracks processed files in SQLite using a fingerprint (size + mtime + partial
@@ -74,7 +74,7 @@ trimarr --help
 | Option | Description | Default | Example | Type |
 | ------ | ----------- | ------- | ------- | ---- |
 | `--language` ✱ | One or more ISO 639-2 language codes (comma-separated) for the audio/subtitle tracks to keep. See [ISO 639-2 codes](http://en.wikipedia.org/wiki/List_of_ISO_639-2_codes). | — | `eng` or `eng,fre` | `string` |
-| `--media-path` ✱ | Path(s) to the directory/directories containing media files to process (scanned recursively). Accepts a single path or a comma-separated list of paths. Directories with literal commas in their name are not supported. | — | `/mnt/media/movies` or `/mnt/media/movies,/mnt/media/tv` | `path` |
+| `--media-path` ✱ | Path(s) to the directory/directories containing media files to process (scanned recursively). Accepts a single path or a pipe-separated list of paths (`|` delimiter, safe even when directory names contain commas). | — | `/mnt/media/movies` or `/mnt/media/movies\|/mnt/media/tv` | `path` |
 | `--mkvmerge-path` | Path to the mkvmerge executable. When omitted, trimarr manages its own binary and auto-updates it. | Linux: `~/.local/share/trimarr/bin/mkvmerge`<br>Windows: `%LOCALAPPDATA%\trimarr\bin\mkvmerge.exe` | `/usr/bin/mkvmerge` | `path` |
 | `--database-path` | Path to the SQLite database file used for tracking processed files. | Linux: `~/.local/share/trimarr/db/trimarr.db`<br>Windows: `%LOCALAPPDATA%\trimarr\db\trimarr.db` | `/var/lib/trimarr/trimarr.db` | `path` |
 | `--log-path` | Path to the log file for tracking application events. | Linux: `~/.local/share/trimarr/logs/trimarr.log`<br>Windows: `%LOCALAPPDATA%\trimarr\logs\trimarr.log` | `/var/log/trimarr.log` | `path` |
