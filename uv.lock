@@ -371,16 +371,12 @@ wheels = [
 [[package]]
 name = "pytest-crap"
 version = "0.3.0"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/binhex/pytest-crap.git?rev=v0.3.1#f15e2318db65474baf04dd9c3bd83ee0343c1a91" }
 dependencies = [
     { name = "coverage" },
     { name = "pytest" },
     { name = "radon" },
     { name = "rich" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/23/a7/fde44fbcbf621b1be3c58081a4ce52abd06f9fef4608f21284fe9ef4a3ab/pytest_crap-0.3.0.tar.gz", hash = "sha256:8267dbf4e83f8ad1430aac86aa1592f99d658dc1a9882dcfc2ee5775dbb5d0cc", size = 20790, upload-time = "2025-12-02T20:15:18.509Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/69/ea/f05a7cb2a0109453916ffea829e1ed390779edeff01ed96a8eac0a3af257/pytest_crap-0.3.0-py3-none-any.whl", hash = "sha256:baf7c3e60f8b8f0edbb50190a32f7e43ae4270e6fa48eb15ffd0a3c72ea45445", size = 9608, upload-time = "2025-12-02T20:15:17.095Z" },
 ]
 
 [[package]]
@@ -539,7 +535,7 @@ dev = [
     { name = "pre-commit" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
-    { name = "pytest-crap" },
+    { name = "pytest-crap", git = "https://github.com/binhex/pytest-crap.git?rev=v0.3.1" },
     { name = "pytest-mock", specifier = ">=3.15.1" },
     { name = "types-pyyaml", specifier = ">=6.0.0" },
     { name = "types-requests", specifier = ">=2.31.0" },
