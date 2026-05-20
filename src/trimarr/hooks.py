@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -34,7 +35,7 @@ def _run_hook(
     if not cmd_template.strip():
         return
 
-    cmd = cmd_template.replace("{leaf}", f"'{leaf}'").replace("{dir}", f"'{dir_path}'")
+    cmd = cmd_template.replace("{leaf}", shlex.quote(leaf)).replace("{dir}", shlex.quote(dir_path))
 
     kwargs: dict = {
         "shell": True,

@@ -24,7 +24,7 @@ class TestRunHook:
             )
 
         mock_run.assert_called_once_with(
-            "echo 'file.mkv' '/some/dir'",
+            "echo file.mkv /some/dir",
             shell=True,
             timeout=300,
             capture_output=True,
