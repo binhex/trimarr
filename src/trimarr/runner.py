@@ -399,6 +399,31 @@ def _process_one_file_guarded(
         counts.failed += 1
 
 
+def _dir_has_work(
+    files_in_dir: list[tuple[Path, Path]],
+    db: Database,
+    profile_hash: str,
+    logger: Logger,
+) -> bool:
+    """Check if any file in *files_in_dir* needs processing (not already processed).
+
+    Returns True at the first file that is not yet processed, or if a
+    filesystem or database error occurs (the error is logged and work is
+    assumed so that pre hooks fire).
+    """
+    for fp, _ in files_in_dir:
+        try:
+            if not db.is_processed(fp, profile_hash=profile_hash):
+                return True
+        except OSError as exc:
+            logger.error(f"File system error processing '{fp}': {exc}")
+            return True
+        except sqlite3.Error as exc:
+            logger.error(f"Database error processing '{fp}': {exc}")
+            return True
+    return False
+
+
 def run(
     language: list[str],
     edit_metadata_title: bool,
@@ -478,21 +503,7 @@ def run(
             global_idx = 0
 
             for dir_path, files_in_dir in dir_groups.items():
-                # Determine if this directory has any work to do
-                dir_has_work = False
-                for fp, _ in files_in_dir:
-                    try:
-                        needs_work = not db.is_processed(fp, profile_hash=profile_hash)
-                    except OSError as exc:
-                        logger.error(f"File system error processing '{fp}': {exc}")
-                        needs_work = True
-                    except sqlite3.Error as exc:
-                        logger.error(f"Database error processing '{fp}': {exc}")
-                        needs_work = True
-                    if needs_work:
-                        dir_has_work = True
-                        break
-
+                dir_has_work = _dir_has_work(files_in_dir, db, profile_hash, logger)
                 if dir_has_work:
                     leaf = dir_path.name
 
