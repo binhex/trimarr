@@ -29,7 +29,7 @@ _DEFAULT_MKVMERGE_PATH = str(_APP_DATA_DIR / "bin" / _MKVMERGE_BIN)
 _DEFAULT_DB_PATH = str(_APP_DATA_DIR / "db" / "trimarr.db")
 _DEFAULT_LOGS_PATH = str(_APP_DATA_DIR / "logs" / "trimarr.log")
 _LOG_FORMAT = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>"
-_ISO_639_2_CODES_URL = "http://en.wikipedia.org/wiki/List_of_ISO_639-2_codes"
+_ISO_639_2_CODES_URL = "https://en.wikipedia.org/wiki/List_of_ISO_639-2_codes"
 
 
 def _check_for_mkvmerge_update(current_path: str, logger: Logger) -> str:
@@ -117,30 +117,27 @@ def _parse_and_validate_languages(language: str) -> list[str]:
     return languages
 
 
-def _parse_schedule_interval(schedule: str | None) -> int | None:
-    """Parse and validate the ``--schedule`` CLI argument.
+def _validate_cron_schedule(schedule: str | None) -> None:
+    """Validate the ``--schedule`` cron expression argument.
 
     Args:
-        schedule: Interval string such as ``"6h"`` or ``"1d"``, or *None* for a one-shot run.
-
-    Returns:
-        Number of seconds between runs, or *None* when no schedule is set.
+        schedule: A cron expression string, or *None* for one-shot mode.
 
     Raises:
-        click.BadParameter: If the interval string is not in a valid format.
+        click.BadParameter: If the expression is not a valid cron pattern.
     """
     if schedule is None:
-        return None
-    from trimarr.scheduler import parse_interval
+        return
+    from trimarr.scheduler import validate_cron_expr
 
     try:
-        return parse_interval(schedule)
+        validate_cron_expr(schedule)
     except ValueError as exc:
         raise click.BadParameter(str(exc), param_hint="--schedule") from exc
 
 
-class _CommaSeparatedPaths(click.ParamType):
-    """Accept one or more comma-separated directory paths.
+class _PipeSeparatedPaths(click.ParamType):
+    """Accept one or more pipe-separated directory paths.
 
     Each entry is trimmed of whitespace and validated as a directory using
     ``click.Path(file_okay=False, dir_okay=True, resolve_path=True)``.
@@ -154,12 +151,12 @@ class _CommaSeparatedPaths(click.ParamType):
         param: click.Parameter | None,
         ctx: click.Context | None,
     ) -> list[str]:
-        """Split *value* on commas and resolve each entry as a directory path."""
+        """Split *value* on pipes and resolve each entry as a directory path."""
         if isinstance(value, list):
             return value
         path_type = click.Path(file_okay=False, dir_okay=True, resolve_path=True)
         results: list[str] = []
-        for entry in value.split(","):
+        for entry in value.split("|"):
             entry = entry.strip()
             if not entry:
                 continue
@@ -181,46 +178,46 @@ Examples:
       --strip-commentary \\
       --strip-lower-channels \\
       --no-backup \\
-      --media-path /mnt/media/movies
+      --media-path /mnt/user/Movies
 
 \b
   Keep only English audio and subtitles:
     {prog} \\
       --language eng \\
-      --media-path /mnt/media/movies
+      --media-path /mnt/user/Movies
 
 \b
   Keep English and French audio and subtitles:
     {prog} \\
       --language eng,fre \\
-      --media-path /mnt/media/movies
+      --media-path /mnt/user/Movies
 
 \b
   Keep only English audio, but retain all subtitle tracks:
     {prog} \\
       --language eng \\
       --keep-subtitles \\
-      --media-path /mnt/media/movies
+      --media-path /mnt/user/Movies
 
 \b
   Dry run to preview changes without modifying files:
     {prog} \\
       --language eng \\
       --dry-run \\
-      --media-path /mnt/media/movies
+      --media-path /mnt/user/Movies
 
 \b
   Keep only French audio and update each file's title metadata to match its filename:
     {prog} \\
       --language fre \\
       --edit-metadata-title \\
-      --media-path /mnt/media/movies
+      --media-path /mnt/user/Movies
 
 \b
   Use a custom mkvmerge binary and database location:
     {prog} \\
       --language eng \\
-      --media-path /mnt/media/movies \\
+      --media-path /mnt/user/Movies \\
       --mkvmerge-path /usr/bin/mkvmerge \\
       --database-path /var/lib/trimarr/trimarr.db
 
@@ -228,22 +225,22 @@ Examples:
   Process multiple media directories in a single run:
     {prog} \\
       --language eng \\
-      --media-path /mnt/media/movies,/mnt/media/tv
+      --media-path /mnt/user/Movies|/mnt/media/tv
 
 \b
-  Run every 6 hours, processing immediately on startup:
+  Run every 30 minutes, processing immediately on startup:
     {prog} \\
       --language eng \\
-      --media-path /mnt/media/movies \\
-      --schedule 6h \\
+      --media-path /mnt/user/Movies \\
+      --schedule "*/30 * * * *" \\
       --run-on-start
 
 \b
-  Run daily (first run after 24 hours):
+  Run daily at 2 AM:
     {prog} \\
       --language eng \\
-      --media-path /mnt/media/movies \\
-      --schedule 1d
+      --media-path /mnt/user/Movies \\
+      --schedule "0 2 * * *"
 \b
 """
 
@@ -291,10 +288,10 @@ Examples:
 )
 @click.option(
     "--media-path",
-    type=_CommaSeparatedPaths(),
+    type=_PipeSeparatedPaths(),
     required=True,
-    metavar="<path[,path...]>",
-    help="Path(s) to directory/directories containing media files. Accepts a single path or a comma-separated list of paths. Note: directory paths that contain literal commas are not supported.",
+    metavar="<path[|path...]>",
+    help="Path(s) to directory/directories containing media files. Accepts a single path or a pipe-separated list of paths (use | as delimiter, which is not valid in directory names).",
 )
 @click.option(
     "--mkvmerge-path",
@@ -391,11 +388,13 @@ Examples:
     type=click.STRING,
     required=False,
     default=None,
-    metavar="<interval>",
+    metavar="<cron>",
     help=(
-        "Run trimarr repeatedly at the given interval rather than once."
-        " Format: <N><unit> where unit is m (minutes), h (hours), d (days), or w (weeks)."
-        " Examples: 30m, 6h, 1d, 2w."
+        "Run trimarr repeatedly on a cron schedule rather than once."
+        " Standard 5-field POSIX cron expression: minute hour day month weekday."
+        " Also accepts @hourly, @daily, @weekly, @monthly, @yearly."
+        " Examples: '0 2 * * *' (daily at 2am), '*/30 * * * *' (every 30 min),"
+        " '@daily' (once per day)."
         " Omit to run once and exit (default behaviour)."
     ),
 )
@@ -414,7 +413,8 @@ Examples:
     is_flag=True,
     default=False,
     help=(
-        "When --schedule is set, fire one run immediately on startup before the first timed interval."
+        "When --schedule is set, fire one run immediately on startup"
+        " before the first scheduled cron fire."
         " Cannot be used without --schedule."
     ),
 )
@@ -452,7 +452,7 @@ def cli(
     if run_on_start and schedule is None:
         raise click.UsageError("--run-on-start requires --schedule.")
 
-    interval_seconds = _parse_schedule_interval(schedule)
+    _validate_cron_schedule(schedule)
 
     if edit_metadata_title and delete_metadata_title:
         raise click.UsageError("--edit-metadata-title and --delete-metadata-title are mutually exclusive.")
@@ -479,10 +479,10 @@ def cli(
             skip_size_check=skip_size_check,
         )
 
-    if interval_seconds is not None:
+    if schedule is not None:
         from trimarr.scheduler import run_scheduled
 
-        run_scheduled(_run, interval_seconds=interval_seconds, run_on_start=run_on_start, logger=logger)
+        run_scheduled(_run, cron_expr=schedule, run_on_start=run_on_start, logger=logger)
     else:
         _run()
 

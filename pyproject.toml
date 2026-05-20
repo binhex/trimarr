@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "Trimarr"
-version = "1.0.10"
+version = "1.1.0"
 description = "Automated tool"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -22,25 +22,10 @@ classifiers = [
 
 dependencies = [
     "click",
+    "croniter>=6.0.0",
     "loguru",
     "requests",
     "urllib3",
-]
-
-[project.optional-dependencies]
-dev = [
-    "debugpy>=1.8.20",
-    "python-lsp-server>=1.14.0",
-    "python-lsp-ruff>=2.3.1",
-    "pylsp-mypy>=0.7.1",
-    "pytest>=9.0.3",
-    "pytest-cov>=4.1.0",
-    "pytest-asyncio>=0.21.0",
-    "pytest-mock>=3.11.1",
-    "ruff>=0.1.0",
-    "mypy>=1.5.0",
-    "pre-commit>=3.6.0",
-    "autoflake>=2.3.1",
 ]
 
 [project.scripts]
@@ -100,6 +85,10 @@ explicit_package_bases = true
 module = "tests.*"
 disallow_untyped_defs = false
 
+[[tool.mypy.overrides]]
+module = "croniter"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 minversion = "7.0"
@@ -139,7 +128,9 @@ dev = [
     "pytest>=9.0.3",
     "pytest-cov>=7.1.0",
     "pytest-mock>=3.15.1",
-    "types-requests>=2.33.0.20260402",
-    "pytest-crap",
+    "pytest-crap @ git+https://github.com/binhex/pytest-crap.git@v0.3.1",
+    "types-requests>=2.31.0",
+    "types-pyyaml>=6.0.0",
     "pre-commit",
+    "types-croniter>=6.2.2.20260518",
 ]

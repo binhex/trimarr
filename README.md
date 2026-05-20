@@ -4,7 +4,7 @@ Removes (trims) unwanted audio and subtitles from matroska container format vide
 
 ## Features
 
-- **Recursive scan** — finds all `.mkv` files under one or more specified directory trees. Pass a comma-separated list
+- **Recursive scan** — finds all `.mkv` files under one or more specified directory trees. Pass a pipe-separated list
 to `--media-path` to process multiple roots in a single run; duplicate files (from overlapping paths or symlinks) are
 automatically deduplicated.
 - **Smart skip** — tracks processed files in SQLite using a fingerprint (size + mtime + partial
@@ -74,7 +74,7 @@ trimarr --help
 | Option | Description | Default | Example | Type |
 | ------ | ----------- | ------- | ------- | ---- |
 | `--language` ✱ | One or more ISO 639-2 language codes (comma-separated) for the audio/subtitle tracks to keep. See [ISO 639-2 codes](http://en.wikipedia.org/wiki/List_of_ISO_639-2_codes). | — | `eng` or `eng,fre` | `string` |
-| `--media-path` ✱ | Path(s) to the directory/directories containing media files to process (scanned recursively). Accepts a single path or a comma-separated list of paths. Directories with literal commas in their name are not supported. | — | `/mnt/media/movies` or `/mnt/media/movies,/mnt/media/tv` | `path` |
+| `--media-path` ✱ | Path(s) to the directory/directories containing media files to process (scanned recursively). Accepts a single path or a pipe-separated list of paths (using the pipe character as delimiter, safe even when directory names contain commas). | — | `/mnt/user/Movies` or `/mnt/user/Movies\|/mnt/media/tv` | `path` |
 | `--mkvmerge-path` | Path to the mkvmerge executable. When omitted, trimarr manages its own binary and auto-updates it. | Linux: `~/.local/share/trimarr/bin/mkvmerge`<br>Windows: `%LOCALAPPDATA%\trimarr\bin\mkvmerge.exe` | `/usr/bin/mkvmerge` | `path` |
 | `--database-path` | Path to the SQLite database file used for tracking processed files. | Linux: `~/.local/share/trimarr/db/trimarr.db`<br>Windows: `%LOCALAPPDATA%\trimarr\db\trimarr.db` | `/var/lib/trimarr/trimarr.db` | `path` |
 | `--log-path` | Path to the log file for tracking application events. | Linux: `~/.local/share/trimarr/logs/trimarr.log`<br>Windows: `%LOCALAPPDATA%\trimarr\logs\trimarr.log` | `/var/log/trimarr.log` | `path` |
@@ -88,8 +88,8 @@ trimarr --help
 | `--strip-lower-channels` | After language filtering, drop any audio tracks whose channel count is strictly below the highest channel count among the surviving audio tracks. For example, given English tracks at 8ch, 8ch, and 2ch, the 2ch track is removed. Tracks with an unknown channel count are always kept. Has no effect when `--keep-audio` is set. **Disabled by default** — enable only when you are confident lower-channel duplicates are not needed. | `false` | — | `flag` |
 | `--strip-commentary` | If specified, audio and subtitle tracks whose name contains "commentary" (case-insensitive) will be removed after language filtering. **Audio final gate:** if stripping would leave zero audio tracks, all audio is retained and a warning is logged — a silent file is never acceptable. Subtitles have no such gate and are stripped unconditionally. Has no effect on audio when `--keep-audio` is set, or on subtitles when `--keep-subtitles` is set. **Disabled by default.** | `false` | — | `flag` |
 | `--dry-run` | Log planned changes without modifying any files. Processed files are not recorded to the database in this mode. | `false` | — | `flag` |
-| `--schedule` | Run on a repeating schedule. Format: `<N><unit>` where unit is `m` (minutes), `h` (hours), `d` (days), or `w` (weeks). Examples: `30m`, `6h`, `1d`, `2w`. When omitted, trimarr runs once and exits. | — | `6h` | `string` |
-| `--run-on-start` | When used with `--schedule`, execute an immediate run before the first scheduled interval. Without `--schedule` this flag is an error. | `false` | — | `flag` |
+| `--schedule` | Run on a cron schedule (instead of once). Standard 5-field POSIX cron expression: minute hour day month weekday. Also accepts `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`. Examples: `'0 2 * * *'` (daily at 2am), `'*/30 * * * *'` (every 30 min), `'@daily'` (once per day). When omitted, trimarr runs once and exits. | — | — | `string` |
+| `--run-on-start` | When used with `--schedule`, execute an immediate run before the first scheduled cron fire. Without `--schedule` this flag is an error. | `false` | — | `flag` |
 | `--skip-size-check` | Bypass the output size guard that rejects mkvmerge results smaller than 50 % of the source file. Use when legitimate remuxes are expected to produce significantly smaller output (e.g. files with very large audio or subtitle payloads). The structural validity check (`mkvmerge -J`) is never bypassed. | `false` | — | `flag` |
 
 ✱ Required.
@@ -159,33 +159,50 @@ flowchart TD
 
 ## Scheduler
 
-By default trimarr runs once and exits. Pass `--schedule` to run on a repeating interval.
+By default trimarr runs once and exits. Pass `--schedule` with a cron expression to run on a
+timed schedule.
 
 ```bash
-# Run every 6 hours
-trimarr --language eng --media-path /mnt/media --schedule 6h
+# Run daily at 2 AM
+trimarr --language eng --media-path /mnt/media --schedule "0 2 * * *"
 
-# Run every day, with an immediate run on startup
-trimarr --language eng --media-path /mnt/media --schedule 1d --run-on-start
+# Run every 30 minutes, with an immediate run on startup
+trimarr --language eng --media-path /mnt/media --schedule "*/30 * * * *" --run-on-start
+
+# Using a special keyword
+trimarr --language eng --media-path /mnt/media --schedule "@daily"
 ```
 
 ### Schedule format
 
-| Unit | Meaning  | Example |
-| ---- | -------- | ------- |
-| `m`  | minutes  | `30m`   |
-| `h`  | hours    | `6h`    |
-| `d`  | days     | `1d`    |
-| `w`  | weeks    | `2w`    |
+`--schedule` accepts a standard 5-field POSIX cron expression:
 
-N must be a positive integer. Fractional values (e.g. `1.5h`) are not supported.
+| Field | Values     | Description                |
+|-------|------------|----------------------------|
+| `min` | 0–59       | Minute of the hour         |
+| `hour`| 0–23       | Hour of the day            |
+| `day` | 1–31       | Day of the month           |
+| `mon` | 1–12       | Month (1 = January)        |
+| `wday`| 0–7 (0,7 = Sunday) | Day of the week      |
 
-### Drift correction
+Each field supports **wildcards** (`*`), **ranges** (`9-17`), **lists** (`9,18`), and **steps** (`*/30`, `0-30/10`).
 
-The scheduler uses a **run-then-sleep** strategy. The sleep duration for each cycle is adjusted by
-the time the previous run took, so the interval is measured from the *start* of each run rather
-than the end. If a run exceeds the interval, the next run fires immediately (with a warning logged)
-and no drift accumulates over time.
+Special keyword shortcuts (via croniter):
+
+| Keyword     | Equivalent         |
+|-------------|--------------------|
+| `@hourly`   | `0 * * * *`        |
+| `@daily`    | `0 0 * * *`        |
+| `@weekly`   | `0 0 * * 0`        |
+| `@monthly`  | `0 0 1 * *`        |
+| `@yearly`   | `0 0 1 1 *`        |
+
+### Cron-driven scheduling
+
+The scheduler stays running and recomputes the next fire time from the cron expression after
+each run. If a run takes longer than the gap to the next scheduled fire, the missed fire
+is skipped automatically and a warning is logged. This approach naturally handles overruns
+without drift accumulation.
 
 ### Stopping the scheduler
 
@@ -206,3 +223,8 @@ accepted if it does not pass all linting) then run `pre-commit run --all-files`.
 ## FAQ
 
 WIP
+
+___
+If you appreciate my work, then please consider buying me a beer  :D
+
+[![PayPal donation](https://www.paypal.com/en_US/i/btn/btn_donate_SM.gif)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=MM5E27UX6AUU4)
