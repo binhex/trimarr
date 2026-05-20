@@ -70,6 +70,42 @@ def _fmt_bytes(n: int) -> str:
     return f"{value:.2f} TB"
 
 
+def _run_dir_hook(
+    cmd_template: str | None,
+    dir_has_work: bool,
+    dry_run: bool,
+    leaf: str,
+    dir_path: str,
+    logger: Logger,
+    timeout_seconds: int | None,
+) -> None:
+    """Run a pre or post process hook for a directory group.
+
+    The hook only fires when all of these hold:
+
+    * *cmd_template* is not *None* (the user configured a hook).
+    * *dir_has_work* is *True* (at least one file needs processing).
+    * *dry_run* is *False* (we are in normal mode).
+
+    Args:
+        cmd_template: The user-supplied hook command template (may be ``None``).
+        dir_has_work: Whether any file in the directory group needs processing.
+        dry_run: Whether the run is in dry-run mode.
+        leaf: The leaf directory name (for ``{leaf}`` substitution).
+        dir_path: The full directory path (for ``{dir}`` substitution).
+        logger: Loguru logger instance.
+        timeout_seconds: Hook execution timeout (passed through to :func:`_run_hook`).
+    """
+    if cmd_template is not None and dir_has_work and not dry_run:
+        _run_hook(
+            cmd_template=cmd_template,
+            leaf=leaf,
+            dir_path=dir_path,
+            logger=logger,
+            timeout_seconds=timeout_seconds,
+        )
+
+
 def _print_failure_report(failures: list[tuple[Path, str]], logger: Logger) -> None:
     """Log a consolidated list of all files that failed processing.
 
@@ -181,8 +217,17 @@ def _print_summary(
 
 
 def _discover_mkv_files(media_path: list[str], logger: Logger) -> list[tuple[Path, Path]]:
-    """Scan *media_path* roots for .mkv files. Returns deduplicated (mkv_file, root) pairs."""
-    all_files: list[tuple[Path, Path]] = []
+    """Scan *media_path* roots for .mkv files. Returns deduplicated (mkv_file, root) pairs.
+
+    Uses ``glob("**/*.mkv")`` instead of ``sorted(rglob("*"))`` with a suffix filter.
+    The glob pattern is evaluated at the ``os.scandir`` selector level, so
+    non-MKV entries (thumbnails, subtitles, metadata) are never wrapped in
+    Python :class:`~pathlib.Path` objects.  This avoids the pymalloc arena
+    fragmentation that caused unbounded RSS growth (~1 GB/min) when the
+    scheduler repeatedly iterated millions of directory entries.
+    """
+    seen: set[Path] = set()
+    result: list[tuple[Path, Path]] = []
     for path_str in media_path:
         root = Path(path_str)
         if not root.exists():
@@ -191,28 +236,17 @@ def _discover_mkv_files(media_path: list[str], logger: Logger) -> list[tuple[Pat
         if not root.is_dir():
             logger.error(f"Media path '{path_str}' is not a directory.")
             continue
-        files = sorted(p for p in root.rglob("*") if p.suffix.lower() == ".mkv")
+        files = sorted(root.glob("**/*.[Mm][Kk][Vv]"))
         if not files:
             logger.warning(f"No .mkv files found under '{path_str}'.")
         else:
             logger.info(f"Found {len(files)} .mkv file(s) under '{path_str}'.")
-            all_files.extend((f, root) for f in files)
-
-    return _deduplicate_file_list(all_files)
-
-
-def _deduplicate_file_list(
-    all_files: list[tuple[Path, Path]],
-) -> list[tuple[Path, Path]]:
-    """Deduplicate *all_files* by resolved path to handle symlinks and overlapping roots."""
-    seen: set[Path] = set()
-    unique: list[tuple[Path, Path]] = []
-    for file_path, root in all_files:
-        resolved = file_path.resolve()
-        if resolved not in seen:
-            seen.add(resolved)
-            unique.append((file_path, root))
-    return unique
+            for file_path in files:
+                resolved = file_path.resolve()
+                if resolved not in seen:
+                    seen.add(resolved)
+                    result.append((file_path, root))
+    return result
 
 
 def _handle_corrupt_output(
@@ -313,11 +347,15 @@ def _process_one_file(
     )
 
     if cmd is None:
-        if not cfg.dry_run:
-            logger.info(f"No changes needed for '{file_path.name}' — marking as processed.")
-            db.mark_processed(file_path, profile_hash=profile_hash, bytes_saved=0)
-        else:
-            logger.info(f"No changes needed for '{file_path.name}'.")
+        # Record the file as processed even in dry-run mode so that
+        # subsequent runs skip it instead of re-probing it.  A file
+        # that needs no changes is already "correct" — storing its
+        # fingerprint just avoids redundant mkvmerge -J calls that
+        # inflate the kernel page cache (visible as Docker container
+        # memory).  If the file later changes its fingerprint will
+        # differ and it will be re-probed automatically.
+        logger.info(f"No changes needed for '{file_path.name}' — marking as processed.")
+        db.mark_processed(file_path, profile_hash=profile_hash, bytes_saved=0)
         counts.no_change += 1
         return
 
@@ -332,6 +370,11 @@ def _process_one_file(
         # colour parser does not mistake them for markup tags.
         cmd_str = " ".join(display_cmd).replace("<", r"\<").replace(">", r"\>")
         logger.opt(colors=True).info(f"<green>DRY-RUN</green>  | Would run: {cmd_str}")
+        # Record the fingerprint so subsequent runs skip this file
+        # instead of re-probing it with mkvmerge -J.  The profile_hash
+        # ensures that changing --language, --strip-commentary, etc.
+        # triggers a fresh probe.
+        db.mark_processed(file_path, profile_hash=profile_hash, bytes_saved=0)
         counts.processed += 1
         return
 
@@ -453,14 +496,15 @@ def _process_directory_groups(
 
                 leaf = dir_path.name
 
-                if dir_has_work and pre_process is not None and not cfg.dry_run:
-                    _run_hook(
-                        cmd_template=pre_process,
-                        leaf=leaf,
-                        dir_path=str(dir_path),
-                        logger=logger,
-                        timeout_seconds=command_timeout_seconds,
-                    )
+                _run_dir_hook(
+                    cmd_template=pre_process,
+                    dir_has_work=dir_has_work,
+                    dry_run=cfg.dry_run,
+                    leaf=leaf,
+                    dir_path=str(dir_path),
+                    logger=logger,
+                    timeout_seconds=command_timeout_seconds,
+                )
 
                 for file_path, root in files_in_dir:
                     global_idx += 1
@@ -477,14 +521,15 @@ def _process_directory_groups(
                         logger=logger,
                     )
 
-                if dir_has_work and post_process is not None and not cfg.dry_run:
-                    _run_hook(
-                        cmd_template=post_process,
-                        leaf=leaf,
-                        dir_path=str(dir_path),
-                        logger=logger,
-                        timeout_seconds=command_timeout_seconds,
-                    )
+                _run_dir_hook(
+                    cmd_template=post_process,
+                    dir_has_work=dir_has_work,
+                    dry_run=cfg.dry_run,
+                    leaf=leaf,
+                    dir_path=str(dir_path),
+                    logger=logger,
+                    timeout_seconds=command_timeout_seconds,
+                )
 
     except CorruptOutputError as exc:
         _handle_corrupt_output(exc, counts, logger)

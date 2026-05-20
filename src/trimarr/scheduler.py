@@ -98,6 +98,60 @@ def _safe_format_datetime(dt: datetime) -> str:
         return ""
 
 
+def _scheduler_initial_wait(
+    cron_expr: str,
+    run_on_start: bool,
+    logger: Logger,
+) -> None:
+    """Optionally wait for the first scheduled fire before entering the main loop.
+
+    When *run_on_start* is *True* the wait is skipped entirely (the caller
+    fires the first run immediately).
+    """
+    if not run_on_start:
+        next_run = _get_next_fire(cron_expr)
+        formatted = _safe_format_datetime(next_run)
+        wait_seconds = max(0.0, (next_run - datetime.now()).total_seconds())
+        if formatted:
+            first_run_str = f" First run at {formatted} (in {_format_duration(wait_seconds)})."
+        else:
+            first_run_str = f" First run in {_format_duration(wait_seconds)}."
+        logger.info(f"Scheduler started.{first_run_str}")
+        _sleep_until(next_run)
+
+
+def _scheduler_wait_for_next_fire(
+    cron_expr: str,
+    elapsed: float,
+    logger: Logger,
+) -> None:
+    """Compute the next cron fire, log it, and sleep until it arrives.
+
+    If *elapsed* (the duration of the last run) is shorter than the interval
+    to the next fire, a warning is logged so the operator knows one or more
+    firings were skipped.
+    """
+    now = datetime.now()
+    next_run = _get_next_fire(cron_expr, now)
+    wait_seconds = max(0.0, (next_run - now).total_seconds())
+
+    if 0 < wait_seconds < elapsed:
+        logger.warning(
+            f"Scheduler: run took {_format_duration(elapsed)}"
+            f" which exceeds the {_format_duration(wait_seconds)} gap"
+            f" to the next cron fire. One or more firings were skipped."
+        )
+
+    formatted = _safe_format_datetime(next_run)
+    next_run_str = (
+        f"Next run at {formatted} (in {_format_duration(wait_seconds)})."
+        if formatted
+        else f"Next run in {_format_duration(wait_seconds)}."
+    )
+    logger.info(next_run_str)
+    _sleep_until(next_run)
+
+
 def run_scheduled(
     run_fn: Callable[[], None],
     cron_expr: str,
@@ -116,16 +170,7 @@ def run_scheduled(
         logger: Loguru logger instance for status and warning messages.
     """
     try:
-        if not run_on_start:
-            next_run = _get_next_fire(cron_expr)
-            formatted = _safe_format_datetime(next_run)
-            wait_seconds = max(0.0, (next_run - datetime.now()).total_seconds())
-            if formatted:
-                first_run_str = f" First run at {formatted} (in {_format_duration(wait_seconds)})."
-            else:
-                first_run_str = f" First run in {_format_duration(wait_seconds)}."
-            logger.info(f"Scheduler started.{first_run_str}")
-            _sleep_until(next_run)
+        _scheduler_initial_wait(cron_expr, run_on_start, logger)
 
         while True:
             t0 = time.monotonic()
@@ -141,28 +186,8 @@ def run_scheduled(
                 raise
             except Exception as exc:
                 logger.error(f"Scheduler: run failed: {exc}")
-            elapsed = time.monotonic() - t0
 
-            now = datetime.now()
-            next_run = _get_next_fire(cron_expr, now)
-            wait_seconds = max(0.0, (next_run - now).total_seconds())
-
-            if 0 < wait_seconds < elapsed:
-                logger.warning(
-                    f"Scheduler: run took {_format_duration(elapsed)}"
-                    f" which exceeds the {_format_duration(wait_seconds)} gap"
-                    f" to the next cron fire. One or more firings were skipped."
-                )
-
-            formatted = _safe_format_datetime(next_run)
-            next_run_str = (
-                f"Next run at {formatted} (in {_format_duration(wait_seconds)})."
-                if formatted
-                else f"Next run in {_format_duration(wait_seconds)}."
-            )
-            logger.info(next_run_str)
-
-            _sleep_until(next_run)
+            _scheduler_wait_for_next_fire(cron_expr, time.monotonic() - t0, logger)
     except KeyboardInterrupt:
         logger.info("Scheduler stopped.")
         sys.exit(0)
