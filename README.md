@@ -91,6 +91,9 @@ trimarr --help
 | `--schedule` | Run on a cron schedule (instead of once). Standard 5-field POSIX cron expression: minute hour day month weekday. Also accepts `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`. Examples: `'0 2 * * *'` (daily at 2am), `'*/30 * * * *'` (every 30 min), `'@daily'` (once per day). When omitted, trimarr runs once and exits. | — | — | `string` |
 | `--run-on-start` | When used with `--schedule`, execute an immediate run before the first scheduled cron fire. Without `--schedule` this flag is an error. | `false` | — | `flag` |
 | `--skip-size-check` | Bypass the output size guard that rejects mkvmerge results smaller than 50 % of the source file. Use when legitimate remuxes are expected to produce significantly smaller output (e.g. files with very large audio or subtitle payloads). The structural validity check (`mkvmerge -J`) is never bypassed. | `false` | — | `flag` |
+| `--pre-process` | Shell command to run **before** processing files in each directory. The placeholders `{leaf}` (directory basename) and `{dir}` (full directory path) are substituted. Only fires for directories where at least one file needs processing. Failures are logged as warnings and do not abort the run. May be used independently of `--schedule`. | — | `'no_ransom.sh --unlock yes {leaf}'` | `string` |
+| `--post-process` | Shell command to run **after** processing files in each directory. Same placeholder behaviour as `--pre-process`. Fires even if some files in the directory failed. | — | `'no_ransom.sh --unlock no {leaf}'` | `string` |
+| `--command-timeout-mins` | Maximum time in minutes each pre/post process command is allowed to run before being killed. Set to `0` to disable the timeout entirely. | `5` | `10` | `int` |
 
 ✱ Required.
 
@@ -180,10 +183,10 @@ trimarr --language eng --media-path /mnt/media --schedule "@daily"
 | Field | Values     | Description                |
 |-------|------------|----------------------------|
 | `min` | 0–59       | Minute of the hour         |
-| `hour`| 0–23       | Hour of the day            |
+| `hour` | 0–23       | Hour of the day            |
 | `day` | 1–31       | Day of the month           |
 | `mon` | 1–12       | Month (1 = January)        |
-| `wday`| 0–7 (0,7 = Sunday) | Day of the week      |
+| `wday` | 0–7 (0,7 = Sunday) | Day of the week      |
 
 Each field supports **wildcards** (`*`), **ranges** (`9-17`), **lists** (`9,18`), and **steps** (`*/30`, `0-30/10`).
 
@@ -196,6 +199,36 @@ Special keyword shortcuts (via croniter):
 | `@weekly`   | `0 0 * * 0`        |
 | `@monthly`  | `0 0 1 * *`        |
 | `@yearly`   | `0 0 1 1 *`        |
+
+### Pre/Post process hooks
+
+Use `--pre-process` and `--post-process` to run shell commands before and after trimarr
+processes files in a directory. This is useful for external operations such as unlocking
+files before processing and re-locking them afterwards.
+
+The hooks fire **once per directory** that has files needing processing, not per file.
+`{leaf}` and `{dir}` placeholders in the command template are replaced with the directory
+basename and full path respectively.
+
+```bash
+# Run a script before and after processing each directory
+trimarr --language eng --media-path /mnt/media \\
+  --pre-process 'no_ransom.sh --unlock yes {leaf}' \\
+  --post-process 'no_ransom.sh --unlock no {leaf}' \\
+  --schedule "0 2 * * *"
+
+# Only pre-process (no post-process), with a 10-minute timeout
+trimarr --language eng --media-path /mnt/media \\
+  --pre-process 'prepare_dir.sh {dir}' \\
+  --command-timeout-mins 10
+```
+
+**Notes:**
+
+- Hooks are independent — use one, both, or neither.
+- A non-zero exit code from a hook logs a warning but does **not** stop processing.
+- If a hook times out (per `--command-timeout-mins`), the process is killed and a warning is logged.
+- Set `--command-timeout-mins 0` to disable the timeout entirely.
 
 ### Cron-driven scheduling
 

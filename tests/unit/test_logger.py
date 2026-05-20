@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import patch
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from trimarr.logger import create_logger
 
@@ -13,8 +16,7 @@ class TestCreateLogger:
 
     def test_with_log_path_includes_file_sink(self) -> None:
         """When log_path is set, a file sink is added with rotation/retention."""
-        with patch("trimarr.logger._logger.remove") as mock_remove, \
-             patch("trimarr.logger._logger.add") as mock_add:
+        with patch("trimarr.logger._logger.remove") as mock_remove, patch("trimarr.logger._logger.add") as mock_add:
             create_logger(
                 log_format="{message}",
                 log_level="DEBUG",
@@ -63,8 +65,7 @@ class TestCreateLogger:
 
     def test_no_log_path_skips_file_sink(self) -> None:
         """When log_path is None, only one sink (console) is added."""
-        with patch("trimarr.logger._logger.remove") as mock_remove, \
-             patch("trimarr.logger._logger.add") as mock_add:
+        with patch("trimarr.logger._logger.remove") as mock_remove, patch("trimarr.logger._logger.add") as mock_add:
             create_logger(
                 log_format="{message}",
                 log_level="INFO",
@@ -92,6 +93,7 @@ class TestCreateLogger:
         # Verify the sink callable is a lambda that calls print
         import io
         import sys
+
         capture = io.StringIO()
         old_stdout = sys.stdout
         sys.stdout = capture

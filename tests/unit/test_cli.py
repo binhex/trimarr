@@ -298,8 +298,7 @@ class TestPrePostOptions:
             result = CliRunner().invoke(
                 cli,
                 _base_args(str(tmp_path))
-                + ["--mkvmerge-path", str(fake_mkvmerge),
-                   "--pre-process", "echo before {leaf}"],
+                + ["--mkvmerge-path", str(fake_mkvmerge), "--pre-process", "echo before {leaf}"],
             )
 
         assert result.exit_code == 0, result.output
@@ -315,8 +314,7 @@ class TestPrePostOptions:
             result = CliRunner().invoke(
                 cli,
                 _base_args(str(tmp_path))
-                + ["--mkvmerge-path", str(fake_mkvmerge),
-                   "--post-process", "echo after {leaf}"],
+                + ["--mkvmerge-path", str(fake_mkvmerge), "--post-process", "echo after {leaf}"],
             )
 
         assert result.exit_code == 0, result.output
@@ -332,9 +330,14 @@ class TestPrePostOptions:
             result = CliRunner().invoke(
                 cli,
                 _base_args(str(tmp_path))
-                + ["--mkvmerge-path", str(fake_mkvmerge),
-                   "--pre-process", "echo before {leaf}",
-                   "--post-process", "echo after {leaf}"],
+                + [
+                    "--mkvmerge-path",
+                    str(fake_mkvmerge),
+                    "--pre-process",
+                    "echo before {leaf}",
+                    "--post-process",
+                    "echo after {leaf}",
+                ],
             )
 
         assert result.exit_code == 0, result.output
@@ -350,9 +353,7 @@ class TestPrePostOptions:
         with patch("trimarr.runner.run") as mock_run:
             result = CliRunner().invoke(
                 cli,
-                _base_args(str(tmp_path))
-                + ["--mkvmerge-path", str(fake_mkvmerge),
-                   "--command-timeout-mins", "10"],
+                _base_args(str(tmp_path)) + ["--mkvmerge-path", str(fake_mkvmerge), "--command-timeout-mins", "10"],
             )
 
         assert result.exit_code == 0, result.output
@@ -367,9 +368,7 @@ class TestPrePostOptions:
         with patch("trimarr.runner.run") as mock_run:
             result = CliRunner().invoke(
                 cli,
-                _base_args(str(tmp_path))
-                + ["--mkvmerge-path", str(fake_mkvmerge),
-                   "--command-timeout-mins", "0"],
+                _base_args(str(tmp_path)) + ["--mkvmerge-path", str(fake_mkvmerge), "--command-timeout-mins", "0"],
             )
 
         assert result.exit_code == 0, result.output

@@ -8,9 +8,8 @@ from typing import TYPE_CHECKING
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
-from loguru import logger as _real_loguru_logger
-
 from click.testing import CliRunner
+from loguru import logger as _real_loguru_logger
 
 from trimarr.cli import cli
 from trimarr.processor import MkvTrack
@@ -955,9 +954,16 @@ class TestPrePostHooksIntegration:
             mock_probe.return_value = []
             result = CliRunner().invoke(
                 cli,
-                ["--language", "eng", "--media-path", str(tmp_path / "media"),
-                 "--pre-process", "unlock {leaf}",
-                 "--post-process", "lock {leaf}"],
+                [
+                    "--language",
+                    "eng",
+                    "--media-path",
+                    str(tmp_path / "media"),
+                    "--pre-process",
+                    "unlock {leaf}",
+                    "--post-process",
+                    "lock {leaf}",
+                ],
             )
 
         assert result.exit_code == 0, result.output
@@ -986,9 +992,16 @@ class TestPrePostHooksIntegration:
         ):
             result = CliRunner().invoke(
                 cli,
-                ["--language", "eng", "--media-path", str(tmp_path / "media"),
-                 "--pre-process", "unlock {leaf}",
-                 "--post-process", "lock {leaf}"],
+                [
+                    "--language",
+                    "eng",
+                    "--media-path",
+                    str(tmp_path / "media"),
+                    "--pre-process",
+                    "unlock {leaf}",
+                    "--post-process",
+                    "lock {leaf}",
+                ],
             )
 
         assert result.exit_code == 0, result.output
@@ -1015,8 +1028,7 @@ class TestPrePostHooksIntegration:
             mock_probe.return_value = []
             result = CliRunner().invoke(
                 cli,
-                ["--language", "eng", "--media-path", str(tmp_path / "media"),
-                 "--pre-process", "unlock {leaf}"],
+                ["--language", "eng", "--media-path", str(tmp_path / "media"), "--pre-process", "unlock {leaf}"],
             )
 
         assert result.exit_code == 0, result.output
@@ -1043,8 +1055,7 @@ class TestPrePostHooksIntegration:
             mock_probe.return_value = []
             result = CliRunner().invoke(
                 cli,
-                ["--language", "eng", "--media-path", str(tmp_path / "media"),
-                 "--post-process", "lock {leaf}"],
+                ["--language", "eng", "--media-path", str(tmp_path / "media"), "--post-process", "lock {leaf}"],
             )
 
         assert result.exit_code == 0, result.output
@@ -1069,9 +1080,16 @@ class TestPrePostHooksIntegration:
         ):
             result = CliRunner().invoke(
                 cli,
-                ["--language", "eng", "--media-path", str(tmp_path / "media"),
-                 "--pre-process", "unlock {leaf}",
-                 "--post-process", "lock {leaf}"],
+                [
+                    "--language",
+                    "eng",
+                    "--media-path",
+                    str(tmp_path / "media"),
+                    "--pre-process",
+                    "unlock {leaf}",
+                    "--post-process",
+                    "lock {leaf}",
+                ],
             )
 
         assert result.exit_code == 0, result.output
@@ -1096,9 +1114,16 @@ class TestPrePostHooksIntegration:
         ):
             result = CliRunner().invoke(
                 cli,
-                ["--language", "eng", "--media-path", str(tmp_path / "media"),
-                 "--pre-process", "unlock {leaf}",
-                 "--post-process", "lock {leaf}"],
+                [
+                    "--language",
+                    "eng",
+                    "--media-path",
+                    str(tmp_path / "media"),
+                    "--pre-process",
+                    "unlock {leaf}",
+                    "--post-process",
+                    "lock {leaf}",
+                ],
             )
 
         assert result.exit_code == 0, result.output

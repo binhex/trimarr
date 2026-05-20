@@ -50,7 +50,8 @@ def _get_next_fire(cron_expr: str, base: datetime | None = None) -> datetime:
         The next matching :class:`datetime`.
     """
     cron = croniter(cron_expr, base or datetime.now())
-    return cron.get_next(datetime)
+    next_dt: datetime = cron.get_next(datetime)
+    return next_dt
 
 
 def _sleep_until(target: datetime) -> None:
