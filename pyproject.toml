@@ -85,6 +85,10 @@ explicit_package_bases = true
 module = "tests.*"
 disallow_untyped_defs = false
 
+[[tool.mypy.overrides]]
+module = "croniter"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 minversion = "7.0"
@@ -127,5 +131,6 @@ dev = [
     "pytest-crap @ git+https://github.com/binhex/pytest-crap.git@v0.3.1",
     "types-requests>=2.31.0",
     "types-pyyaml>=6.0.0",
-    "pre-commit"
+    "pre-commit",
+    "types-croniter>=6.2.2.20260518",
 ]
