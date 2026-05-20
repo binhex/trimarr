@@ -30,11 +30,15 @@ def _run_hook(
             timeout is applied.
 
     Raises:
-        None. All expected errors are caught and logged as warnings.
+        None. All expected errors (TimeoutExpired, OSError, non-zero exit)
+        are caught and logged as warnings.
     """
     if not cmd_template.strip():
         return
 
+    # shlex.quote() wraps values in single quotes which prevent ALL shell
+    # expansion ($(), backticks, $variables) in POSIX shells. Safe for
+    # filesystem paths substituted into shell command templates.
     cmd = cmd_template.replace("{leaf}", shlex.quote(leaf)).replace("{dir}", shlex.quote(dir_path))
 
     kwargs: dict = {
@@ -51,9 +55,9 @@ def _run_hook(
         logger.warning(f"Hook command timed out after {timeout_seconds}s: {cmd}")
         return
     except OSError as exc:
-        logger.warning(f"Hook command failed: {exc}")
+        logger.warning(f"Hook command failed: {cmd}: {exc}")
         return
 
     if result.returncode != 0:
-        stderr = result.stderr.strip() if result.stderr else ""
+        stderr = result.stderr.strip()
         logger.warning(f"Hook command exited with code {result.returncode}: {stderr}")

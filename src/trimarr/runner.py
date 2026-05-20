@@ -409,7 +409,8 @@ def _dir_has_work(
 
     Returns True at the first file that is not yet processed, or if a
     filesystem or database error occurs (the error is logged and work is
-    assumed so that pre hooks fire).
+    assumed so that pre hooks fire).  Returns False only when every file in
+    *files_in_dir* is confirmed already processed and no errors occurred.
     """
     for fp, _ in files_in_dir:
         try:
@@ -450,17 +451,16 @@ def _process_directory_groups(
             for dir_path, files_in_dir in dir_groups.items():
                 dir_has_work = _dir_has_work(files_in_dir, db, profile_hash, logger)
 
-                if dir_has_work:
-                    leaf = dir_path.name
+                leaf = dir_path.name
 
-                    if pre_process is not None:
-                        _run_hook(
-                            cmd_template=pre_process,
-                            leaf=leaf,
-                            dir_path=str(dir_path),
-                            logger=logger,
-                            timeout_seconds=command_timeout_seconds,
-                        )
+                if dir_has_work and pre_process is not None and not cfg.dry_run:
+                    _run_hook(
+                        cmd_template=pre_process,
+                        leaf=leaf,
+                        dir_path=str(dir_path),
+                        logger=logger,
+                        timeout_seconds=command_timeout_seconds,
+                    )
 
                 for file_path, root in files_in_dir:
                     global_idx += 1
@@ -477,7 +477,7 @@ def _process_directory_groups(
                         logger=logger,
                     )
 
-                if dir_has_work and post_process is not None:
+                if dir_has_work and post_process is not None and not cfg.dry_run:
                     _run_hook(
                         cmd_template=post_process,
                         leaf=leaf,
