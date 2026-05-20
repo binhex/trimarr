@@ -22,6 +22,7 @@ classifiers = [
 
 dependencies = [
     "click",
+    "croniter>=6.0.0",
     "loguru",
     "requests",
     "urllib3",
