@@ -314,3 +314,20 @@ class TestRunScheduled:
 
         warning_messages = [str(c) for c in logger.warning.call_args_list]
         assert warning_messages, "Expected a warning about overrun"
+
+
+class TestRunScheduledSpecialStrings:
+    """run_scheduled accepts @daily, @hourly, etc. via croniter."""
+
+    def test_at_daily_is_accepted(self) -> None:
+        """@daily does not raise and schedules correctly."""
+        logger = MagicMock()
+        future = datetime(2099, 1, 1)
+        with (
+            patch("trimarr.scheduler._get_next_fire", return_value=future) as mock_get,
+            patch("trimarr.scheduler._sleep_until", side_effect=KeyboardInterrupt),
+            pytest.raises(SystemExit),
+        ):
+            run_scheduled(MagicMock(), cron_expr="@daily", run_on_start=False, logger=logger)
+
+        mock_get.assert_called_once_with("@daily")
