@@ -178,46 +178,46 @@ Examples:
       --strip-commentary \\
       --strip-lower-channels \\
       --no-backup \\
-      --media-path /mnt/media/movies
+      --media-path /mnt/user/Movies
 
 \b
   Keep only English audio and subtitles:
     {prog} \\
       --language eng \\
-      --media-path /mnt/media/movies
+      --media-path /mnt/user/Movies
 
 \b
   Keep English and French audio and subtitles:
     {prog} \\
       --language eng,fre \\
-      --media-path /mnt/media/movies
+      --media-path /mnt/user/Movies
 
 \b
   Keep only English audio, but retain all subtitle tracks:
     {prog} \\
       --language eng \\
       --keep-subtitles \\
-      --media-path /mnt/media/movies
+      --media-path /mnt/user/Movies
 
 \b
   Dry run to preview changes without modifying files:
     {prog} \\
       --language eng \\
       --dry-run \\
-      --media-path /mnt/media/movies
+      --media-path /mnt/user/Movies
 
 \b
   Keep only French audio and update each file's title metadata to match its filename:
     {prog} \\
       --language fre \\
       --edit-metadata-title \\
-      --media-path /mnt/media/movies
+      --media-path /mnt/user/Movies
 
 \b
   Use a custom mkvmerge binary and database location:
     {prog} \\
       --language eng \\
-      --media-path /mnt/media/movies \\
+      --media-path /mnt/user/Movies \\
       --mkvmerge-path /usr/bin/mkvmerge \\
       --database-path /var/lib/trimarr/trimarr.db
 
@@ -225,13 +225,13 @@ Examples:
   Process multiple media directories in a single run:
     {prog} \\
       --language eng \\
-      --media-path /mnt/media/movies|/mnt/media/tv
+      --media-path /mnt/user/Movies|/mnt/media/tv
 
 \b
   Run every 30 minutes, processing immediately on startup:
     {prog} \\
       --language eng \\
-      --media-path /mnt/media/movies \\
+      --media-path /mnt/user/Movies \\
       --schedule "*/30 * * * *" \\
       --run-on-start
 
@@ -239,7 +239,7 @@ Examples:
   Run daily at 2 AM:
     {prog} \\
       --language eng \\
-      --media-path /mnt/media/movies \\
+      --media-path /mnt/user/Movies \\
       --schedule "0 2 * * *"
 \b
 """

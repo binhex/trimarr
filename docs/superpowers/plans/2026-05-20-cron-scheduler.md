@@ -595,7 +595,7 @@ Old:
   Run every 6 hours, processing immediately on startup:
     {prog} \\
       --language eng \\
-      --media-path /mnt/media/movies \\
+      --media-path /mnt/user/Movies \\
       --schedule 6h \\
       --run-on-start
 
@@ -603,7 +603,7 @@ Old:
   Run daily (first run after 24 hours):
     {prog} \\
       --language eng \\
-      --media-path /mnt/media/movies \\
+      --media-path /mnt/user/Movies \\
       --schedule 1d
 ```
 
@@ -613,7 +613,7 @@ New:
   Run every 6 hours (at :00 and :30 past each hour, processing immediately on startup):
     {prog} \\
       --language eng \\
-      --media-path /mnt/media/movies \\
+      --media-path /mnt/user/Movies \\
       --schedule "*/30 * * * *" \\
       --run-on-start
 
@@ -621,7 +621,7 @@ New:
   Run daily at 2 AM:
     {prog} \\
       --language eng \\
-      --media-path /mnt/media/movies \\
+      --media-path /mnt/user/Movies \\
       --schedule "0 2 * * *"
 ```
 
