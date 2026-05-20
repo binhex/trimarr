@@ -56,17 +56,20 @@ def _get_next_fire(cron_expr: str, base: datetime | None = None) -> datetime:
 def _sleep_until(target: datetime) -> None:
     """Sleep in 1-second ticks until *target* is reached or passed.
 
+    Uses ``time.monotonic()`` for deadline tracking so system clock
+    adjustments (NTP, DST, manual changes) do not affect the sleep
+    duration.
+
     Args:
         target: The :class:`datetime` to sleep until.
     """
-    while True:
-        now = datetime.now()
-        if now >= target:
-            break
-        remaining = (target - now).total_seconds()
-        if remaining <= 0:
-            break
-        time.sleep(min(1.0, remaining))
+    remaining = (target - datetime.now()).total_seconds()
+    if remaining <= 0:
+        return
+    deadline = time.monotonic() + remaining
+    while time.monotonic() < deadline:
+        left = deadline - time.monotonic()
+        time.sleep(min(1.0, max(0.0, left)))
 
 
 def _format_duration(seconds: float) -> str:
@@ -84,18 +87,6 @@ def _format_duration(seconds: float) -> str:
         if count:
             parts.append(f"{count}{unit_char}")
     return " ".join(parts) if parts else "0s"
-
-
-def _sleep_interruptible(seconds: float) -> None:
-    """Sleep for *seconds* in 1-second ticks so KeyboardInterrupt is caught promptly.
-
-    Args:
-        seconds: Non-negative duration to sleep.
-    """
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        remaining = deadline - time.monotonic()
-        time.sleep(min(1.0, max(0.0, remaining)))
 
 
 def run_scheduled(
@@ -148,8 +139,9 @@ def run_scheduled(
 
             if 0 < wait_seconds < elapsed:
                 logger.warning(
-                    f"Scheduler: run took {_format_duration(elapsed)} which exceeds"
-                    f" the cron interval. Firing next run immediately."
+                    f"Scheduler: run took {_format_duration(elapsed)}"
+                    f" which exceeds the {_format_duration(wait_seconds)} gap"
+                    f" to the next cron fire. One or more firings were skipped."
                 )
 
             try:

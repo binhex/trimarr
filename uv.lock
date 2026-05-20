@@ -543,6 +543,7 @@ dev = [
     { name = "pytest-cov" },
     { name = "pytest-crap" },
     { name = "pytest-mock" },
+    { name = "types-croniter" },
     { name = "types-pyyaml" },
     { name = "types-requests" },
 ]
@@ -563,8 +564,18 @@ dev = [
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "pytest-crap", git = "https://github.com/binhex/pytest-crap.git?rev=v0.3.1" },
     { name = "pytest-mock", specifier = ">=3.15.1" },
+    { name = "types-croniter", specifier = ">=6.2.2.20260518" },
     { name = "types-pyyaml", specifier = ">=6.0.0" },
     { name = "types-requests", specifier = ">=2.31.0" },
+]
+
+[[package]]
+name = "types-croniter"
+version = "6.2.2.20260518"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/20/02/f03a44ded34e6abb125c339647b070f2705a0583782f5638d62ab958cdc2/types_croniter-6.2.2.20260518.tar.gz", hash = "sha256:aceb426b9187bb9255b89d17713d07ac034a2b96b437bfdd5d3a56b46b4eb656", size = 12120, upload-time = "2026-05-18T06:03:11.885Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/37/3d/f12c417944d00c42db71de3e334f36a69cafa6767ff3fb705c9e1d101e53/types_croniter-6.2.2.20260518-py3-none-any.whl", hash = "sha256:85018c7ce091428d3643be239ad348e27f9a8fb77ca94335cc39ebeb9403b240", size = 9743, upload-time = "2026-05-18T06:03:10.608Z" },
 ]
 
 [[package]]

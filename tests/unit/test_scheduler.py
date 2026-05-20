@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -126,18 +126,20 @@ class TestSleepUntil:
     def test_future_target_sleeps(self) -> None:
         """If the target is in the future, _sleep_until sleeps."""
         slept: list[float] = []
+        now = datetime(2026, 5, 20, 10, 0, 0)
+        target = datetime(2026, 5, 20, 10, 0, 6)  # 6 seconds in the future
         with (
             patch("trimarr.scheduler.time.sleep", side_effect=lambda s: slept.append(s)),
+            patch("trimarr.scheduler.time.monotonic", side_effect=[0.0, 0.0, 0.0, 10.0]),
             patch("trimarr.scheduler.datetime") as mock_dt,
         ):
-            now = datetime(2026, 5, 20, 10, 0, 0)
-            mock_dt.now.side_effect = [
-                now,  # first check: before target
-                now + timedelta(seconds=6),  # second check: at or past target
-            ]
-            _sleep_until(datetime(2026, 5, 20, 10, 0, 6))
+            mock_dt.now.return_value = now
+            _sleep_until(target)
+        # With a 6-second remaining and monotonic=[0,0,0,10]:
+        #   deadline = 0+6 = 6, while(0<6)→True, left = 6-0 = 6, sleep(min(1,6)) = sleep(1)
+        #   while(10<6)→False → 1 tick of 1.0s
         assert len(slept) == 1
-        assert slept[0] <= 6.0
+        assert slept[0] == 1.0
 
 
 class TestFormatDuration:
