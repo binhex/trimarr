@@ -67,8 +67,14 @@ def _run_kwargs(tmp_path: Path, *, dry_run: bool, db_path: str) -> dict:
 class TestDryRunDoesNotRecordToDatabase:
     """Verify that dry_run=True never writes to the processed-files database."""
 
-    def test_dry_run_does_not_mark_processed_when_changes_needed(self, tmp_path: Path) -> None:
-        """When a file needs track removal, dry run must not call mark_processed."""
+    def test_dry_run_marks_processed_when_changes_needed(self, tmp_path: Path) -> None:
+        """When a file needs track removal, dry run must still record the fingerprint.
+
+        Recording the fingerprint avoids re-probing with mkvmerge -J on every
+        run, which would inflate the kernel page cache (visible as Docker
+        container memory).  The file is not actually modified — it is merely
+        recorded so unchanged files can be skipped in future runs.
+        """
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"fake mkv")
         db_path = str(tmp_path / "trimarr.db")
@@ -84,7 +90,7 @@ class TestDryRunDoesNotRecordToDatabase:
             run(**_run_kwargs(tmp_path, dry_run=True, db_path=db_path))
 
         mock_process.assert_not_called()
-        mock_mark.assert_not_called()
+        mock_mark.assert_called_once()
 
     def test_dry_run_colour_log_does_not_crash_with_angle_brackets(self, tmp_path: Path) -> None:
         """logger.opt(colors=True) must not raise ValueError for any dry-run log message.
@@ -116,8 +122,14 @@ class TestDryRunDoesNotRecordToDatabase:
         finally:
             _real_loguru_logger.remove(handler_id)
 
-    def test_dry_run_does_not_mark_processed_when_no_changes_needed(self, tmp_path: Path) -> None:
-        """When a file needs no changes, dry run must not call mark_processed."""
+    def test_dry_run_marks_processed_when_no_changes_needed(self, tmp_path: Path) -> None:
+        """When a file needs no changes, dry run must mark it processed.
+
+        Marking the file as processed in dry-run mode populates the database
+        so subsequent runs can skip it instead of re-probing with mkvmerge -J.
+        This prevents the kernel page cache from ballooning (visible as Docker
+        container memory usage) when a large library is repeatedly probed.
+        """
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"fake mkv")
         db_path = str(tmp_path / "trimarr.db")
@@ -129,7 +141,7 @@ class TestDryRunDoesNotRecordToDatabase:
         ):
             run(**_run_kwargs(tmp_path, dry_run=True, db_path=db_path))
 
-        mock_mark.assert_not_called()
+        mock_mark.assert_called_once()
 
     def test_non_dry_run_marks_processed_when_no_changes_needed(self, tmp_path: Path) -> None:
         """Control: without dry_run, a no-change file IS marked processed."""
@@ -896,6 +908,60 @@ class TestDiscoverMkvFilesNonMkvMixed:
             )
         # Only .mkv files are processed; probe failure from the single .mkv is expected
         assert logger.warning.called or logger.error.called
+
+
+class TestDiscoverMkvFilesMemoryEfficient:
+    """
+    Verify file discovery does not create excessive Path objects for non-MKV files.
+
+    The original implementation used ``sorted(p for p in root.rglob("*") if ...)``
+    which forces CPython to instantiate a Path object for EVERY directory entry
+    (including thousands of non-MKV metadata files like .jpg, .nfo, .srt).  Over
+    many scheduler iterations pymalloc arenas fragment, causing unbounded RSS
+    growth (typically 1 GB+/minute for large media libraries with 500 K+ files).
+
+    The fix replaces ``rglob("*")`` with ``glob("**/*.mkv")`` so the pattern
+    matching happens at the ``os.scandir`` selector level — non-MKV entries are
+    never wrapped in Python Path objects.
+    """
+
+    def test_discovery_avoids_rglob_for_efficiency(self, tmp_path: Path) -> None:
+        """File discovery must use glob pattern-matching, not rglob("*")."""
+        media = tmp_path / "media"
+        media.mkdir()
+        # Create many non-MKV files (simulates .jpg, .nfo, .srt metadata)
+        for i in range(100):
+            (media / f"f{i:03d}.txt").write_text("x")
+            (media / f"f{i:03d}.jpg").write_text("x")
+        (media / "movie.mkv").write_bytes(b"fake")
+        # Also test case-insensitive matching for uppercase variants
+        (media / "MOVIE.MKV").write_bytes(b"fake")
+        (media / "Movie.Mkv").write_bytes(b"fake")
+        (media / "subtitle.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nHello")
+
+        from pathlib import Path
+
+        from trimarr.runner import _discover_mkv_files
+
+        logger = _make_logger()
+
+        # Spy on Path.rglob to detect if it is called
+        original_rglob: object = Path.rglob
+        rglob_called: list[bool] = [False]
+
+        def rglob_spy(self: object, pattern: str) -> object:
+            rglob_called[0] = True
+            return original_rglob(self, pattern)  # type: ignore[operator]
+
+        with patch.object(Path, "rglob", rglob_spy):
+            files = _discover_mkv_files([str(media)], logger)
+
+        assert not rglob_called[0], (
+            "Path.rglob(*) was called \u2014 this iterates ALL directory entries, "
+            "creating Path objects for every non-MKV file. "
+            "Use glob(**/*.mkv) to skip non-MKV entries at the selector level."
+        )
+        assert len(files) == 3, f"Expected 3 MKV files (lower, upper, mixed case), got {len(files)}"
 
 
 class TestRunStripCommentaryWithNoMatchingAudio:

@@ -142,12 +142,19 @@ class Database:
             profile; ``False`` otherwise.
         """
         conn = self._require_connection()
-        current_hash = fingerprint(path)
         row = conn.execute(
             "SELECT file_hash, profile_hash FROM processed_files WHERE file_path = ?",
             (str(path),),
         ).fetchone()
-        return row is not None and row[0] == current_hash and row[1] == profile_hash
+        # Only read the file when it has been processed before — skip the
+        # 64 KB partial hash for files that are not yet in the database.
+        # This prevents the kernel page cache from ballooning to gigabytes
+        # (Docker counts page cache in container memory) when scanning a
+        # large library on the first run where every file is unprocessed.
+        if row is None:
+            return False
+        current_hash = fingerprint(path)
+        return bool(row[0] == current_hash and row[1] == profile_hash)
 
     def mark_processed(self, path: Path, *, profile_hash: str, bytes_saved: int = 0) -> None:
         """Record *path* as processed with its current fingerprint and processing profile.
