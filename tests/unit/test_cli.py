@@ -230,13 +230,13 @@ class TestScheduleOption:
         with patch("trimarr.scheduler.run_scheduled") as mock_sched:
             result = CliRunner().invoke(
                 cli,
-                _base_args(str(tmp_path)) + ["--mkvmerge-path", str(fake_mkvmerge), "--schedule", "6h"],
+                _base_args(str(tmp_path)) + ["--mkvmerge-path", str(fake_mkvmerge), "--schedule", "0 2 * * *"],
             )
 
         assert result.exit_code == 0, result.output
         mock_sched.assert_called_once()
         _, kwargs = mock_sched.call_args
-        assert kwargs["interval_seconds"] == 21600
+        assert kwargs["cron_expr"] == "0 2 * * *"
         assert kwargs["run_on_start"] is False
 
     def test_run_on_start_forwarded_to_run_scheduled(self, tmp_path: Path) -> None:
@@ -247,11 +247,12 @@ class TestScheduleOption:
             result = CliRunner().invoke(
                 cli,
                 _base_args(str(tmp_path))
-                + ["--mkvmerge-path", str(fake_mkvmerge), "--schedule", "1d", "--run-on-start"],
+                + ["--mkvmerge-path", str(fake_mkvmerge), "--schedule", "@daily", "--run-on-start"],
             )
 
         assert result.exit_code == 0, result.output
         _, kwargs = mock_sched.call_args
+        assert kwargs["cron_expr"] == "@daily"
         assert kwargs["run_on_start"] is True
 
     def test_run_on_start_without_schedule_exits_with_error(self, tmp_path: Path) -> None:
@@ -265,7 +266,7 @@ class TestScheduleOption:
 
         result = CliRunner().invoke(
             cli,
-            _base_args(str(tmp_path)) + ["--mkvmerge-path", str(fake_mkvmerge), "--schedule", "0h"],
+            _base_args(str(tmp_path)) + ["--mkvmerge-path", str(fake_mkvmerge), "--schedule", "not-a-cron"],
         )
 
         assert result.exit_code != 0
