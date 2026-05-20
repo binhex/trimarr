@@ -282,6 +282,132 @@ class TestScheduleOption:
 
 
 # ---------------------------------------------------------------------------
+# Pre/post process hooks
+# ---------------------------------------------------------------------------
+
+
+class TestPrePostOptions:
+    """--pre-process, --post-process, and --command-timeout-mins forwarding."""
+
+    def test_pre_process_forwarded(self, tmp_path: Path) -> None:
+        """--pre-process value is forwarded to run()."""
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+
+        with patch("trimarr.runner.run") as mock_run:
+            result = CliRunner().invoke(
+                cli,
+                _base_args(str(tmp_path))
+                + ["--mkvmerge-path", str(fake_mkvmerge), "--pre-process", "echo before {leaf}"],
+            )
+
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_run.call_args
+        assert kwargs["pre_process"] == "echo before {leaf}"
+
+    def test_post_process_forwarded(self, tmp_path: Path) -> None:
+        """--post-process value is forwarded to run()."""
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+
+        with patch("trimarr.runner.run") as mock_run:
+            result = CliRunner().invoke(
+                cli,
+                _base_args(str(tmp_path))
+                + ["--mkvmerge-path", str(fake_mkvmerge), "--post-process", "echo after {leaf}"],
+            )
+
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_run.call_args
+        assert kwargs["post_process"] == "echo after {leaf}"
+
+    def test_both_pre_and_post_forwarded(self, tmp_path: Path) -> None:
+        """Both --pre-process and --post-process are forwarded together."""
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+
+        with patch("trimarr.runner.run") as mock_run:
+            result = CliRunner().invoke(
+                cli,
+                _base_args(str(tmp_path))
+                + [
+                    "--mkvmerge-path",
+                    str(fake_mkvmerge),
+                    "--pre-process",
+                    "echo before {leaf}",
+                    "--post-process",
+                    "echo after {leaf}",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_run.call_args
+        assert kwargs["pre_process"] == "echo before {leaf}"
+        assert kwargs["post_process"] == "echo after {leaf}"
+
+    def test_command_timeout_mins_forwarded(self, tmp_path: Path) -> None:
+        """--command-timeout-mins value is forwarded to run()."""
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+
+        with patch("trimarr.runner.run") as mock_run:
+            result = CliRunner().invoke(
+                cli,
+                _base_args(str(tmp_path)) + ["--mkvmerge-path", str(fake_mkvmerge), "--command-timeout-mins", "10"],
+            )
+
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_run.call_args
+        assert kwargs["command_timeout_mins"] == 10
+
+    def test_command_timeout_zero_allowed(self, tmp_path: Path) -> None:
+        """--command-timeout-mins 0 is accepted (disables timeout)."""
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+
+        with patch("trimarr.runner.run") as mock_run:
+            result = CliRunner().invoke(
+                cli,
+                _base_args(str(tmp_path)) + ["--mkvmerge-path", str(fake_mkvmerge), "--command-timeout-mins", "0"],
+            )
+
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_run.call_args
+        assert kwargs["command_timeout_mins"] == 0
+
+    def test_default_timeout_is_5(self, tmp_path: Path) -> None:
+        """When --command-timeout-mins is omitted, default to 5."""
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+
+        with patch("trimarr.runner.run") as mock_run:
+            result = CliRunner().invoke(
+                cli,
+                _base_args(str(tmp_path)) + ["--mkvmerge-path", str(fake_mkvmerge)],
+            )
+
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_run.call_args
+        assert kwargs["command_timeout_mins"] == 5
+
+    def test_pre_post_default_to_none(self, tmp_path: Path) -> None:
+        """When --pre-process/--post-process are omitted, default to None."""
+        fake_mkvmerge = tmp_path / "mkvmerge"
+        fake_mkvmerge.touch()
+
+        with patch("trimarr.runner.run") as mock_run:
+            result = CliRunner().invoke(
+                cli,
+                _base_args(str(tmp_path)) + ["--mkvmerge-path", str(fake_mkvmerge)],
+            )
+
+        assert result.exit_code == 0, result.output
+        _, kwargs = mock_run.call_args
+        assert kwargs["pre_process"] is None
+        assert kwargs["post_process"] is None
+
+
+# ---------------------------------------------------------------------------
 # Version fallback when package metadata is absent
 # ---------------------------------------------------------------------------
 

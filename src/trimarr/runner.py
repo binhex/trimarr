@@ -9,11 +9,13 @@ import os
 import shutil
 import sqlite3
 import sys
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from trimarr.database import Database
+from trimarr.hooks import _run_hook
 from trimarr.processor import CorruptOutputError, build_mkvmerge_command, probe_file, process_file
 
 # Width of the separator line used in critical diagnostic messages.
@@ -397,6 +399,102 @@ def _process_one_file_guarded(
         counts.failed += 1
 
 
+def _dir_has_work(
+    files_in_dir: list[tuple[Path, Path]],
+    db: Database,
+    profile_hash: str,
+    logger: Logger,
+) -> bool:
+    """Check if any file in *files_in_dir* needs processing (not already processed).
+
+    Returns True at the first file that is not yet processed, or if a
+    filesystem or database error occurs (the error is logged and work is
+    assumed so that pre hooks fire).  Returns False only when every file in
+    *files_in_dir* is confirmed already processed and no errors occurred.
+    """
+    for fp, _ in files_in_dir:
+        try:
+            if not db.is_processed(fp, profile_hash=profile_hash):
+                return True
+        except OSError as exc:
+            logger.error(f"File system error processing '{fp}': {exc}")
+            return True
+        except sqlite3.Error as exc:
+            logger.error(f"Database error processing '{fp}': {exc}")
+            return True
+    return False
+
+
+def _process_directory_groups(
+    dir_groups: OrderedDict[Path, list[tuple[Path, Path]]],
+    database_path: str,
+    profile_hash: str,
+    cfg: _ProcessingConfig,
+    total: int,
+    pre_process: str | None,
+    post_process: str | None,
+    command_timeout_seconds: int | None,
+    logger: Logger,
+) -> tuple[_RunCounts, bool, list[tuple[Path, str]]]:
+    """Process files grouped by directory, firing pre/post hooks around each group.
+
+    Returns (counts, interrupted, failures).
+    """
+    counts = _RunCounts()
+    failures: list[tuple[Path, str]] = []
+    interrupted = False
+
+    try:
+        with Database(database_path) as db:
+            global_idx = 0
+
+            for dir_path, files_in_dir in dir_groups.items():
+                dir_has_work = _dir_has_work(files_in_dir, db, profile_hash, logger)
+
+                leaf = dir_path.name
+
+                if dir_has_work and pre_process is not None and not cfg.dry_run:
+                    _run_hook(
+                        cmd_template=pre_process,
+                        leaf=leaf,
+                        dir_path=str(dir_path),
+                        logger=logger,
+                        timeout_seconds=command_timeout_seconds,
+                    )
+
+                for file_path, root in files_in_dir:
+                    global_idx += 1
+                    _process_one_file_guarded(
+                        file_path=file_path,
+                        root=root,
+                        idx=global_idx,
+                        total=total,
+                        db=db,
+                        profile_hash=profile_hash,
+                        cfg=cfg,
+                        counts=counts,
+                        failures=failures,
+                        logger=logger,
+                    )
+
+                if dir_has_work and post_process is not None and not cfg.dry_run:
+                    _run_hook(
+                        cmd_template=post_process,
+                        leaf=leaf,
+                        dir_path=str(dir_path),
+                        logger=logger,
+                        timeout_seconds=command_timeout_seconds,
+                    )
+
+    except CorruptOutputError as exc:
+        _handle_corrupt_output(exc, counts, logger)
+    except KeyboardInterrupt:
+        interrupted = True
+        logger.warning("Interrupted — showing partial results.")
+
+    return counts, interrupted, failures
+
+
 def run(
     language: list[str],
     edit_metadata_title: bool,
@@ -412,6 +510,9 @@ def run(
     strip_lower_channels: bool = False,
     strip_commentary: bool = False,
     skip_size_check: bool = False,
+    pre_process: str | None = None,
+    post_process: str | None = None,
+    command_timeout_mins: int = 5,
 ) -> None:
     """Scan *media_path* directories and process every MKV file found.
 
@@ -456,33 +557,25 @@ def run(
         no_backup=no_backup,
     )
 
+    command_timeout_seconds: int | None = command_timeout_mins * 60 if command_timeout_mins > 0 else None
+
     total = len(unique_files)
-    counts = _RunCounts()
-    interrupted = False
-    failures: list[tuple[Path, str]] = []
+    # Group files by their parent directory for hook support
+    dir_groups: OrderedDict[Path, list[tuple[Path, Path]]] = OrderedDict()
+    for file_path, root in unique_files:
+        dir_groups.setdefault(file_path.parent, []).append((file_path, root))
 
-    try:
-        with Database(database_path) as db:
-            for idx, (file_path, root) in enumerate(unique_files, 1):
-                _process_one_file_guarded(
-                    file_path=file_path,
-                    root=root,
-                    idx=idx,
-                    total=total,
-                    db=db,
-                    profile_hash=profile_hash,
-                    cfg=cfg,
-                    counts=counts,
-                    failures=failures,
-                    logger=logger,
-                )
-
-    except CorruptOutputError as exc:
-        _handle_corrupt_output(exc, counts, logger)
-
-    except KeyboardInterrupt:
-        interrupted = True
-        logger.warning("Interrupted — showing partial results.")
+    counts, interrupted, failures = _process_directory_groups(
+        dir_groups=dir_groups,
+        database_path=database_path,
+        profile_hash=profile_hash,
+        cfg=cfg,
+        total=total,
+        pre_process=pre_process,
+        post_process=post_process,
+        command_timeout_seconds=command_timeout_seconds,
+        logger=logger,
+    )
 
     _print_summary(counts, dry_run, interrupted, database_path, logger)
     _print_failure_report(failures, logger)

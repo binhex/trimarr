@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import contextlib
+import sqlite3
 from typing import TYPE_CHECKING
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
+from click.testing import CliRunner
 from loguru import logger as _real_loguru_logger
 
+from trimarr.cli import cli
 from trimarr.processor import MkvTrack
 from trimarr.runner import _fmt_bytes, run
 
@@ -914,3 +917,214 @@ class TestRunStripCommentaryWithNoMatchingAudio:
             )
         # probe failure must be reported
         assert logger.warning.called or logger.error.called
+
+
+# ---------------------------------------------------------------------------
+# Pre/post process hooks integration
+# ---------------------------------------------------------------------------
+
+
+class TestPrePostHooksIntegration:
+    """Hooks fire per-directory around files that need processing."""
+
+    def test_pre_and_post_fire_for_directory_with_work(self, tmp_path: Path) -> None:
+        """When files in a directory need processing, pre and post hooks fire."""
+        media_dir = tmp_path / "media" / "Movie (2024)"
+        media_dir.mkdir(parents=True)
+        mkv = media_dir / "movie.mkv"
+        mkv.write_bytes(b"fake mkv content")
+
+        hook_log: list[str] = []
+
+        def fake_run_hook(
+            cmd_template: str,
+            leaf: str,
+            dir_path: str,
+            logger: object,
+            timeout_seconds: int | None = 300,
+        ) -> None:
+            hook_log.append(f"{cmd_template} | leaf={leaf} dir={dir_path}")
+
+        with (
+            patch("trimarr.runner._run_hook", side_effect=fake_run_hook),
+            patch("trimarr.runner.probe_file") as mock_probe,
+            patch("trimarr.runner.build_mkvmerge_command", return_value=None),
+            patch("trimarr.cli._resolve_mkvmerge_path", return_value="/fake/mkvmerge"),
+        ):
+            mock_probe.return_value = []
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "--language",
+                    "eng",
+                    "--media-path",
+                    str(tmp_path / "media"),
+                    "--pre-process",
+                    "unlock {leaf}",
+                    "--post-process",
+                    "lock {leaf}",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert len(hook_log) == 2, f"Expected 2 hook calls, got {len(hook_log)}: {hook_log}"
+        assert "unlock" in hook_log[0]
+        assert "Movie (2024)" in hook_log[0]
+        assert "lock" in hook_log[1]
+        assert "Movie (2024)" in hook_log[1]
+
+    def test_no_hooks_when_directory_has_no_work(self, tmp_path: Path) -> None:
+        """When all files are already processed, no hooks fire."""
+        media_dir = tmp_path / "media" / "Movie (2024)"
+        media_dir.mkdir(parents=True)
+        mkv = media_dir / "movie.mkv"
+        mkv.write_bytes(b"fake mkv content")
+
+        hook_log: list[str] = []
+
+        def fake_run_hook(**kwargs: object) -> None:
+            hook_log.append("fired")
+
+        with (
+            patch("trimarr.runner._run_hook", side_effect=fake_run_hook),
+            patch("trimarr.cli._resolve_mkvmerge_path", return_value="/fake/mkvmerge"),
+            patch("trimarr.database.Database.is_processed", return_value=True),
+        ):
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "--language",
+                    "eng",
+                    "--media-path",
+                    str(tmp_path / "media"),
+                    "--pre-process",
+                    "unlock {leaf}",
+                    "--post-process",
+                    "lock {leaf}",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert len(hook_log) == 0, f"Expected 0 hooks, got {len(hook_log)}"
+
+    def test_pre_only_works_without_post(self, tmp_path: Path) -> None:
+        """--pre-process can be used without --post-process."""
+        media_dir = tmp_path / "media" / "Movie (2024)"
+        media_dir.mkdir(parents=True)
+        mkv = media_dir / "movie.mkv"
+        mkv.write_bytes(b"fake mkv content")
+
+        hook_log: list[str] = []
+
+        def fake_run_hook(**kwargs: object) -> None:
+            hook_log.append("fired")
+
+        with (
+            patch("trimarr.runner._run_hook", side_effect=fake_run_hook),
+            patch("trimarr.runner.probe_file") as mock_probe,
+            patch("trimarr.runner.build_mkvmerge_command", return_value=None),
+            patch("trimarr.cli._resolve_mkvmerge_path", return_value="/fake/mkvmerge"),
+        ):
+            mock_probe.return_value = []
+            result = CliRunner().invoke(
+                cli,
+                ["--language", "eng", "--media-path", str(tmp_path / "media"), "--pre-process", "unlock {leaf}"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert len(hook_log) == 1
+
+    def test_post_only_works_without_pre(self, tmp_path: Path) -> None:
+        """--post-process can be used without --pre-process."""
+        media_dir = tmp_path / "media" / "Movie (2024)"
+        media_dir.mkdir(parents=True)
+        mkv = media_dir / "movie.mkv"
+        mkv.write_bytes(b"fake mkv content")
+
+        hook_log: list[str] = []
+
+        def fake_run_hook(**kwargs: object) -> None:
+            hook_log.append("fired")
+
+        with (
+            patch("trimarr.runner._run_hook", side_effect=fake_run_hook),
+            patch("trimarr.runner.probe_file") as mock_probe,
+            patch("trimarr.runner.build_mkvmerge_command", return_value=None),
+            patch("trimarr.cli._resolve_mkvmerge_path", return_value="/fake/mkvmerge"),
+        ):
+            mock_probe.return_value = []
+            result = CliRunner().invoke(
+                cli,
+                ["--language", "eng", "--media-path", str(tmp_path / "media"), "--post-process", "lock {leaf}"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert len(hook_log) == 1
+
+    def test_dir_oserror_still_fires_hooks(self, tmp_path: Path) -> None:
+        """If db.is_processed raises OSError, hooks still fire (assume work)."""
+        media_dir = tmp_path / "media" / "Movie (2024)"
+        media_dir.mkdir(parents=True)
+        mkv = media_dir / "movie.mkv"
+        mkv.write_bytes(b"fake mkv content")
+
+        hook_log: list[str] = []
+
+        def fake_run_hook(**kwargs: object) -> None:
+            hook_log.append("fired")
+
+        with (
+            patch("trimarr.runner._run_hook", side_effect=fake_run_hook),
+            patch("trimarr.cli._resolve_mkvmerge_path", return_value="/fake/mkvmerge"),
+            patch("trimarr.database.Database.is_processed", side_effect=OSError("disk error")),
+        ):
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "--language",
+                    "eng",
+                    "--media-path",
+                    str(tmp_path / "media"),
+                    "--pre-process",
+                    "unlock {leaf}",
+                    "--post-process",
+                    "lock {leaf}",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert len(hook_log) == 2, f"Expected 2 hooks, got {len(hook_log)}"
+
+    def test_dir_sqlite_error_still_fires_hooks(self, tmp_path: Path) -> None:
+        """If db.is_processed raises sqlite3.Error, hooks still fire (assume work)."""
+        media_dir = tmp_path / "media" / "Movie (2024)"
+        media_dir.mkdir(parents=True)
+        mkv = media_dir / "movie.mkv"
+        mkv.write_bytes(b"fake mkv content")
+
+        hook_log: list[str] = []
+
+        def fake_run_hook(**kwargs: object) -> None:
+            hook_log.append("fired")
+
+        with (
+            patch("trimarr.runner._run_hook", side_effect=fake_run_hook),
+            patch("trimarr.cli._resolve_mkvmerge_path", return_value="/fake/mkvmerge"),
+            patch("trimarr.database.Database.is_processed", side_effect=sqlite3.Error("db error")),
+        ):
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "--language",
+                    "eng",
+                    "--media-path",
+                    str(tmp_path / "media"),
+                    "--pre-process",
+                    "unlock {leaf}",
+                    "--post-process",
+                    "lock {leaf}",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert len(hook_log) == 2, f"Expected 2 hooks, got {len(hook_log)}"

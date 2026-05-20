@@ -50,7 +50,8 @@ def _get_next_fire(cron_expr: str, base: datetime | None = None) -> datetime:
         The next matching :class:`datetime`.
     """
     cron = croniter(cron_expr, base or datetime.now())
-    return cron.get_next(datetime)
+    next_dt: datetime = cron.get_next(datetime)
+    return next_dt
 
 
 def _sleep_until(target: datetime) -> None:
@@ -89,6 +90,14 @@ def _format_duration(seconds: float) -> str:
     return " ".join(parts) if parts else "0s"
 
 
+def _safe_format_datetime(dt: datetime) -> str:
+    """Format a datetime for display, returning empty string on error."""
+    try:
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except (OverflowError, ValueError):
+        return ""
+
+
 def run_scheduled(
     run_fn: Callable[[], None],
     cron_expr: str,
@@ -109,12 +118,13 @@ def run_scheduled(
     try:
         if not run_on_start:
             next_run = _get_next_fire(cron_expr)
-            try:
-                first_run_str = f" First run at {next_run.strftime('%Y-%m-%d %H:%M:%S')}"
-            except OverflowError:
-                first_run_str = ""
+            formatted = _safe_format_datetime(next_run)
             wait_seconds = max(0.0, (next_run - datetime.now()).total_seconds())
-            logger.info(f"Scheduler started.{first_run_str} (in {_format_duration(wait_seconds)}).")
+            if formatted:
+                first_run_str = f" First run at {formatted} (in {_format_duration(wait_seconds)})."
+            else:
+                first_run_str = f" First run in {_format_duration(wait_seconds)}."
+            logger.info(f"Scheduler started.{first_run_str}")
             _sleep_until(next_run)
 
         while True:
@@ -144,12 +154,12 @@ def run_scheduled(
                     f" to the next cron fire. One or more firings were skipped."
                 )
 
-            try:
-                next_run_str = (
-                    f"Next run at {next_run.strftime('%Y-%m-%d %H:%M:%S')} (in {_format_duration(wait_seconds)})."
-                )
-            except OverflowError:
-                next_run_str = f"Next run in {_format_duration(wait_seconds)}."
+            formatted = _safe_format_datetime(next_run)
+            next_run_str = (
+                f"Next run at {formatted} (in {_format_duration(wait_seconds)})."
+                if formatted
+                else f"Next run in {_format_duration(wait_seconds)}."
+            )
             logger.info(next_run_str)
 
             _sleep_until(next_run)
