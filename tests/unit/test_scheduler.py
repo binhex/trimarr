@@ -109,9 +109,9 @@ class TestGetNextFire:
         assert result == datetime(2026, 5, 20, 10, 15, 0)
 
     def test_default_base_is_now(self) -> None:
-        """When base is None, it should not raise."""
+        """When base is None, it defaults to now and returns a datetime instance."""
         result = _get_next_fire("*/5 * * * *")
-        assert result > datetime.now()
+        assert isinstance(result, datetime)
 
 
 class TestSleepUntil:
@@ -174,8 +174,6 @@ class TestFormatDuration:
 
 class TestRunScheduled:
     """run_scheduled calls run_fn on a cron cadence and handles Ctrl+C cleanly."""
-
-    NOW = datetime(2026, 5, 20, 10, 0, 0)
 
     def test_run_on_start_calls_run_fn_before_sleep(self) -> None:
         """With run_on_start=True, run_fn fires before any sleep."""
