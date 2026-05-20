@@ -418,6 +418,41 @@ Examples:
         " Cannot be used without --schedule."
     ),
 )
+@click.option(
+    "--pre-process",
+    type=click.STRING,
+    required=False,
+    default=None,
+    metavar="<command>",
+    help=(
+        "Shell command to run before processing files in a directory."
+        " Use {leaf} for the directory basename and {dir} for the full"
+        " directory path."
+        " Example: --pre-process 'no_ransom.sh --unlock yes {leaf}'"
+    ),
+)
+@click.option(
+    "--post-process",
+    type=click.STRING,
+    required=False,
+    default=None,
+    metavar="<command>",
+    help=(
+        "Shell command to run after processing files in a directory."
+        " Use {leaf} for the directory basename and {dir} for the full"
+        " directory path."
+        " Example: --post-process 'no_ransom.sh --unlock no {leaf}'"
+    ),
+)
+@click.option(
+    "--command-timeout-mins",
+    type=click.IntRange(min=0),
+    required=False,
+    default=5,
+    metavar="<minutes>",
+    show_default=True,
+    help=("Timeout in minutes for each pre/post process command. Set to 0 to disable timeout entirely."),
+)
 @click.version_option(version=_VERSION, prog_name="Trimarr")
 def cli(
     language: str,
@@ -438,6 +473,9 @@ def cli(
     skip_size_check: bool,
     schedule: str | None,
     run_on_start: bool,
+    pre_process: str | None,
+    post_process: str | None,
+    command_timeout_mins: int,
 ) -> None:
     """Trimarr - Removes (trims) unwanted audio and subtitles from matroska container format video files.
 
@@ -477,6 +515,9 @@ def cli(
             strip_lower_channels=strip_lower_channels,
             strip_commentary=strip_commentary,
             skip_size_check=skip_size_check,
+            pre_process=pre_process,
+            post_process=post_process,
+            command_timeout_mins=command_timeout_mins,
         )
 
     if schedule is not None:
