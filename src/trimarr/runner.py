@@ -424,6 +424,77 @@ def _dir_has_work(
     return False
 
 
+def _process_directory_groups(
+    dir_groups: OrderedDict[Path, list[tuple[Path, Path]]],
+    database_path: str,
+    profile_hash: str,
+    cfg: _ProcessingConfig,
+    total: int,
+    pre_process: str | None,
+    post_process: str | None,
+    command_timeout_seconds: int | None,
+    logger: Logger,
+) -> tuple[_RunCounts, bool, list[tuple[Path, str]]]:
+    """Process files grouped by directory, firing pre/post hooks around each group.
+
+    Returns (counts, interrupted, failures).
+    """
+    counts = _RunCounts()
+    failures: list[tuple[Path, str]] = []
+    interrupted = False
+
+    try:
+        with Database(database_path) as db:
+            global_idx = 0
+
+            for dir_path, files_in_dir in dir_groups.items():
+                dir_has_work = _dir_has_work(files_in_dir, db, profile_hash, logger)
+
+                if dir_has_work:
+                    leaf = dir_path.name
+
+                    if pre_process is not None:
+                        _run_hook(
+                            cmd_template=pre_process,
+                            leaf=leaf,
+                            dir_path=str(dir_path),
+                            logger=logger,
+                            timeout_seconds=command_timeout_seconds,
+                        )
+
+                for file_path, root in files_in_dir:
+                    global_idx += 1
+                    _process_one_file_guarded(
+                        file_path=file_path,
+                        root=root,
+                        idx=global_idx,
+                        total=total,
+                        db=db,
+                        profile_hash=profile_hash,
+                        cfg=cfg,
+                        counts=counts,
+                        failures=failures,
+                        logger=logger,
+                    )
+
+                if dir_has_work and post_process is not None:
+                    _run_hook(
+                        cmd_template=post_process,
+                        leaf=leaf,
+                        dir_path=str(dir_path),
+                        logger=logger,
+                        timeout_seconds=command_timeout_seconds,
+                    )
+
+    except CorruptOutputError as exc:
+        _handle_corrupt_output(exc, counts, logger)
+    except KeyboardInterrupt:
+        interrupted = True
+        logger.warning("Interrupted — showing partial results.")
+
+    return counts, interrupted, failures
+
+
 def run(
     language: list[str],
     edit_metadata_title: bool,
@@ -489,63 +560,22 @@ def run(
     command_timeout_seconds: int | None = command_timeout_mins * 60 if command_timeout_mins > 0 else None
 
     total = len(unique_files)
-    counts = _RunCounts()
-    interrupted = False
-    failures: list[tuple[Path, str]] = []
-
     # Group files by their parent directory for hook support
     dir_groups: OrderedDict[Path, list[tuple[Path, Path]]] = OrderedDict()
     for file_path, root in unique_files:
         dir_groups.setdefault(file_path.parent, []).append((file_path, root))
 
-    try:
-        with Database(database_path) as db:
-            global_idx = 0
-
-            for dir_path, files_in_dir in dir_groups.items():
-                dir_has_work = _dir_has_work(files_in_dir, db, profile_hash, logger)
-                if dir_has_work:
-                    leaf = dir_path.name
-
-                    if pre_process is not None:
-                        _run_hook(
-                            cmd_template=pre_process,
-                            leaf=leaf,
-                            dir_path=str(dir_path),
-                            logger=logger,
-                            timeout_seconds=command_timeout_seconds,
-                        )
-
-                for file_path, root in files_in_dir:
-                    global_idx += 1
-                    _process_one_file_guarded(
-                        file_path=file_path,
-                        root=root,
-                        idx=global_idx,
-                        total=total,
-                        db=db,
-                        profile_hash=profile_hash,
-                        cfg=cfg,
-                        counts=counts,
-                        failures=failures,
-                        logger=logger,
-                    )
-
-                if dir_has_work and post_process is not None:
-                    _run_hook(
-                        cmd_template=post_process,
-                        leaf=leaf,
-                        dir_path=str(dir_path),
-                        logger=logger,
-                        timeout_seconds=command_timeout_seconds,
-                    )
-
-    except CorruptOutputError as exc:
-        _handle_corrupt_output(exc, counts, logger)
-
-    except KeyboardInterrupt:
-        interrupted = True
-        logger.warning("Interrupted — showing partial results.")
+    counts, interrupted, failures = _process_directory_groups(
+        dir_groups=dir_groups,
+        database_path=database_path,
+        profile_hash=profile_hash,
+        cfg=cfg,
+        total=total,
+        pre_process=pre_process,
+        post_process=post_process,
+        command_timeout_seconds=command_timeout_seconds,
+        logger=logger,
+    )
 
     _print_summary(counts, dry_run, interrupted, database_path, logger)
     _print_failure_report(failures, logger)
