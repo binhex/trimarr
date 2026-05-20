@@ -9,11 +9,13 @@ import os
 import shutil
 import sqlite3
 import sys
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from trimarr.database import Database
+from trimarr.hooks import _run_hook
 from trimarr.processor import CorruptOutputError, build_mkvmerge_command, probe_file, process_file
 
 # Width of the separator line used in critical diagnostic messages.
@@ -412,6 +414,9 @@ def run(
     strip_lower_channels: bool = False,
     strip_commentary: bool = False,
     skip_size_check: bool = False,
+    pre_process: str | None = None,
+    post_process: str | None = None,
+    command_timeout_mins: int = 5,
 ) -> None:
     """Scan *media_path* directories and process every MKV file found.
 
@@ -456,26 +461,73 @@ def run(
         no_backup=no_backup,
     )
 
+    command_timeout_seconds: int | None = command_timeout_mins * 60 if command_timeout_mins > 0 else None
+
     total = len(unique_files)
     counts = _RunCounts()
     interrupted = False
     failures: list[tuple[Path, str]] = []
 
+    # Group files by their parent directory for hook support
+    dir_groups: OrderedDict[Path, list[tuple[Path, Path]]] = OrderedDict()
+    for file_path, root in unique_files:
+        dir_groups.setdefault(file_path.parent, []).append((file_path, root))
+
     try:
         with Database(database_path) as db:
-            for idx, (file_path, root) in enumerate(unique_files, 1):
-                _process_one_file_guarded(
-                    file_path=file_path,
-                    root=root,
-                    idx=idx,
-                    total=total,
-                    db=db,
-                    profile_hash=profile_hash,
-                    cfg=cfg,
-                    counts=counts,
-                    failures=failures,
-                    logger=logger,
-                )
+            global_idx = 0
+
+            for dir_path, files_in_dir in dir_groups.items():
+                # Determine if this directory has any work to do
+                dir_has_work = False
+                for fp, _ in files_in_dir:
+                    try:
+                        needs_work = not db.is_processed(fp, profile_hash=profile_hash)
+                    except OSError as exc:
+                        logger.error(f"File system error processing '{fp}': {exc}")
+                        needs_work = True
+                    except sqlite3.Error as exc:
+                        logger.error(f"Database error processing '{fp}': {exc}")
+                        needs_work = True
+                    if needs_work:
+                        dir_has_work = True
+                        break
+
+                if dir_has_work:
+                    leaf = dir_path.name
+
+                    if pre_process is not None:
+                        _run_hook(
+                            cmd_template=pre_process,
+                            leaf=leaf,
+                            dir_path=str(dir_path),
+                            logger=logger,
+                            timeout_seconds=command_timeout_seconds,
+                        )
+
+                for file_path, root in files_in_dir:
+                    global_idx += 1
+                    _process_one_file_guarded(
+                        file_path=file_path,
+                        root=root,
+                        idx=global_idx,
+                        total=total,
+                        db=db,
+                        profile_hash=profile_hash,
+                        cfg=cfg,
+                        counts=counts,
+                        failures=failures,
+                        logger=logger,
+                    )
+
+                if dir_has_work and post_process is not None:
+                    _run_hook(
+                        cmd_template=post_process,
+                        leaf=leaf,
+                        dir_path=str(dir_path),
+                        logger=logger,
+                        timeout_seconds=command_timeout_seconds,
+                    )
 
     except CorruptOutputError as exc:
         _handle_corrupt_output(exc, counts, logger)
