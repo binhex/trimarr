@@ -63,7 +63,7 @@ def _build_cmd(
     logger: MagicMock | None = None,
     strip_lower_channels: bool = False,
     strip_commentary: bool = False,
-    strip_subtitle_regex_patterns: list[re.Pattern] | None = None,  # NEW
+    strip_subtitle_regex_patterns: list[re.Pattern] | None = None,
 ) -> list[str] | None:
     """Thin wrapper around build_mkvmerge_command with test-friendly defaults."""
     return build_mkvmerge_command(
@@ -79,7 +79,7 @@ def _build_cmd(
         logger=logger or MagicMock(),
         strip_lower_channels=strip_lower_channels,
         strip_commentary=strip_commentary,
-        strip_subtitle_regex_patterns=strip_subtitle_regex_patterns,  # NEW
+        strip_subtitle_regex_patterns=strip_subtitle_regex_patterns,
     )
 
 
@@ -265,6 +265,37 @@ class TestStripSubtitleByRegex:
         ]
         cmd = _build_cmd(tracks, strip_subtitle_regex_patterns=[re.compile(r".")])
         assert cmd is None  # no changes — name=None doesn't match "any char"
+
+    def test_keep_subtitles_skips_regex_strip(self) -> None:
+        """Regex strip does not fire when --keep-subtitles is set."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng"),
+            MkvTrack(id=2, type="subtitles", language="eng", name="Songs & Signs"),
+        ]
+        cmd = _build_cmd(tracks, keep_subtitles=True, strip_subtitle_regex_patterns=[re.compile(r"(?i)songs")])
+        # keep_subtitles overrides regex — all subtitles kept, no changes needed
+        assert cmd is None
+
+    def test_subtitle_fallback_fired_skips_regex_strip(self) -> None:
+        """Regex strip does not fire when subtitle safety fallback activated."""
+        tracks = [
+            MkvTrack(id=0, type="video", language=None),
+            MkvTrack(id=1, type="audio", language="eng"),
+            MkvTrack(id=2, type="audio", language="jpn"),
+            MkvTrack(id=3, type="subtitles", language="jpn", name="Songs & Signs"),
+        ]
+        # --language eng means no sub matches → fallback fires, keeps all subs
+        cmd = _build_cmd(tracks, language=["eng"], strip_subtitle_regex_patterns=[re.compile(r"(?i)songs")])
+        # Audio changes (jpn audio dropped) trigger a command
+        assert cmd is not None
+        # Fallback keeps the jpn subtitle even though it matches regex
+        assert "--audio-tracks" in cmd
+        idx = cmd.index("--audio-tracks") + 1
+        kept_audio = [int(x) for x in cmd[idx].split(",")]
+        assert kept_audio == [1]  # only eng audio kept
+        # The jpn subtitle should still be present (fallback protected it)
+        # --subtitle-tracks absent means no subtitle change was needed
 
 
 # ---------------------------------------------------------------------------

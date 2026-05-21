@@ -556,6 +556,7 @@ def _apply_strip_subtitle_regex(
     result: _FilterResult,
     tracks: list[MkvTrack],
     patterns: list[re.Pattern],
+    keep_subtitles: bool = False,
 ) -> None:
     """Phase 4b — drop subtitle tracks whose name matches any user-supplied regex.
 
@@ -564,7 +565,7 @@ def _apply_strip_subtitle_regex(
     field.  Matched tracks are moved from ``sub_keep`` to ``sub_drop``.
     There is no safety guard — if all subtitles match, all are dropped.
     """
-    if not patterns:
+    if not patterns or keep_subtitles or result.sub_fallback_fired:
         return
 
     keep_set = set(result.sub_keep)
@@ -888,7 +889,7 @@ def build_mkvmerge_command(
     _apply_audio_fallbacks(result, tracks, language, logger, input_path)
     _apply_subtitle_fallback(result, language, logger, input_path)
     _apply_strip_commentary(result, tracks, keep_audio, keep_subtitles, logger, input_path, strip_commentary)
-    _apply_strip_subtitle_regex(result, tracks, strip_subtitle_regex_patterns or [])
+    _apply_strip_subtitle_regex(result, tracks, strip_subtitle_regex_patterns or [], keep_subtitles=keep_subtitles)
     _apply_strip_lower_channels(result, tracks, keep_audio, strip_lower_channels, logger)
 
     needs_audio_change = bool(result.audio_drop)
