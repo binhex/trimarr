@@ -89,6 +89,10 @@ disallow_untyped_defs = false
 module = "croniter"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["requests","tests.unit.test_utils"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 minversion = "7.0"
