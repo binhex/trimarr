@@ -146,24 +146,55 @@ class TestGetInstalledMkvmergeTag:
 
 
 class TestGetLatestMkvmergeTag:
-    """Tests for get_latest_mkvmerge_tag()."""
+    """Tests for get_latest_mkvmerge_tag() — redirect-based, no API."""
 
-    def test_returns_tag_from_api_response(self) -> None:
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"tag_name": "v58.0.0-mingw-w64-posixv1.8el9", "assets": []}
-        with patch("trimarr.downloader.requests.get", return_value=mock_response):
-            assert get_latest_mkvmerge_tag() == "v58.0.0-mingw-w64-posixv1.8el9"
+    def _mock_redirect_response(self, location: str) -> MagicMock:
+        """Return a mock ``requests.get`` response with a 302 redirect."""
+        mock = MagicMock()
+        mock.status_code = 302
+        mock.headers = {"Location": location}
+        mock.raise_for_status.return_value = None
+        return mock
 
-    def test_raises_on_missing_tag_name(self) -> None:
+    def test_returns_tag_from_redirect(self) -> None:
+        """Tag is extracted from the 302 Location header — no API call."""
+        mock_response = self._mock_redirect_response(
+            "/Jesseatgao/MKVToolNix-static-builds/releases/tag/v58.0.0-mingw-w64-posixv1.8el9"
+        )
+        with patch("trimarr.downloader.requests.get", return_value=mock_response) as mock_get:
+            tag = get_latest_mkvmerge_tag()
+
+        assert tag == "v58.0.0-mingw-w64-posixv1.8el9"
+        # Verify we hit the WEB URL, not the API
+        called_url = mock_get.call_args[0][0]
+        assert "api.github.com" not in called_url
+        assert "github.com" in called_url
+        assert "releases/latest" in called_url
+
+    def test_raises_on_missing_location_header(self) -> None:
+        """A 302 without a Location header raises RuntimeError."""
         mock_response = MagicMock()
-        mock_response.json.return_value = {"assets": []}
+        mock_response.status_code = 302
+        mock_response.headers = {}
         with (
             patch("trimarr.downloader.requests.get", return_value=mock_response),
-            pytest.raises(RuntimeError, match="Could not determine latest mkvmerge release tag"),
+            pytest.raises(RuntimeError, match="Could not determine latest release tag"),
+        ):
+            get_latest_mkvmerge_tag()
+
+    def test_raises_on_non_3xx_status(self) -> None:
+        """A non-3xx response (e.g. 200) raises RuntimeError."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status.return_value = None
+        with (
+            patch("trimarr.downloader.requests.get", return_value=mock_response),
+            pytest.raises(RuntimeError, match="Expected a 3xx redirect"),
         ):
             get_latest_mkvmerge_tag()
 
     def test_raises_on_http_error(self) -> None:
+        """HTTP errors are propagated."""
         mock_response = MagicMock()
         mock_response.raise_for_status.side_effect = req.HTTPError("404")
         with patch("trimarr.downloader.requests.get", return_value=mock_response), pytest.raises(req.HTTPError):
@@ -288,47 +319,49 @@ class TestExtractFromZip:
 
 
 class TestGetLatestReleaseInfo:
-    """Tests for _get_latest_release_info() URL trust enforcement."""
+    """Tests for _get_latest_release_info() — redirect-based, no API."""
 
-    def _release(self, url: str) -> dict:
-        return {"tag_name": "v1.0", "assets": [{"name": "asset.tar.xz", "browser_download_url": url}]}
+    def _mock_head_ok(self) -> MagicMock:
+        """Return a mock HEAD response with a binary Content-Type."""
+        mock = MagicMock()
+        mock.status_code = 200
+        mock.headers = {"Content-Type": "application/octet-stream"}
+        return mock
 
-    def test_accepts_github_https_url(self) -> None:
-        release = self._release("https://github.com/owner/repo/releases/download/v1.0/asset.tar.xz")
-        with patch("trimarr.downloader._fetch_latest_release", return_value=release):
+    def test_returns_github_download_url(self) -> None:
+        """Constructs download URL from the /latest/download/ pattern."""
+        head_mock = self._mock_head_ok()
+        with (
+            patch("trimarr.downloader._get_latest_release_tag", return_value="v1.0"),
+            patch("trimarr.downloader.requests.head", return_value=head_mock),
+        ):
             url, tag = _get_latest_release_info("owner/repo", "asset.tar.xz")
-        assert url.startswith("https://github.com")
+        assert url == "https://github.com/owner/repo/releases/latest/download/asset.tar.xz"
         assert tag == "v1.0"
 
-    def test_accepts_objects_githubusercontent_url(self) -> None:
-        release = self._release("https://objects.githubusercontent.com/releases/asset.tar.xz")
-        with patch("trimarr.downloader._fetch_latest_release", return_value=release):
-            url, tag = _get_latest_release_info("owner/repo", "asset.tar.xz")
-        assert "githubusercontent.com" in url
-
-    def test_rejects_http_url(self) -> None:
-        release = self._release("http://github.com/owner/repo/releases/asset.tar.xz")
+    def test_all_download_urls_are_trusted(self) -> None:
+        """Constructed URLs always use github.com HTTPS."""
+        head_mock = self._mock_head_ok()
         with (
-            patch("trimarr.downloader._fetch_latest_release", return_value=release),
-            pytest.raises(RuntimeError, match="trusted GitHub domain"),
+            patch("trimarr.downloader._get_latest_release_tag", return_value="v2.0"),
+            patch("trimarr.downloader.requests.head", return_value=head_mock),
         ):
-            _get_latest_release_info("owner/repo", "asset.tar.xz")
+            url, _tag = _get_latest_release_info("some/repo", "binary.zip")
+        assert url.startswith("https://github.com/")
+        assert "some/repo" in url
+        assert "releases/latest/download/binary.zip" in url
 
-    def test_rejects_non_github_https_url(self) -> None:
-        release = self._release("https://evil.com/mkvmerge.tar.xz")
+    def test_raises_on_html_content_type(self) -> None:
+        """A HEAD response with text/html Content-Type raises RuntimeError."""
+        head_mock = MagicMock()
+        head_mock.status_code = 200
+        head_mock.headers = {"Content-Type": "text/html; charset=utf-8"}
         with (
-            patch("trimarr.downloader._fetch_latest_release", return_value=release),
-            pytest.raises(RuntimeError, match="trusted GitHub domain"),
+            patch("trimarr.downloader._get_latest_release_tag", return_value="v1.0"),
+            patch("trimarr.downloader.requests.head", return_value=head_mock),
+            pytest.raises(RuntimeError, match="not found in the latest release"),
         ):
-            _get_latest_release_info("owner/repo", "asset.tar.xz")
-
-    def test_raises_when_asset_not_found(self) -> None:
-        release = {"tag_name": "v1.0", "assets": []}
-        with (
-            patch("trimarr.downloader._fetch_latest_release", return_value=release),
-            pytest.raises(RuntimeError, match="Asset 'asset.tar.xz' not found"),
-        ):
-            _get_latest_release_info("owner/repo", "asset.tar.xz")
+            _get_latest_release_info("owner/repo", "missing-asset.tar.xz")
 
 
 # ---------------------------------------------------------------------------
@@ -567,24 +600,20 @@ class TestExtractFromZipSecurity:
 
 
 class TestGetLatestReleaseInfoMultiAsset:
-    """When multiple assets exist, the loop skips non-matching ones."""
+    """The redirect-based approach constructs URLs directly (no asset iteration)."""
 
-    def _release_multi(self, asset_url: str) -> dict:
-        return {
-            "tag_name": "v2.0",
-            "assets": [
-                {"name": "other-asset.zip", "browser_download_url": "https://github.com/other"},
-                {"name": "asset.tar.xz", "browser_download_url": asset_url},
-            ],
-        }
-
-    def test_skips_non_matching_asset_and_finds_correct_one(self) -> None:
-        """When the first asset name does not match, the loop continues to find the right one."""
-        release = self._release_multi("https://github.com/owner/repo/releases/download/v2.0/asset.tar.xz")
-        with patch("trimarr.downloader._fetch_latest_release", return_value=release):
-            url, tag = _get_latest_release_info("owner/repo", "asset.tar.xz")
-        assert tag == "v2.0"
-        assert url.startswith("https://github.com")
+    def test_constructs_url_for_requested_asset(self) -> None:
+        """The download URL includes the exact asset name requested."""
+        head_mock = MagicMock()
+        head_mock.status_code = 200
+        head_mock.headers = {"Content-Type": "application/octet-stream"}
+        with (
+            patch("trimarr.downloader._get_latest_release_tag", return_value="v3.0"),
+            patch("trimarr.downloader.requests.head", return_value=head_mock),
+        ):
+            url, tag = _get_latest_release_info("owner/repo", "my-binary.tar.xz")
+        assert tag == "v3.0"
+        assert url == "https://github.com/owner/repo/releases/latest/download/my-binary.tar.xz"
 
 
 # ---------------------------------------------------------------------------

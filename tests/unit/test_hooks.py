@@ -23,13 +23,12 @@ class TestRunHook:
                 logger=logger,
             )
 
-        mock_run.assert_called_once_with(
-            "echo file.mkv /some/dir",
-            shell=True,
-            timeout=300,
-            capture_output=True,
-            text=True,
-        )
+        _args, kwargs = mock_run.call_args
+        assert _args[0] == ["echo", "file.mkv", "/some/dir"]
+        assert kwargs.get("shell") is False
+        assert kwargs.get("timeout") == 300
+        assert kwargs.get("capture_output") is True
+        assert kwargs.get("text") is True
 
     def test_template_without_variables_still_works(self) -> None:
         """A template with no variables still works."""
@@ -43,13 +42,12 @@ class TestRunHook:
                 logger=logger,
             )
 
-        mock_run.assert_called_once_with(
-            "echo hello",
-            shell=True,
-            timeout=300,
-            capture_output=True,
-            text=True,
-        )
+        _args, kwargs = mock_run.call_args
+        assert _args[0] == ["echo", "hello"]
+        assert kwargs.get("shell") is False
+        assert kwargs.get("timeout") == 300
+        assert kwargs.get("capture_output") is True
+        assert kwargs.get("text") is True
 
     def test_timeout_none_disabled(self) -> None:
         """timeout_seconds=None removes the timeout kwarg entirely."""
@@ -66,7 +64,7 @@ class TestRunHook:
         mock_run.assert_called_once()
         _args, kwargs = mock_run.call_args
         assert "timeout" not in kwargs
-        assert kwargs.get("shell") is True
+        assert kwargs.get("shell") is False
         assert kwargs.get("capture_output") is True
         assert kwargs.get("text") is True
 
@@ -144,13 +142,58 @@ class TestRunHook:
 
         mock_run.assert_not_called()
 
-    def test_user_supplied_quotes_around_leaf_are_idempotent(self) -> None:
-        """User-supplied single quotes around {leaf} do not cause double-quoting.
+    def test_malformed_template_logs_warning(self) -> None:
+        """An unclosed quote in the template logs a warning and returns."""
+        logger = MagicMock()
+        with patch("trimarr.hooks.subprocess.run") as mock_run:
+            _run_hook(
+                'echo "{leaf}',  # unclosed double quote
+                "file.mkv",
+                "/some/dir",
+                timeout_seconds=300,
+                logger=logger,
+            )
 
-        When a user writes ``--include-folders '{leaf}'`` and *leaf* contains
-        characters that need quoting (spaces, parentheses), ``shlex.quote()``
-        must not wrap an already-quoted value.  The final command should have
-        exactly one level of quoting.
+        mock_run.assert_not_called()
+        logger.warning.assert_called_once()
+        msg = logger.warning.call_args[0][0]
+        assert "malformed" in msg.lower()
+
+    def test_pipe_in_value_is_literal_not_shell_pipe(self) -> None:
+        """A | in an argument value is treated as literal, not a shell pipe.
+
+        When a user writes ``--media-shares Movies|TV`` the ``|`` is a
+        separator for the script, not a shell pipe operator.  The command
+        must use ``shell=False`` so shell metacharacters are never
+        interpreted.
+        """
+        logger = MagicMock()
+        with patch("trimarr.hooks.subprocess.run") as mock_run:
+            _run_hook(
+                "echo --media-shares Movies|TV",
+                "file.mkv",
+                "/some/dir",
+                timeout_seconds=300,
+                logger=logger,
+            )
+
+        _args, kwargs = mock_run.call_args
+        # Must NOT use shell=True — that would interpret | as a pipe
+        assert kwargs.get("shell") is False, (
+            f"shell must be False to avoid pipe interpretation, got shell={kwargs.get('shell')}"
+        )
+        # First arg must be a list (no shell string that could be split on |)
+        args_list = _args[0]
+        assert isinstance(args_list, list), f"Expected list of args, got {type(args_list)}"
+        # The | must be preserved as a literal character in a single element
+        assert "Movies|TV" in args_list, f"Expected 'Movies|TV' in args list, got {args_list}"
+
+    def test_user_supplied_quotes_around_leaf_are_idempotent(self) -> None:
+        """User-supplied single quotes around {leaf} are stripped, not doubled.
+
+        When a user writes ``--include-folders '{leaf}'``, the extra quotes
+        are stripped and the value is passed directly in the args list
+        (no shell means no quoting needed).
         """
         logger = MagicMock()
         with patch("trimarr.hooks.subprocess.run") as mock_run:
@@ -162,11 +205,7 @@ class TestRunHook:
                 logger=logger,
             )
 
-        args, kwargs = mock_run.call_args
-        cmd = args[0]
-        # The leaf should be quoted exactly once, not double-quoted:
-        # Correct: echo '99 Homes (2014)'
-        # Wrong:   echo ''99 Homes (2014)''  (shell syntax error)
-        assert "'99 Homes (2014)'" in cmd, f"Expected leaf to be single-quoted once, got: {cmd}"
-        # Verify there's no double-quote artifact (empty pair + unquoted parens)
-        assert "''99" not in cmd, f"Double-quoting detected: {cmd}"
+        _args, kwargs = mock_run.call_args
+        args_list = _args[0]
+        # The leaf value is passed directly as a single arg (no shell)
+        assert "99 Homes (2014)" in args_list, f"Expected leaf value in args, got {args_list}"
