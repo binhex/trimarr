@@ -143,3 +143,30 @@ class TestRunHook:
             _run_hook("   ", "file.mkv", "/some/dir", timeout_seconds=300, logger=logger)
 
         mock_run.assert_not_called()
+
+    def test_user_supplied_quotes_around_leaf_are_idempotent(self) -> None:
+        """User-supplied single quotes around {leaf} do not cause double-quoting.
+
+        When a user writes ``--include-folders '{leaf}'`` and *leaf* contains
+        characters that need quoting (spaces, parentheses), ``shlex.quote()``
+        must not wrap an already-quoted value.  The final command should have
+        exactly one level of quoting.
+        """
+        logger = MagicMock()
+        with patch("trimarr.hooks.subprocess.run") as mock_run:
+            _run_hook(
+                "echo '{leaf}'",
+                "99 Homes (2014)",
+                "/some/dir",
+                timeout_seconds=300,
+                logger=logger,
+            )
+
+        args, kwargs = mock_run.call_args
+        cmd = args[0]
+        # The leaf should be quoted exactly once, not double-quoted:
+        # Correct: echo '99 Homes (2014)'
+        # Wrong:   echo ''99 Homes (2014)''  (shell syntax error)
+        assert "'99 Homes (2014)'" in cmd, f"Expected leaf to be single-quoted once, got: {cmd}"
+        # Verify there's no double-quote artifact (empty pair + unquoted parens)
+        assert "''99" not in cmd, f"Double-quoting detected: {cmd}"
