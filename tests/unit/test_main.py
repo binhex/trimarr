@@ -592,6 +592,24 @@ class TestStripCommentaryWiring:
             "strip_commentary=True was not forwarded to build_mkvmerge_command()"
         )
 
+    def test_strip_subtitle_regex_parsed(self, tmp_path: Path) -> None:
+        """--strip-subtitle-regex is accepted and regex is compiled."""
+        with patch("trimarr.cli._resolve_mkvmerge_path", return_value="/fake/mkvmerge"):
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "--language",
+                    "eng",
+                    "--media-path",
+                    str(tmp_path),
+                    "--strip-subtitle-regex",
+                    "(?i)songs.*signs",
+                    "--dry-run",
+                ],
+            )
+        # Should not error on regex compilation (click.UsageError → exit 2)
+        assert result.exit_code != 2, f"Unexpected exit 2: {result.output}"
+
 
 # ---------------------------------------------------------------------------
 
