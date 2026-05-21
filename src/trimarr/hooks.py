@@ -39,7 +39,15 @@ def _run_hook(
     # shlex.quote() wraps values in single quotes which prevent ALL shell
     # expansion ($(), backticks, $variables) in POSIX shells. Safe for
     # filesystem paths substituted into shell command templates.
-    cmd = cmd_template.replace("{leaf}", shlex.quote(leaf)).replace("{dir}", shlex.quote(dir_path))
+    template = cmd_template
+    # Strip user-supplied quote wrapping around {leaf}/{dir} markers before
+    # applying shlex.quote(), otherwise constructs like '{leaf}' + shlex.quote()
+    # produce double-quoted values (''99...'') that cause shell syntax errors
+    # when the value contains parentheses or other special characters.
+    for q in ("'", '"'):
+        template = template.replace(f"{q}{{leaf}}{q}", "{leaf}")
+        template = template.replace(f"{q}{{dir}}{q}", "{dir}")
+    cmd = template.replace("{leaf}", shlex.quote(leaf)).replace("{dir}", shlex.quote(dir_path))
 
     kwargs: dict = {
         "shell": True,
