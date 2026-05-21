@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import platform
 import shlex
 import subprocess
 from typing import TYPE_CHECKING
@@ -17,7 +18,13 @@ def _run_hook(
     logger: Logger,
     timeout_seconds: int | None = 300,
 ) -> None:
-    """Execute a shell command with ``{leaf}`` and ``{dir}`` variable substitution.
+    """Execute a hook command with ``{leaf}`` and ``{dir}`` variable substitution.
+
+    The template is split into arguments using :func:`shlex.split` (POSIX shell
+    rules on Linux/macOS, Windows rules on Windows) and executed directly via
+    :func:`subprocess.run` with ``shell=False``.  No shell is involved, so
+    shell metacharacters (``|``, ``>``, ``$()``) in argument values are treated
+    as literal characters.
 
     Args:
         cmd_template: The command template, which may contain ``{leaf}`` and
@@ -30,40 +37,54 @@ def _run_hook(
             timeout is applied.
 
     Raises:
-        None. All expected errors (TimeoutExpired, OSError, non-zero exit)
-        are caught and logged as warnings.
+        None. All expected errors (ValueError from template parsing,
+        TimeoutExpired, OSError, non-zero exit) are caught and logged as
+        warnings.
     """
     if not cmd_template.strip():
         return
 
-    # shlex.quote() wraps values in single quotes which prevent ALL shell
-    # expansion ($(), backticks, $variables) in POSIX shells. Safe for
-    # filesystem paths substituted into shell command templates.
+    # Strip user-supplied quote wrapping around {leaf}/{dir} markers —
+    # the quoting fix from commit 4a8f86c prevents double-quoting when
+    # users write ``--include-folders '{leaf}'``.
     template = cmd_template
-    # Strip user-supplied quote wrapping around {leaf}/{dir} markers before
-    # applying shlex.quote(), otherwise constructs like '{leaf}' + shlex.quote()
-    # produce double-quoted values (''99...'') that cause shell syntax errors
-    # when the value contains parentheses or other special characters.
     for q in ("'", '"'):
         template = template.replace(f"{q}{{leaf}}{q}", "{leaf}")
         template = template.replace(f"{q}{{dir}}{q}", "{dir}")
-    cmd = template.replace("{leaf}", shlex.quote(leaf)).replace("{dir}", shlex.quote(dir_path))
+
+    # Parse the template into a list of arguments using shlex.split() so
+    # shell metacharacters (|, >, $, etc.) in argument values are treated
+    # as literal characters, not interpreted by the shell.  Without this,
+    # ``--media-shares Movies|TV`` would be split by the shell into two
+    # commands at the pipe.
+    try:
+        posix = platform.system() != "Windows"
+        args = shlex.split(template, posix=posix)
+    except ValueError as exc:
+        logger.warning(f"Hook command template is malformed: {exc}")
+        return
+    # Substitute placeholders directly into the arg list (no shell
+    # involvement, so no quoting needed).
+    args = [arg.replace("{leaf}", leaf).replace("{dir}", dir_path) for arg in args]
 
     kwargs: dict = {
-        "shell": True,
+        "shell": False,
         "capture_output": True,
         "text": True,
     }
     if timeout_seconds is not None:
         kwargs["timeout"] = timeout_seconds
 
+    cmd_display = " ".join(args)
+    logger.debug(f"Running hook: {cmd_display}")
+
     try:
-        result = subprocess.run(cmd, **kwargs)
+        result = subprocess.run(args, **kwargs)
     except subprocess.TimeoutExpired:
-        logger.warning(f"Hook command timed out after {timeout_seconds}s: {cmd}")
+        logger.warning(f"Hook command timed out after {timeout_seconds}s: {cmd_display}")
         return
     except OSError as exc:
-        logger.warning(f"Hook command failed: {cmd}: {exc}")
+        logger.warning(f"Hook command failed: {cmd_display}: {exc}")
         return
 
     if result.returncode != 0:

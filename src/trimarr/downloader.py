@@ -10,7 +10,6 @@ import tarfile
 import tempfile
 import zipfile
 from pathlib import Path
-from urllib.parse import urlparse
 
 import requests
 
@@ -49,7 +48,7 @@ def get_app_data_dir() -> Path:
 
 # GitHub repo that publishes statically compiled MKVToolNix binaries
 _MKVTOOLNIX_REPO = "Jesseatgao/MKVToolNix-static-builds"
-_GITHUB_API = "https://api.github.com"
+_GITHUB_WEB = "https://github.com"
 # Filename written alongside the mkvmerge binary to record the installed release tag.
 _VERSION_FILE = "mkvmerge.version"
 
@@ -106,62 +105,81 @@ def _extract_from_zip(archive_path: Path, binary_name: str, tmp_dir: Path) -> Pa
     return extracted
 
 
-def _fetch_latest_release(repo: str) -> dict:
-    """Return the parsed JSON body of the latest GitHub release for *repo*.
+def _get_latest_release_tag(repo: str) -> str:
+    """Return the tag name of the latest GitHub release for *repo* via a 3xx redirect.
+
+    Hits the GitHub web URL (not the API), so no unauthenticated rate limits apply.
+    The URL ``https://github.com/<owner>/<repo>/releases/latest`` issues a 3xx
+    redirect to ``/releases/tag/<VERSION>``.  We follow the redirect and parse the
+    tag from the ``Location`` header.
 
     Args:
         repo: GitHub repo in ``owner/name`` format.
 
+    Returns:
+        Release tag string (e.g. ``"v58.0.0-mingw-w64-posixv1.8el9"``).
+
     Raises:
-        requests.HTTPError: On non-2xx GitHub API responses.
+        RuntimeError: If the response is not a 3xx or the tag cannot be parsed.
+        requests.HTTPError: On HTTP errors from the initial request.
     """
-    url = f"{_GITHUB_API}/repos/{repo}/releases/latest"
-    response = requests.get(url, timeout=30)
+    url = f"{_GITHUB_WEB}/{repo}/releases/latest"
+    response = requests.get(url, allow_redirects=False, timeout=30)
     response.raise_for_status()
-    return dict(response.json())
+
+    if not 300 <= response.status_code < 400:
+        raise RuntimeError(f"Expected a 3xx redirect from {url}, got {response.status_code}.")
+
+    location = response.headers.get("Location", "")
+    # Location format: /<owner>/<repo>/releases/tag/<VERSION>
+    # Parse from the well-known /releases/tag/ prefix so tags containing
+    # slashes (e.g. "release/v2.1.0") are handled correctly.
+    tag_prefix = "/releases/tag/"
+    tag = ""
+    if tag_prefix in location:
+        tag = location.rsplit(tag_prefix, 1)[-1].rstrip("/")
+    if not tag:
+        raise RuntimeError(f"Could not determine latest release tag for '{repo}' (Location header: '{location}').")
+    return tag
 
 
 def _get_latest_release_info(repo: str, asset_name: str) -> tuple[str, str]:
-    """Return ``(browser_download_url, tag_name)`` for *asset_name* in the latest release of *repo*.
+    """Return ``(download_url, tag_name)`` for *asset_name* in the latest release of *repo*.
 
-    Validates the URL is HTTPS from a trusted GitHub domain.
-    Raises :exc:`RuntimeError` when the asset is not found or the URL is untrusted.
+    Uses the redirect-based tag discovery and the ``/releases/latest/download/``
+    URL pattern, so no GitHub API calls are made and no rate limits apply.
     """
-    release = _fetch_latest_release(repo)
-    tag = str(release.get("tag_name", "unknown"))
-
-    for asset in release.get("assets", []):
-        if asset["name"] == asset_name:
-            download_url = str(asset["browser_download_url"])
-            # Validate the URL is from a trusted GitHub domain and uses HTTPS
-            parsed = urlparse(download_url)
-            trusted = {"github.com", "objects.githubusercontent.com", "github-releases.githubusercontent.com"}
-            if parsed.scheme != "https" or parsed.hostname not in trusted:
-                raise RuntimeError(
-                    f"Download URL '{download_url}' is not from a trusted GitHub domain over HTTPS. Refusing to use it."
-                )
-            return download_url, tag
-
-    raise RuntimeError(f"Asset '{asset_name}' not found in latest release '{tag}' of '{repo}'.")
+    tag = _get_latest_release_tag(repo)
+    download_url = f"{_GITHUB_WEB}/{repo}/releases/latest/download/{asset_name}"
+    # Verify the asset URL resolves to a downloadable binary by checking the
+    # redirect chain does not land on an HTML page (which would happen if
+    # the asset does not exist in the latest release).
+    head_resp = requests.head(download_url, allow_redirects=True, timeout=30)
+    head_resp.raise_for_status()
+    content_type = head_resp.headers.get("Content-Type", "").lower()
+    if "text/html" in content_type:
+        raise RuntimeError(
+            f"Asset '{asset_name}' not found in the latest release of '{repo}'. "
+            f"The download URL '{download_url}' redirected to an HTML page."
+        )
+    return download_url, tag
 
 
 def get_latest_mkvmerge_tag() -> str:
-    """Return the tag name of the latest mkvmerge release via a lightweight GitHub API call.
+    """Return the tag name of the latest mkvmerge release via a redirect.
 
-    Only the release metadata JSON (~few KB) is fetched — no binary download occurs.
+    Hits the GitHub web URL rather than the API, so no unauthenticated rate
+    limits apply.  Only the redirect response headers are fetched (~few KB)
+    — no binary download occurs.
 
     Returns:
         Release tag string (e.g. ``"v58.0.0-mingw-w64-posixv1.8el9"``).
 
     Raises:
         RuntimeError: If the release tag cannot be determined.
-        requests.HTTPError: On non-2xx GitHub API responses.
+        requests.HTTPError: On non-2xx HTTP responses.
     """
-    release = _fetch_latest_release(_MKVTOOLNIX_REPO)
-    tag = release.get("tag_name")
-    if not tag:
-        raise RuntimeError("Could not determine latest mkvmerge release tag from GitHub API response.")
-    return str(tag)
+    return _get_latest_release_tag(_MKVTOOLNIX_REPO)
 
 
 def get_installed_mkvmerge_tag(dest_dir: str | Path | None = None) -> str | None:
