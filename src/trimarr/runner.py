@@ -379,6 +379,8 @@ def _process_one_file(
         return
 
     # Process the file
+    logger.info(f"  [{idx}/{total}] Remuxing '{file_path.name}'...")
+
     size_before = file_path.stat().st_size
     error = process_file(
         mkvmerge_path=cfg.mkvmerge_path,
