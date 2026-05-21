@@ -173,6 +173,8 @@ class _FilterResult:
     # Track IDs removed specifically by the strip-commentary phase.
     commentary_audio_drop_ids: set[int] = field(default_factory=set)
     commentary_sub_drop_ids: set[int] = field(default_factory=set)
+    # Track IDs removed specifically by the subtitle regex phase.
+    subtitle_regex_drop_ids: set[int] = field(default_factory=set)
 
 
 # Minimum acceptable output-to-input size ratio.  A legitimate remux strips
@@ -550,6 +552,37 @@ def _apply_strip_commentary(
         _strip_subtitle_commentary_unsafe(result, tracks)
 
 
+def _apply_strip_subtitle_regex(
+    result: _FilterResult,
+    tracks: list[MkvTrack],
+    patterns: list[re.Pattern],
+) -> None:
+    """Phase 4b — drop subtitle tracks whose name matches any user-supplied regex.
+
+    Operates on the subtitle tracks that survived language filtering and commentary
+    stripping.  Each pattern is tested against each kept subtitle track's ``name``
+    field.  Matched tracks are moved from ``sub_keep`` to ``sub_drop``.
+    There is no safety guard — if all subtitles match, all are dropped.
+    """
+    if not patterns:
+        return
+
+    keep_set = set(result.sub_keep)
+    for track in tracks:
+        if track.type != _TRACK_SUBTITLES:
+            continue
+        if track.id not in keep_set:
+            continue
+        if track.name is None:
+            continue
+        for pattern in patterns:
+            if pattern.search(track.name):
+                result.sub_keep.remove(track.id)
+                result.sub_drop.append(track.id)
+                result.subtitle_regex_drop_ids.add(track.id)
+                break  # matched one pattern, no need to check others
+
+
 def _group_kept_audio_by_language(
     tracks: list[MkvTrack],
     keep_set: set[int],
@@ -707,6 +740,12 @@ def _log_filter_changes(
     _log_language_drops(result.language_sub_drop_ids, _TRACK_SUBTITLES, tracks, language, needs_sub_change, logger)
     _log_commentary_drops(result.commentary_audio_drop_ids, _TRACK_AUDIO, tracks, logger)
     _log_commentary_drops(result.commentary_sub_drop_ids, _TRACK_SUBTITLES, tracks, logger)
+    if result.subtitle_regex_drop_ids:
+        logger.info(f"  Dropping {len(result.subtitle_regex_drop_ids)} subtitle track(s) by name regex.")
+        descs = ", ".join(
+            _fmt_track(t) for t in tracks if t.type == _TRACK_SUBTITLES and t.id in result.subtitle_regex_drop_ids
+        )
+        logger.debug(f"  Dropping subtitle track(s) by name regex: {descs}")
     _log_metadata_title_change(edit_metadata_title, delete_metadata_title, input_path, logger)
 
 
@@ -837,10 +876,11 @@ def build_mkvmerge_command(
     logger: Logger,
     strip_lower_channels: bool = False,
     strip_commentary: bool = False,
+    strip_subtitle_regex_patterns: list[re.Pattern] | None = None,
 ) -> list[str] | None:
     """Build the mkvmerge argv for *input_path*; return *None* if no changes are needed.
 
-    Runs all filtering phases (language, fallbacks, commentary, channel), then assembles
+    Runs all filtering phases (language, fallbacks, commentary, regex, channel), then assembles
     the final command.  Returns *None* when no track or metadata changes are required
     so callers can skip mkvmerge and mark the file as already processed.
     """
@@ -848,6 +888,7 @@ def build_mkvmerge_command(
     _apply_audio_fallbacks(result, tracks, language, logger, input_path)
     _apply_subtitle_fallback(result, language, logger, input_path)
     _apply_strip_commentary(result, tracks, keep_audio, keep_subtitles, logger, input_path, strip_commentary)
+    _apply_strip_subtitle_regex(result, tracks, strip_subtitle_regex_patterns or [])
     _apply_strip_lower_channels(result, tracks, keep_audio, strip_lower_channels, logger)
 
     needs_audio_change = bool(result.audio_drop)
