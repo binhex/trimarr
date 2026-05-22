@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import platform
+import re
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -384,6 +385,20 @@ Examples:
     ),
 )
 @click.option(
+    "--strip-subtitle-regex",
+    type=click.STRING,
+    required=False,
+    multiple=True,
+    default=(),
+    metavar="<regex>",
+    help=(
+        "One or more regex patterns. Any subtitle track whose name matches any pattern"
+        " will be removed, regardless of language.  Patterns use Python re syntax."
+        " Specify multiple times for multiple patterns."
+        " Example: --strip-subtitle-regex '(?i)songs.*signs' --strip-subtitle-regex '(?i)signs.*songs'"
+    ),
+)
+@click.option(
     "--schedule",
     type=click.STRING,
     required=False,
@@ -470,6 +485,7 @@ def cli(
     no_update_check: bool,
     strip_lower_channels: bool,
     strip_commentary: bool,
+    strip_subtitle_regex: tuple[str, ...],
     skip_size_check: bool,
     schedule: str | None,
     run_on_start: bool,
@@ -495,6 +511,13 @@ def cli(
     if edit_metadata_title and delete_metadata_title:
         raise click.UsageError("--edit-metadata-title and --delete-metadata-title are mutually exclusive.")
 
+    subtitle_regex_patterns: list[re.Pattern] = []
+    for pattern_str in strip_subtitle_regex:
+        try:
+            subtitle_regex_patterns.append(re.compile(pattern_str))
+        except re.error as exc:
+            raise click.UsageError(f"Invalid regex in --strip-subtitle-regex: '{pattern_str}' — {exc}") from exc
+
     logger = create_logger(log_format=_LOG_FORMAT, log_level=log_level, log_path=log_path)
 
     mkvmerge_path = _resolve_mkvmerge_path(mkvmerge_path, no_update_check, logger)
@@ -514,6 +537,7 @@ def cli(
             logger=logger,
             strip_lower_channels=strip_lower_channels,
             strip_commentary=strip_commentary,
+            strip_subtitle_regex_patterns=subtitle_regex_patterns,
             skip_size_check=skip_size_check,
             pre_process=pre_process,
             post_process=post_process,

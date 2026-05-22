@@ -22,6 +22,8 @@ from trimarr.processor import CorruptOutputError, build_mkvmerge_command, probe_
 _LOG_SEPARATOR_WIDTH = 80
 
 if TYPE_CHECKING:
+    import re
+
     from loguru import Logger
 
 
@@ -40,6 +42,7 @@ class _ProcessingConfig:
     skip_size_check: bool
     dry_run: bool
     no_backup: bool
+    strip_subtitle_regex_patterns: list[re.Pattern] | None = None
 
 
 @dataclass
@@ -132,6 +135,7 @@ def _build_profile_hash(
     delete_metadata_title: bool,
     strip_lower_channels: bool,
     strip_commentary: bool,
+    strip_subtitle_regex_patterns: list[re.Pattern] | None = None,
 ) -> str:
     """Return a stable SHA-256 hex digest encoding the current processing profile.
 
@@ -146,6 +150,7 @@ def _build_profile_hash(
         delete_metadata_title: Clear container title.
         strip_lower_channels: Drop audio tracks below the max channel count.
         strip_commentary: Drop tracks whose name contains "commentary".
+        strip_subtitle_regex_patterns: Drop subtitle tracks whose name matches any of these regexes.
 
     Returns:
         64-character lowercase hex string.
@@ -155,6 +160,7 @@ def _build_profile_hash(
     from trimarr.processor import normalize_language_code
 
     canonical_language = sorted(normalize_language_code(c) for c in language)
+    pattern_strings = sorted(p.pattern for p in strip_subtitle_regex_patterns) if strip_subtitle_regex_patterns else []
     profile = {
         "delete_metadata_title": delete_metadata_title,
         "edit_metadata_title": edit_metadata_title,
@@ -163,6 +169,7 @@ def _build_profile_hash(
         "language": canonical_language,
         "strip_commentary": strip_commentary,
         "strip_lower_channels": strip_lower_channels,
+        "subtitle_regex_patterns": pattern_strings,
     }
     return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
 
@@ -344,6 +351,7 @@ def _process_one_file(
         logger=logger,
         strip_lower_channels=cfg.strip_lower_channels,
         strip_commentary=cfg.strip_commentary,
+        strip_subtitle_regex_patterns=cfg.strip_subtitle_regex_patterns,
     )
 
     if cmd is None:
@@ -556,6 +564,7 @@ def run(
     logger: Logger,
     strip_lower_channels: bool = False,
     strip_commentary: bool = False,
+    strip_subtitle_regex_patterns: list[re.Pattern] | None = None,
     skip_size_check: bool = False,
     pre_process: str | None = None,
     post_process: str | None = None,
@@ -588,6 +597,7 @@ def run(
         delete_metadata_title=delete_metadata_title,
         strip_lower_channels=strip_lower_channels,
         strip_commentary=strip_commentary,
+        strip_subtitle_regex_patterns=strip_subtitle_regex_patterns,
     )
 
     cfg = _ProcessingConfig(
@@ -602,6 +612,7 @@ def run(
         skip_size_check=skip_size_check,
         dry_run=dry_run,
         no_backup=no_backup,
+        strip_subtitle_regex_patterns=strip_subtitle_regex_patterns,
     )
 
     command_timeout_seconds: int | None = command_timeout_mins * 60 if command_timeout_mins > 0 else None

@@ -87,6 +87,7 @@ trimarr --help
 | `--no-update-check` | Skip the automatic check for a newer mkvmerge version. Has no effect when `--mkvmerge-path` is supplied (user-managed binaries are never auto-updated). | `false` | — | `flag` |
 | `--strip-lower-channels` | After language filtering, drop any audio tracks whose channel count is strictly below the highest channel count among the surviving audio tracks. For example, given English tracks at 8ch, 8ch, and 2ch, the 2ch track is removed. Tracks with an unknown channel count are always kept. Has no effect when `--keep-audio` is set. **Disabled by default** — enable only when you are confident lower-channel duplicates are not needed. | `false` | — | `flag` |
 | `--strip-commentary` | If specified, audio and subtitle tracks whose name contains "commentary" (case-insensitive) will be removed after language filtering. **Audio final gate:** if stripping would leave zero audio tracks, all audio is retained and a warning is logged — a silent file is never acceptable. Subtitles have no such gate and are stripped unconditionally. Has no effect on audio when `--keep-audio` is set, or on subtitles when `--keep-subtitles` is set. **Disabled by default.** | `false` | — | `flag` |
+| `--strip-subtitle-regex` | One or more Python regex patterns. Any subtitle track whose name matches any pattern is removed after language filtering, regardless of language. Runs after `--strip-commentary`. Specify multiple times for multiple patterns (e.g. `--strip-subtitle-regex '(?i)songs.*signs' --strip-subtitle-regex '(?i)signs.*songs'`). Has no effect when `--keep-subtitles` is set. **Disabled by default.** | `()` | `'(?i)songs.*signs'` | `string (repeatable)` |
 | `--dry-run` | Log planned changes without modifying any files. Processed files are not recorded to the database in this mode. | `false` | — | `flag` |
 | `--schedule` | Run on a cron schedule (instead of once). Standard 5-field POSIX cron expression: minute hour day month weekday. Also accepts `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`. Examples: `'0 2 * * *'` (daily at 2am), `'*/30 * * * *'` (every 30 min), `'@daily'` (once per day). When omitted, trimarr runs once and exits. | — | — | `string` |
 | `--run-on-start` | When used with `--schedule`, execute an immediate run before the first scheduled cron fire. Without `--schedule` this flag is an error. | `false` | — | `flag` |
@@ -147,9 +148,13 @@ flowchart TD
     D -- No --> E([⚠️ Keep all\nno language match])
     D -- Yes --> H[Drop non-matching tracks]
     H --> SC{--strip-commentary?}
-    SC -- No --> I
+    SC -- No --> SR
     SC -- Yes --> SC4[Drop subtitle\ncommentary tracks]
-    SC4 --> I
+    SC4 --> SR
+    SR{--strip-subtitle-regex?}
+    SR -- No --> I
+    SR -- Yes --> SR2[Drop subtitle tracks\nmatching regex]
+    SR2 --> I
     I{Commentary subtitle\nholds default flag?}
     I -- No --> J([✅ Apply changes])
     I -- Yes --> K[Promote non-commentary\nto default · demote commentary]
