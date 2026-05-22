@@ -160,7 +160,6 @@ def _build_profile_hash(
     from trimarr.processor import normalize_language_code
 
     canonical_language = sorted(normalize_language_code(c) for c in language)
-    pattern_strings = sorted(p.pattern for p in strip_subtitle_regex_patterns) if strip_subtitle_regex_patterns else []
     profile = {
         "delete_metadata_title": delete_metadata_title,
         "edit_metadata_title": edit_metadata_title,
@@ -169,8 +168,13 @@ def _build_profile_hash(
         "language": canonical_language,
         "strip_commentary": strip_commentary,
         "strip_lower_channels": strip_lower_channels,
-        "subtitle_regex_patterns": pattern_strings,
     }
+    # Conditionally include subtitle regex patterns so the hash stays
+    # backward-compatible with databases created before this feature existed.
+    # When no patterns are configured the profile dict has exactly the same
+    # keys as the pre-feature code, avoiding a full re-scan on upgrade.
+    if strip_subtitle_regex_patterns:
+        profile["subtitle_regex_patterns"] = sorted(p.pattern for p in strip_subtitle_regex_patterns)
     return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
 
 
