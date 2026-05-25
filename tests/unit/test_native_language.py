@@ -44,6 +44,13 @@ class TestParseMovieTitle:
         assert result[1] is None
         assert isinstance(result[0], str) and len(result[0]) > 0
 
+    def test_fallback_to_stem(self) -> None:
+        """When the cleaned title is empty (only release tags), fall back to raw stem."""
+        result = parse_movie_title(Path("/data/2160p.mkv"))
+        assert result == ("2160p", None)
+        result2 = parse_movie_title(Path("/data/WEBRip.1080p.mkv"))
+        assert result2 == ("webrip.1080p", None)
+
 
 class TestLanguageNameToCode:
     @pytest.mark.parametrize(
@@ -63,6 +70,39 @@ class TestLanguageNameToCode:
     def test_language_name_to_code(self, name: str, expected: str | None) -> None:
         result = _language_name_to_iso_639_2(name)
         assert result == expected
+
+    def test_alpha3_code_input(self) -> None:
+        """Pass an alpha-3 terminologic code like 'deu' - hits alpha_3 lookup branch."""
+        assert _language_name_to_iso_639_2("deu") == "ger"
+
+    def test_bibliographic_code_input(self) -> None:
+        """Pass a bibliographic code like 'ger' - hits bibliographic lookup branch."""
+        assert _language_name_to_iso_639_2("ger") == "ger"
+
+    def test_name_without_alpha2(self) -> None:
+        """Language name whose entry has alpha_3 but no alpha_2."""
+        assert _language_name_to_iso_639_2("Ghotuo") == "aaa"
+
+    def test_alpha3_without_alpha2(self, mocker) -> None:
+        """Alpha-3 lookup for a language with no alpha_2 hits the fallback return."""
+        # 'aaa' is Ghotuo's alpha_3, which has no alpha_2
+        result = _language_name_to_iso_639_2("aaa")
+        assert result == "aaa"
+
+    def test_pycountry_import_error(self, mocker) -> None:
+        """When pycountry is not available, uses fallback dict."""
+        import builtins
+
+        real_import = builtins.__import__
+
+        def _block_pycountry(name, *args, **kwargs):
+            if name == "pycountry":
+                raise ImportError("No module named pycountry")
+            return real_import(name, *args, **kwargs)
+
+        mocker.patch("builtins.__import__", side_effect=_block_pycountry)
+        assert _language_name_to_iso_639_2("English") == "eng"
+        assert _language_name_to_iso_639_2("Unknown") is None
 
 
 class TestLookupImdbpie:
@@ -93,10 +133,83 @@ class TestLookupImdbpie:
         assert result is None
 
     def test_api_error(self, mocker) -> None:
-        """IMDbPie raises an exception."""
+        """IMDbPie raises an exception during search."""
         mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
         instance = mock_client.return_value
         instance.search_for_title.side_effect = RuntimeError("API error")
+        result = _lookup_imdbpie("Das Boot", "1981")
+        assert result is None
+
+    def test_import_error(self, mocker) -> None:
+        """When imdbpie is not installed, returns None."""
+        import builtins
+
+        real_import = builtins.__import__
+
+        def _block_imdbpie(name, *args, **kwargs):
+            if name == "imdbpie":
+                raise ImportError("No module named imdbpie")
+            return real_import(name, *args, **kwargs)
+
+        mocker.patch("builtins.__import__", side_effect=_block_imdbpie)
+        result = _lookup_imdbpie("Test", None)
+        assert result is None
+
+    def test_client_creation_error(self, mocker) -> None:
+        """When imdbpie.Imdb() raises an exception, returns None."""
+        mocker.patch("imdbpie.Imdb", side_effect=RuntimeError("Client error"))
+        result = _lookup_imdbpie("Test", None)
+        assert result is None
+
+    def test_no_spoken_languages(self, mocker) -> None:
+        """When aux has no spokenLanguages, returns None."""
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.search_for_title.return_value = [
+            {"title": "Das Boot", "year": 1981, "imdb_id": "tt0082096"},
+        ]
+        instance.get_title_auxiliary.return_value = {"spokenLanguages": None}
+        result = _lookup_imdbpie("Das Boot", "1981")
+        assert result is None
+
+    def test_aux_failure(self, mocker) -> None:
+        """When get_title_auxiliary raises, returns None."""
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.search_for_title.return_value = [
+            {"title": "Das Boot", "year": 1981, "imdb_id": "tt0082096"},
+        ]
+        instance.get_title_auxiliary.side_effect = RuntimeError("Aux failure")
+        result = _lookup_imdbpie("Das Boot", "1981")
+        assert result is None
+
+    def test_no_title_year_match(self, mocker) -> None:
+        """Hits exist but none match both title and year."""
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.search_for_title.return_value = [
+            {"title": "Different Movie", "year": 1999, "imdb_id": "tt9999999"},
+        ]
+        result = _lookup_imdbpie("Das Boot", "1981")
+        assert result is None
+
+    def test_year_mismatch(self, mocker) -> None:
+        """Title matches but year differs, no match found."""
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.search_for_title.return_value = [
+            {"title": "Das Boot", "year": 1999, "imdb_id": "tt0082096"},
+        ]
+        result = _lookup_imdbpie("Das Boot", "1981")
+        assert result is None
+
+    def test_year_type_error(self, mocker) -> None:
+        """Hit has non-integer year, which raises ValueError on int()."""
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.search_for_title.return_value = [
+            {"title": "Das Boot", "year": "N/A", "imdb_id": "tt0082096"},
+        ]
         result = _lookup_imdbpie("Das Boot", "1981")
         assert result is None
 
@@ -133,6 +246,74 @@ class TestLookupTmdb:
         """No TMDb API key means no lookup is attempted."""
         result = _lookup_tmdb("Test", "2020", "")
         assert result is None
+
+    def test_search_failure(self, mocker) -> None:
+        """TMDb search endpoint raises an exception."""
+        mock_urlopen = mocker.patch("trimarr.native_language.urllib.request.urlopen")
+        mock_urlopen.side_effect = OSError("Network error")
+        result = _lookup_tmdb("Any Movie", None, "fake-key")
+        assert result is None
+
+    def test_detail_fetch_failure(self, mocker) -> None:
+        """TMDb detail endpoint raises an exception."""
+        mock_urlopen = mocker.patch("trimarr.native_language.urllib.request.urlopen")
+        search_response = mocker.MagicMock()
+        search_response.__enter__.return_value = search_response
+        search_response.read.return_value = b"""
+        {"results": [{"id": 123, "title": "Wo Hu Cang Long", "original_title": "Wo Hu Cang Long"}]}
+        """
+        detail_response = mocker.MagicMock()
+        detail_response.__enter__.return_value = detail_response
+        detail_response.read.side_effect = OSError("Network error")
+        mock_urlopen.side_effect = [search_response, detail_response]
+        result = _lookup_tmdb("Wo Hu Cang Long", "2000", "fake-key")
+        assert result is None
+
+    def test_tmdb_id_none(self, mocker) -> None:
+        """Search result has id=None, should be skipped."""
+        mock_urlopen = mocker.patch("trimarr.native_language.urllib.request.urlopen")
+        response = mocker.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b"""
+        {"results": [{"id": None, "title": "Movie", "original_title": "Movie"}]}
+        """
+        mock_urlopen.return_value = response
+        result = _lookup_tmdb("Movie", None, "fake-key")
+        assert result is None
+
+    def test_empty_original_language(self, mocker) -> None:
+        """Detail has no original_language field."""
+        mock_urlopen = mocker.patch("trimarr.native_language.urllib.request.urlopen")
+        search_response = mocker.MagicMock()
+        search_response.__enter__.return_value = search_response
+        search_response.read.return_value = b"""
+        {"results": [{"id": 123, "title": "Test Movie", "original_title": "Test Movie"}]}
+        """
+        detail_response = mocker.MagicMock()
+        detail_response.__enter__.return_value = detail_response
+        detail_response.read.return_value = b"""
+        {"original_language": ""}
+        """
+        mock_urlopen.side_effect = [search_response, detail_response]
+        result = _lookup_tmdb("Test Movie", None, "fake-key")
+        assert result is None
+
+    def test_three_letter_raw_lang(self, mocker) -> None:
+        """When original_language is a 3-letter code not in ISO_639_1_TO_2."""
+        mock_urlopen = mocker.patch("trimarr.native_language.urllib.request.urlopen")
+        search_response = mocker.MagicMock()
+        search_response.__enter__.return_value = search_response
+        search_response.read.return_value = b"""
+        {"results": [{"id": 123, "title": "Film", "original_title": "Film"}]}
+        """
+        detail_response = mocker.MagicMock()
+        detail_response.__enter__.return_value = detail_response
+        detail_response.read.return_value = b"""
+        {"original_language": "deu"}
+        """
+        mock_urlopen.side_effect = [search_response, detail_response]
+        result = _lookup_tmdb("Film", None, "fake-key")
+        assert result == ["ger"]
 
 
 class TestResolveNativeLanguage:
@@ -185,3 +366,39 @@ class TestResolveNativeLanguage:
         }
         result = resolve_native_language(Path("/data/Test (2020).mkv"), db=None)
         assert result == ["eng"]
+
+    def test_tmdb_fallback(self, mocker) -> None:
+        """IMDbPie returns None, TMDb fallback succeeds with api_key."""
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.search_for_title.return_value = []
+        mock_urlopen = mocker.patch("trimarr.native_language.urllib.request.urlopen")
+        search_response = mocker.MagicMock()
+        search_response.__enter__.return_value = search_response
+        search_response.read.return_value = b"""
+        {"results": [{"id": 123, "title": "Unknown Movie", "original_title": "Unknown Movie"}]}
+        """
+        detail_response = mocker.MagicMock()
+        detail_response.__enter__.return_value = detail_response
+        detail_response.read.return_value = b"""
+        {"original_language": "en"}
+        """
+        mock_urlopen.side_effect = [search_response, detail_response]
+        result = resolve_native_language(Path("/data/Unknown Movie (2020).mkv"), db=mock_db, tmdb_api_key="fake-key")
+        assert result == ["eng"]
+        mock_db.set_native_language_cache.assert_called_once()
+
+    def test_empty_title(self, mocker) -> None:
+        """When parse_movie_title returns empty title, returns None and caches failure."""
+        import trimarr.native_language as nl
+
+        mocker.patch.object(nl, "parse_movie_title", return_value=("", None))
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        result = resolve_native_language(Path("/data/Unknown.mkv"), db=mock_db)
+        assert result is None
+        mock_db.set_native_language_cache.assert_called_once_with(
+            Path("/data/Unknown.mkv"), None, None, "unable to parse title"
+        )
