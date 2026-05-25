@@ -288,6 +288,31 @@ Examples:
     help="If specified, all audio tracks will be kept regardless of language.",
 )
 @click.option(
+    "--keep-native-audio",
+    is_flag=True,
+    default=False,
+    help=(
+        "If specified, trimarr identifies the film's native/original spoken"
+        " language(s) via IMDb (or TMDb as fallback) and keeps all audio tracks"
+        " in those languages alongside your --language preference."
+        " Ignored when --keep-audio is set."
+        " Requires an internet connection for first-time lookups;"
+        " results are cached in the database."
+    ),
+)
+@click.option(
+    "--tmdb-api-key",
+    type=click.STRING,
+    required=False,
+    default=None,
+    metavar="<key>",
+    help=(
+        "TMDb API key used as fallback when IMDbPie cannot identify a film's"
+        " native language. Optional — without it, lookups that fail on IMDbPie"
+        " silently fall back to standard behaviour."
+    ),
+)
+@click.option(
     "--media-path",
     type=_PipeSeparatedPaths(),
     required=True,
@@ -475,6 +500,8 @@ def cli(
     delete_metadata_title: bool,
     keep_subtitles: bool,
     keep_audio: bool,
+    keep_native_audio: bool,
+    tmdb_api_key: str | None,
     media_path: list[str],
     mkvmerge_path: str | None,
     database_path: str,
@@ -529,6 +556,8 @@ def cli(
             delete_metadata_title=delete_metadata_title,
             keep_subtitles=keep_subtitles,
             keep_audio=keep_audio,
+            keep_native_audio=keep_native_audio,
+            tmdb_api_key=tmdb_api_key,
             media_path=media_path,
             mkvmerge_path=mkvmerge_path,
             database_path=database_path,
