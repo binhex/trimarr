@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from pathlib import Path
 
-from trimarr.runner import _build_profile_hash
+from trimarr.runner import _build_profile_hash, _ProcessingConfig, _resolve_effective_language
 
 
 class TestBuildProfileHash:
@@ -101,3 +102,152 @@ class TestBuildProfileHash:
         )
 
         assert hash_no_pattern != hash_with_pattern, "Non-empty patterns must change the hash"
+
+
+class TestResolveEffectiveLanguage:
+    """Tests for _resolve_effective_language()."""
+
+    def test_no_flag(self) -> None:
+        """keep_native_audio off → effective == cfg.language."""
+        from unittest.mock import MagicMock
+
+        cfg = _ProcessingConfig(
+            mkvmerge_path="/fake/mkvmerge",
+            language=["eng"],
+            keep_audio=False,
+            keep_subtitles=False,
+            edit_metadata_title=False,
+            delete_metadata_title=False,
+            strip_lower_channels=False,
+            strip_commentary=False,
+            skip_size_check=False,
+            dry_run=True,
+            no_backup=True,
+            keep_native_audio=False,
+        )
+        result = _resolve_effective_language(
+            file_path=Path("/fake/test.mkv"),
+            cfg=cfg,
+            db=MagicMock(),
+            logger=MagicMock(),
+        )
+        assert result == ["eng"]
+
+    def test_keep_audio_overrides(self) -> None:
+        """--keep-audio causes native lookup to be skipped."""
+        from unittest.mock import MagicMock
+
+        cfg = _ProcessingConfig(
+            mkvmerge_path="/fake/mkvmerge",
+            language=["eng"],
+            keep_audio=True,
+            keep_subtitles=False,
+            edit_metadata_title=False,
+            delete_metadata_title=False,
+            strip_lower_channels=False,
+            strip_commentary=False,
+            skip_size_check=False,
+            dry_run=True,
+            no_backup=True,
+            keep_native_audio=True,
+        )
+        result = _resolve_effective_language(
+            file_path=Path("/fake/test.mkv"),
+            cfg=cfg,
+            db=MagicMock(),
+            logger=MagicMock(),
+        )
+        assert result == ["eng"]
+
+    def test_native_added_to_language(self, mocker) -> None:
+        """Native language is merged into the effective list."""
+        from unittest.mock import MagicMock
+
+        cfg = _ProcessingConfig(
+            mkvmerge_path="/fake/mkvmerge",
+            language=["eng"],
+            keep_audio=False,
+            keep_subtitles=False,
+            edit_metadata_title=False,
+            delete_metadata_title=False,
+            strip_lower_channels=False,
+            strip_commentary=False,
+            skip_size_check=False,
+            dry_run=True,
+            no_backup=True,
+            keep_native_audio=True,
+        )
+        mock_resolve = mocker.patch(
+            "trimarr.native_language.resolve_native_language",
+            return_value=["chi"],
+        )
+        result = _resolve_effective_language(
+            file_path=Path("/fake/test.mkv"),
+            cfg=cfg,
+            db=MagicMock(),
+            logger=MagicMock(),
+        )
+        assert result == ["eng", "chi"]
+        mock_resolve.assert_called_once()
+
+    def test_native_dedup(self, mocker) -> None:
+        """Native language already in --language list is not duplicated."""
+        from unittest.mock import MagicMock
+
+        cfg = _ProcessingConfig(
+            mkvmerge_path="/fake/mkvmerge",
+            language=["eng", "chi"],
+            keep_audio=False,
+            keep_subtitles=False,
+            edit_metadata_title=False,
+            delete_metadata_title=False,
+            strip_lower_channels=False,
+            strip_commentary=False,
+            skip_size_check=False,
+            dry_run=True,
+            no_backup=True,
+            keep_native_audio=True,
+        )
+        mocker.patch(
+            "trimarr.native_language.resolve_native_language",
+            return_value=["chi"],
+        )
+        result = _resolve_effective_language(
+            file_path=Path("/fake/test.mkv"),
+            cfg=cfg,
+            db=MagicMock(),
+            logger=MagicMock(),
+        )
+        assert result == ["eng", "chi"]
+        assert result.count("chi") == 1
+
+    def test_cfg_not_mutated(self, mocker) -> None:
+        """_resolve_effective_language does not mutate cfg.language."""
+        from unittest.mock import MagicMock
+
+        cfg = _ProcessingConfig(
+            mkvmerge_path="/fake/mkvmerge",
+            language=["eng"],
+            keep_audio=False,
+            keep_subtitles=False,
+            edit_metadata_title=False,
+            delete_metadata_title=False,
+            strip_lower_channels=False,
+            strip_commentary=False,
+            skip_size_check=False,
+            dry_run=True,
+            no_backup=True,
+            keep_native_audio=True,
+        )
+        original = list(cfg.language)
+        mocker.patch(
+            "trimarr.native_language.resolve_native_language",
+            return_value=["chi"],
+        )
+        _resolve_effective_language(
+            file_path=Path("/fake/test.mkv"),
+            cfg=cfg,
+            db=MagicMock(),
+            logger=MagicMock(),
+        )
+        assert cfg.language == original
