@@ -1,0 +1,302 @@
+"""Native/original language detection for MKV files.
+
+Uses IMDbPie (primary) and TMDb (fallback) to identify the spoken
+language(s) of a film from its file path.  Results are cached in
+the metadata_cache SQLite table to avoid redundant API calls.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import urllib.parse
+import urllib.request
+from typing import TYPE_CHECKING
+
+from trimarr.processor import _ISO_639_1_TO_2, normalize_language_code
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from trimarr.database import Database
+
+logger = logging.getLogger(__name__)
+
+# Common release-group tags and container metadata to strip from filenames.
+_RELEASE_TAGS_RE = re.compile(
+    r"""
+    \b(?:BluRay|WEBRip|WEB-DL|BRRip|HDRip|DVDRip|BDRip|HDTV|PDTV|WEB|H264|H\.264|H265|H\.265|
+       x264|x265|XviD|DivX|AVC|HEVC|MPEG-?2|MPEG-?4|
+       2160p|1080p|720p|480p|360p|
+       Atmos|TrueHD|DTS-HD|DTS|AC3|AAC|FLAC|DD5\.1|DD2\.0|5\.1|7\.1|
+       MULTi|DUAL|PROPER|REPACK|EXTENDED|UNRATED|DIRECTOR.?S.?CUT|
+       REMUX|ENCODE|INTERNAL|READNFO|COMPLETE|
+       HDR|HDR10|HDR10PLUS|SDR|DV|DoVi|DolbyVision|
+       AMZN|NF|WEB|iTunes|MA|DSNP|HMAX|ATVP)\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+_YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
+
+_WORD_SEPARATORS = re.compile(r"[._\-+]")
+
+
+def _normalise_title(s: str) -> str:
+    """Lower-case, collapse whitespace, and strip leading/trailing spaces."""
+    return " ".join(s.lower().split())
+
+
+def _strip_release_tags(title: str) -> str:
+    """Remove known release-group tags that might cause false positives in searches."""
+    return _RELEASE_TAGS_RE.sub("", title).strip()
+
+
+def parse_movie_title(file_path: Path) -> tuple[str, str | None]:
+    """Extract a searchable movie title and optional year from *file_path*."""
+    stem = file_path.stem
+    cleaned = _WORD_SEPARATORS.sub(" ", stem)
+    year: str | None = None
+    year_match = _YEAR_RE.search(cleaned)
+    if year_match:
+        year = year_match.group(1)
+        cleaned = cleaned.replace(year_match.group(0), "")
+
+    def _strip_brackets(s: str) -> str:
+        parts = re.split(r"(\[[^\]]*\])", s)
+        result = []
+        for part in parts:
+            if part.startswith("[") and part.endswith("]") and not _YEAR_RE.search(part):
+                continue
+            result.append(part)
+        return "".join(result)
+
+    cleaned = _strip_brackets(cleaned)
+
+    def _strip_parens(s: str) -> str:
+        parts = re.split(r"(\([^)]*\))", s)
+        result = []
+        for part in parts:
+            if part.startswith("(") and part.endswith(")") and not _YEAR_RE.search(part):
+                continue
+            result.append(part)
+        return "".join(result)
+
+    cleaned = _strip_parens(cleaned)
+    cleaned = _strip_release_tags(cleaned)
+    title = _normalise_title(" ".join(cleaned.split()))
+    if not title:
+        title = _normalise_title(file_path.stem)
+    return title, year
+
+
+def _lookup_imdbpie(title: str, year: str | None) -> list[str] | None:
+    """Return ISO 639-2/B language codes via IMDbPie, or None on failure."""
+    try:
+        import imdbpie
+    except ImportError:
+        logger.warning("imdbpie not installed — cannot perform IMDb lookup.")
+        return None
+    try:
+        client = imdbpie.Imdb()
+    except Exception as exc:
+        logger.warning("Failed to create IMDbPie client: %s", exc)
+        return None
+    search_term = title
+    if year:
+        search_term = f"{title} {year}"
+    try:
+        hits = client.search_for_title(search_term)
+    except Exception as exc:
+        logger.debug("IMDbPie search failed for '%s': %s", search_term, exc)
+        return None
+    if not hits:
+        logger.debug("IMDbPie returned no hits for '%s'.", search_term)
+        return None
+    matched_id: str | None = None
+    for hit in hits:
+        hit_title = (hit.get("title") or "").strip().lower()
+        if _normalise_title(hit_title) != _normalise_title(title):
+            continue
+        hit_year = hit.get("year")
+        if year and hit_year is not None:
+            try:
+                if int(hit_year) != int(year):
+                    continue
+            except (ValueError, TypeError):
+                continue
+        matched_id = hit.get("imdb_id")
+        if matched_id:
+            break
+    if not matched_id:
+        logger.debug("IMDbPie no title+year match for '%s'.", search_term)
+        return None
+    try:
+        aux = client.get_title_auxiliary(matched_id)
+    except Exception as exc:
+        logger.debug("IMDbPie aux data failed for '%s': %s", matched_id, exc)
+        return None
+    spoken = aux.get("spokenLanguages") if aux else None
+    if not spoken:
+        return None
+    codes: list[str] = []
+    for entry in spoken:
+        lang_name = entry.get("name") or entry.get("description", "") if isinstance(entry, dict) else str(entry)
+        code = _language_name_to_iso_639_2(lang_name)
+        if code and code not in codes:
+            codes.append(code)
+    return codes or None
+
+
+def _language_name_to_iso_639_2(name: str) -> str | None:
+    """Convert a spoken language name (e.g. 'German', 'English') to ISO 639-2/B."""
+    try:
+        import pycountry
+    except ImportError:
+        return _fallback_lang_name_to_code(name)
+    lang = pycountry.languages.get(name=name)
+    if lang is not None:
+        alpha_2 = getattr(lang, "alpha_2", None)
+        if isinstance(alpha_2, str) and alpha_2:
+            return _ISO_639_1_TO_2.get(alpha_2.lower(), alpha_2.lower())
+        alpha_3 = getattr(lang, "alpha_3", None)
+        if isinstance(alpha_3, str) and alpha_3:
+            return normalize_language_code(alpha_3.lower())
+    lang = pycountry.languages.get(alpha_3=name.lower())
+    if lang is not None:
+        alpha_2 = getattr(lang, "alpha_2", None)
+        if isinstance(alpha_2, str) and alpha_2:
+            return _ISO_639_1_TO_2.get(alpha_2.lower(), alpha_2.lower())
+        return normalize_language_code(name.lower())
+    lang = pycountry.languages.get(bibliographic=name.lower())
+    if lang is not None:
+        alpha_2 = getattr(lang, "alpha_2", None)
+        if isinstance(alpha_2, str) and alpha_2:
+            return _ISO_639_1_TO_2.get(alpha_2.lower(), alpha_2.lower())
+        return normalize_language_code(name.lower())
+    return _fallback_lang_name_to_code(name)
+
+
+_LANG_NAME_TO_CODE: dict[str, str] = {
+    "english": "eng",
+    "german": "ger",
+    "french": "fre",
+    "spanish": "spa",
+    "italian": "ita",
+    "japanese": "jpn",
+    "chinese": "chi",
+    "korean": "kor",
+    "russian": "rus",
+    "arabic": "ara",
+    "portuguese": "por",
+    "dutch": "dut",
+    "polish": "pol",
+    "turkish": "tur",
+    "swedish": "swe",
+    "danish": "dan",
+    "finnish": "fin",
+    "norwegian": "nor",
+    "czech": "cze",
+    "hungarian": "hun",
+    "romanian": "rum",
+    "thai": "tha",
+    "vietnamese": "vie",
+    "hindi": "hin",
+}
+
+
+def _fallback_lang_name_to_code(name: str) -> str | None:
+    """Fallback language name to ISO 639-2/B without pycountry."""
+    return _LANG_NAME_TO_CODE.get(name.lower().strip())
+
+
+def _lookup_tmdb(title: str, year: str | None, api_key: str) -> list[str] | None:
+    """Return ISO 639-2/B language codes via TMDb, or None on failure."""
+    encoded_title = urllib.parse.quote(title)
+    search_url = f"https://api.themoviedb.org/3/search/movie?query={encoded_title}&api_key={api_key}"
+    if year:
+        search_url += f"&year={year}"
+    try:
+        with urllib.request.urlopen(search_url, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as exc:
+        logger.debug("TMDb search failed for '%s': %s", title, exc)
+        return None
+    results = data.get("results") if isinstance(data, dict) else None
+    if not results:
+        logger.debug("TMDb no results for '%s'.", title)
+        return None
+    for hit in results:
+        for field in ("title", "original_title"):
+            hit_title = (hit.get(field) or "").strip().lower()
+            if hit_title and _normalise_title(hit_title) == _normalise_title(title):
+                tmdb_id = hit.get("id")
+                if tmdb_id is None:
+                    continue
+                detail_url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={api_key}"
+                try:
+                    with urllib.request.urlopen(detail_url, timeout=15) as resp2:
+                        detail = json.loads(resp2.read().decode())
+                except Exception as exc:
+                    logger.debug("TMDb detail failed for id %s: %s", tmdb_id, exc)
+                    continue
+                raw_lang = detail.get("original_language")
+                if not raw_lang:
+                    continue
+                code = _ISO_639_1_TO_2.get(raw_lang.lower())
+                if code:
+                    return [normalize_language_code(code)]
+                if len(raw_lang) == 3 and raw_lang.isalpha():
+                    return [normalize_language_code(raw_lang.lower())]
+    return None
+
+
+def resolve_native_language(
+    file_path: Path,
+    db: Database | None,
+    tmdb_api_key: str | None = None,
+) -> list[str] | None:
+    """Return ISO 639-2/B native language codes for *file_path*, or None.
+
+    Checks the database cache first (by file_path + fingerprint).  On miss,
+    attempts IMDbPie lookup followed by TMDb fallback.  Caches the result
+    (including failures) so subsequent runs are fast.
+    """
+    if db is not None:
+        cached = db.get_native_language_cache(file_path)
+        if cached is not None:
+            cached_langs, cached_source, cached_error = cached
+            if cached_langs:
+                logger.debug(
+                    "Native language cache hit for '%s': %s (source: %s)", file_path.name, cached_langs, cached_source
+                )
+            return cached_langs
+    title, year = parse_movie_title(file_path)
+    if not title:
+        logger.debug("Could not parse movie title from '%s'.", file_path.name)
+        _maybe_cache_failure(db, file_path, "unable to parse title")
+        return None
+    logger.debug("Looking up native language for '%s' (title=%s, year=%s).", file_path.name, title, year)
+    codes = _lookup_imdbpie(title, year)
+    source = "imdbpie"
+    error: str | None = None
+    if not codes and tmdb_api_key:
+        codes = _lookup_tmdb(title, year, tmdb_api_key)
+        source = "tmdb"
+    elif not codes:
+        error = "IMDbPie returned no data and no TMDb API key configured"
+    if not codes:
+        logger.debug("No native language found for '%s'.", file_path.name)
+        _maybe_cache_failure(db, file_path, error or "no match from API")
+        return None
+    logger.info("Identified native language(s) for '%s': %s (source: %s).", file_path.name, codes, source)
+    if db is not None:
+        db.set_native_language_cache(file_path, codes, source, None)
+    return codes
+
+
+def _maybe_cache_failure(db: Database | None, file_path: Path, error: str) -> None:
+    """Store a failed lookup result so we don't retry on every run."""
+    if db is not None:
+        db.set_native_language_cache(file_path, None, None, error)
