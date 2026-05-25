@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,6 +29,18 @@ CREATE TABLE IF NOT EXISTS processed_files (
 _MIGRATE_ADD_BYTES_SAVED = "ALTER TABLE processed_files ADD COLUMN bytes_saved INTEGER NOT NULL DEFAULT 0"
 # Migration: add profile_hash to databases created before processing-profile tracking.
 _MIGRATE_ADD_PROFILE_HASH = "ALTER TABLE processed_files ADD COLUMN profile_hash TEXT"
+
+# Metadata cache table for native language lookups.
+_METADATA_CACHE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS metadata_cache (
+    file_path        TEXT PRIMARY KEY,
+    file_hash        TEXT NOT NULL,
+    native_languages TEXT,
+    lookup_source    TEXT,
+    lookup_error     TEXT,
+    cached_at        DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+"""
 
 
 def fingerprint(path: Path) -> str:
@@ -112,6 +125,8 @@ class Database:
         if "profile_hash" not in existing_cols:
             self._conn.execute(_MIGRATE_ADD_PROFILE_HASH)
             self._conn.commit()
+        self._conn.executescript(_METADATA_CACHE_SCHEMA)
+        self._conn.commit()
 
     def close(self) -> None:
         """Close the database connection."""
@@ -194,6 +209,67 @@ class Database:
         conn = self._require_connection()
         row = conn.execute("SELECT COALESCE(SUM(bytes_saved), 0) FROM processed_files").fetchone()
         return int(row[0])
+
+    # ------------------------------------------------------------------
+    # Native language cache
+    # ------------------------------------------------------------------
+
+    def get_native_language_cache(self, path: Path) -> tuple[list[str] | None, str | None, str | None] | None:
+        """Return (native_languages, lookup_source, lookup_error) or None if not cached.
+
+        Only returns a hit when the stored file_hash matches the current
+        fingerprint. A mismatched hash means the file was replaced — caller
+        should re-lookup.
+        """
+        conn = self._require_connection()
+        row = conn.execute(
+            "SELECT file_hash, native_languages, lookup_source, lookup_error FROM metadata_cache WHERE file_path = ?",
+            (str(path),),
+        ).fetchone()
+        if row is None:
+            return None
+        stored_hash, json_langs, source, error = row
+        current_hash = fingerprint(path)
+        if stored_hash != current_hash:
+            return None  # file changed, cache is stale
+        langs: list[str] | None = json.loads(json_langs) if json_langs else None
+        return langs, source, error
+
+    def set_native_language_cache(
+        self,
+        path: Path,
+        native_languages: list[str] | None,
+        lookup_source: str | None,
+        lookup_error: str | None,
+    ) -> None:
+        """Store native language lookup result for *path*.
+
+        native_languages may be None when the lookup failed — this avoids
+        retrying on every subsequent run for the same file.
+        """
+        conn = self._require_connection()
+        current_hash = fingerprint(path)
+        conn.execute(
+            """
+            INSERT INTO metadata_cache (file_path, file_hash, native_languages,
+                                        lookup_source, lookup_error)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(file_path) DO UPDATE SET
+                file_hash        = excluded.file_hash,
+                native_languages = excluded.native_languages,
+                lookup_source    = excluded.lookup_source,
+                lookup_error     = excluded.lookup_error,
+                cached_at        = CURRENT_TIMESTAMP
+            """,
+            (
+                str(path),
+                current_hash,
+                json.dumps(native_languages) if native_languages is not None else None,
+                lookup_source,
+                lookup_error,
+            ),
+        )
+        conn.commit()
 
     # ------------------------------------------------------------------
     # Internal helpers
