@@ -136,6 +136,8 @@ dev = [
     "pytest-crap @ git+https://github.com/binhex/pytest-crap.git@v0.3.1",
     "types-requests>=2.31.0",
     "types-pyyaml>=6.0.0",
-    "pre-commit",
     "types-croniter>=6.2.2.20260518",
+    "pre-commit",
+    "mypy",
+    "ruff"
 ]
