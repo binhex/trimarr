@@ -34,6 +34,7 @@ class _ProcessingConfig:
     mkvmerge_path: str
     language: list[str]
     keep_audio: bool
+    keep_native_audio: bool
     keep_subtitles: bool
     edit_metadata_title: bool
     delete_metadata_title: bool
@@ -43,6 +44,7 @@ class _ProcessingConfig:
     dry_run: bool
     no_backup: bool
     strip_subtitle_regex_patterns: list[re.Pattern] | None = None
+    tmdb_api_key: str | None = None
 
 
 @dataclass
@@ -304,13 +306,42 @@ def _handle_corrupt_output(
     sys.exit(2)
 
 
+def _resolve_effective_language(
+    file_path: Path,
+    cfg: _ProcessingConfig,
+    db: Database,
+    logger: Logger,
+) -> list[str]:
+    """Return the effective language list for *file_path*.
+
+    If ``keep_native_audio`` is set and ``keep_audio`` is not, merges
+    the film's native language(s) into the user's ``--language`` list.
+    The original ``cfg.language`` list is never mutated.
+    """
+    if not cfg.keep_native_audio or cfg.keep_audio:
+        return cfg.language
+
+    from trimarr.native_language import resolve_native_language  # noqa: PLC0415
+
+    native = resolve_native_language(
+        file_path=file_path,
+        db=db,
+        tmdb_api_key=cfg.tmdb_api_key,
+    )
+    if not native:
+        return cfg.language
+
+    # Merge and deduplicate — cfg.language is a list[str]
+    seen = set(cfg.language)
+    return cfg.language + [code for code in native if code not in seen]
+
+
 def _process_one_file(
     file_path: Path,
     root: Path,
     idx: int,
     total: int,
     db: Database,
-    profile_hash: str,
     cfg: _ProcessingConfig,
     counts: _RunCounts,
     failures: list[tuple[Path, str]],
@@ -323,6 +354,26 @@ def _process_one_file(
     in place.  Raises :exc:`CorruptOutputError` without catching it so the outer
     loop can halt all processing immediately.
     """
+    # Compute effective language for this file
+    effective_language = _resolve_effective_language(
+        file_path=file_path,
+        cfg=cfg,
+        db=db,
+        logger=logger,
+    )
+
+    # Build per-file profile hash
+    profile_hash = _build_profile_hash(
+        language=effective_language,
+        keep_audio=cfg.keep_audio,
+        keep_subtitles=cfg.keep_subtitles,
+        edit_metadata_title=cfg.edit_metadata_title,
+        delete_metadata_title=cfg.delete_metadata_title,
+        strip_lower_channels=cfg.strip_lower_channels,
+        strip_commentary=cfg.strip_commentary,
+        strip_subtitle_regex_patterns=cfg.strip_subtitle_regex_patterns,
+    )
+
     # Skip unchanged files processed with the same profile
     if db.is_processed(file_path, profile_hash=profile_hash):
         logger.debug(f"Already processed (unchanged): {file_path}")
@@ -347,7 +398,7 @@ def _process_one_file(
         input_path=file_path,
         output_path=file_path,  # placeholder; process_file patches this
         tracks=tracks,
-        language=cfg.language,
+        language=effective_language,
         keep_audio=cfg.keep_audio,
         keep_subtitles=cfg.keep_subtitles,
         edit_metadata_title=cfg.edit_metadata_title,
@@ -419,7 +470,6 @@ def _process_one_file_guarded(
     idx: int,
     total: int,
     db: Database,
-    profile_hash: str,
     cfg: _ProcessingConfig,
     counts: _RunCounts,
     failures: list[tuple[Path, str]],
@@ -438,7 +488,6 @@ def _process_one_file_guarded(
             idx=idx,
             total=total,
             db=db,
-            profile_hash=profile_hash,
             cfg=cfg,
             counts=counts,
             failures=failures,
@@ -460,6 +509,7 @@ def _dir_has_work(
     files_in_dir: list[tuple[Path, Path]],
     db: Database,
     profile_hash: str,
+    cfg: _ProcessingConfig,
     logger: Logger,
 ) -> bool:
     """Check if any file in *files_in_dir* needs processing (not already processed).
@@ -469,6 +519,11 @@ def _dir_has_work(
     assumed so that pre hooks fire).  Returns False only when every file in
     *files_in_dir* is confirmed already processed and no errors occurred.
     """
+    # When keep_native_audio is active, conservatively fire hooks since
+    # per-file profile hashes can't be computed here.
+    if cfg.keep_native_audio and not cfg.keep_audio:
+        return True
+
     for fp, _ in files_in_dir:
         try:
             if not db.is_processed(fp, profile_hash=profile_hash):
@@ -506,7 +561,7 @@ def _process_directory_groups(
             global_idx = 0
 
             for dir_path, files_in_dir in dir_groups.items():
-                dir_has_work = _dir_has_work(files_in_dir, db, profile_hash, logger)
+                dir_has_work = _dir_has_work(files_in_dir, db, profile_hash, cfg, logger)
 
                 leaf = dir_path.name
 
@@ -528,7 +583,6 @@ def _process_directory_groups(
                         idx=global_idx,
                         total=total,
                         db=db,
-                        profile_hash=profile_hash,
                         cfg=cfg,
                         counts=counts,
                         failures=failures,
@@ -570,6 +624,8 @@ def run(
     strip_commentary: bool = False,
     strip_subtitle_regex_patterns: list[re.Pattern] | None = None,
     skip_size_check: bool = False,
+    keep_native_audio: bool = False,
+    tmdb_api_key: str | None = None,
     pre_process: str | None = None,
     post_process: str | None = None,
     command_timeout_mins: int = 5,
@@ -608,6 +664,7 @@ def run(
         mkvmerge_path=mkvmerge_path,
         language=list(language),
         keep_audio=keep_audio,
+        keep_native_audio=keep_native_audio,
         keep_subtitles=keep_subtitles,
         edit_metadata_title=edit_metadata_title,
         delete_metadata_title=delete_metadata_title,
@@ -617,6 +674,7 @@ def run(
         dry_run=dry_run,
         no_backup=no_backup,
         strip_subtitle_regex_patterns=strip_subtitle_regex_patterns,
+        tmdb_api_key=tmdb_api_key,
     )
 
     command_timeout_seconds: int | None = command_timeout_mins * 60 if command_timeout_mins > 0 else None
