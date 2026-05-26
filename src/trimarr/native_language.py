@@ -251,6 +251,22 @@ def _lookup_imdbpie(title: str, year: str | None) -> list[str] | None:
     return _extract_imdb_spoken_codes(spoken)
 
 
+def _extract_spoken_code_from_string(entry: str, codes: list[str]) -> None:
+    """Handle a 2-letter ISO 639-1 code entry."""
+    if len(entry) == 2:
+        code = _ISO_639_1_TO_2.get(entry.lower())
+        if code and code not in codes:
+            codes.append(code)
+
+
+def _extract_spoken_code_from_dict(entry: dict, codes: list[str]) -> None:
+    """Handle a dict entry with name/description."""
+    lang_name = entry.get("name") or entry.get("description") or ""
+    code = _language_name_to_iso_639_2(lang_name)
+    if code and code not in codes:
+        codes.append(code)
+
+
 def _extract_imdb_spoken_codes(spoken: list) -> list[str] | None:
     """Convert IMDb spoken language entries to ISO 639-2/B codes.
 
@@ -263,16 +279,22 @@ def _extract_imdb_spoken_codes(spoken: list) -> list[str] | None:
     codes: list[str] = []
     for entry in spoken:
         if isinstance(entry, str) and len(entry) == 2:
-            # ISO 639-1 code — map directly to 3-letter form
-            code = _ISO_639_1_TO_2.get(entry.lower())
-            if code and code not in codes:
-                codes.append(code)
-        else:
-            lang_name = entry.get("name") or entry.get("description") or "" if isinstance(entry, dict) else str(entry)  # noqa: E501
-            code = _language_name_to_iso_639_2(lang_name)
-            if code and code not in codes:
-                codes.append(code)
+            _extract_spoken_code_from_string(entry, codes)
+        elif isinstance(entry, dict):
+            _extract_spoken_code_from_dict(entry, codes)
     return codes or None
+
+
+def _resolve_alpha2_fallback(lang: object) -> str | None:
+    """When alpha_2 exists but is not in ``_ISO_639_1_TO_2``, try
+    bibliographic then alpha_3."""
+    biblio = getattr(lang, "bibliographic", None)
+    if isinstance(biblio, str) and biblio:
+        return normalize_language_code(biblio.lower())
+    alpha_3 = getattr(lang, "alpha_3", None)
+    if isinstance(alpha_3, str) and alpha_3:
+        return normalize_language_code(alpha_3.lower())
+    return None
 
 
 def _lookup_pycountry_language(
@@ -298,12 +320,9 @@ def _lookup_pycountry_language(
             if code:
                 return code
             # alpha_2 not in map — try bibliographic or alpha_3
-            biblio = getattr(lang, "bibliographic", None)
-            if isinstance(biblio, str) and biblio:
-                return normalize_language_code(biblio.lower())
-            alpha_3 = getattr(lang, "alpha_3", None)
-            if isinstance(alpha_3, str) and alpha_3:
-                return normalize_language_code(alpha_3.lower())
+            result = _resolve_alpha2_fallback(lang)
+            if result:
+                return result
         if fallback_code is not None:
             return normalize_language_code(fallback_code)
         alpha_3 = getattr(lang, "alpha_3", None)
@@ -446,9 +465,8 @@ def resolve_native_language(
         if cached is not None:
             cached_langs, cached_source, cached_error = cached
             if cached_langs:
-                logger.debug(
-                    "Native language cache hit for '%s': %s (source: %s)", file_path.name, cached_langs, cached_source
-                )
+                _msg = "Native language cache hit for '%s': %s (source: %s)"
+                logger.debug(_msg, file_path.name, cached_langs, cached_source)
             return cached_langs
     title, year = parse_movie_title(file_path)
     if not title:
@@ -456,22 +474,17 @@ def resolve_native_language(
         _maybe_cache_failure(db, file_path, "unable to parse title")
         return None
     if not year:
-        logger.debug(
-            "Could not determine year for '%s' — skipping native language lookup (without a year the wrong film may be matched).",
-            file_path.name,
-        )
+        _msg = "Could not determine year for '%s' — skipping native language lookup (without a year the wrong film may be matched)."
+        logger.debug(_msg, file_path.name)
         _maybe_cache_failure(db, file_path, "unable to determine year from filename or parent directory")
         return None
     logger.debug("Looking up native language for '%s' (title=%s, year=%s).", file_path.name, title, year)
     codes = _lookup_imdbpie(title, year)
     source = "imdbpie"
     error = "no match from API"
-    if not codes:
-        if tmdb_api_key:
-            codes = _lookup_tmdb(title, year, tmdb_api_key)
-            source = "tmdb"
-        else:
-            error = "IMDbPie returned no data and no TMDb API key configured"
+    if not codes and tmdb_api_key:
+        codes = _lookup_tmdb(title, year, tmdb_api_key)
+        source = "tmdb"
     if not codes:
         logger.debug("No native language found for '%s'.", file_path.name)
         _maybe_cache_failure(db, file_path, error)

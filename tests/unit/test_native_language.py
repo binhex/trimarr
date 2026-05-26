@@ -415,6 +415,22 @@ class TestResolveNativeLanguage:
             Path("/data/Unknown.mkv"), None, None, "unable to parse title"
         )
 
+    def test_imdbpie_fails_no_tmdb_key(self, mocker) -> None:
+        """IMDbPie returns no data, no TMDb API key configured — hits failure path."""
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.search_for_title.return_value = []
+        result = resolve_native_language(Path("/data/Test Movie (2020).mkv"), db=mock_db)
+        assert result is None
+        mock_db.set_native_language_cache.assert_called_once_with(
+            Path("/data/Test Movie (2020).mkv"),
+            None,
+            None,
+            "no match from API",
+        )
+
 
 class TestNormaliseForCompare:
     """Tests for _normalise_for_compare()."""
