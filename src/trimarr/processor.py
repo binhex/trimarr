@@ -552,6 +552,20 @@ def _apply_strip_commentary(
         _strip_subtitle_commentary_unsafe(result, tracks)
 
 
+def _match_subtitle_regex_patterns(
+    track: MkvTrack,
+    patterns: list[re.Pattern],
+    result: _FilterResult,
+) -> None:
+    """If *track* name matches any *pattern*, move it to sub_drop."""
+    for pattern in patterns:
+        if pattern.search(track.name):
+            result.sub_keep.remove(track.id)
+            result.sub_drop.append(track.id)
+            result.subtitle_regex_drop_ids.add(track.id)
+            return
+
+
 def _apply_strip_subtitle_regex(
     result: _FilterResult,
     tracks: list[MkvTrack],
@@ -576,12 +590,7 @@ def _apply_strip_subtitle_regex(
             continue
         if track.name is None:
             continue
-        for pattern in patterns:
-            if pattern.search(track.name):
-                result.sub_keep.remove(track.id)
-                result.sub_drop.append(track.id)
-                result.subtitle_regex_drop_ids.add(track.id)
-                break  # matched one pattern, no need to check others
+        _match_subtitle_regex_patterns(track, patterns, result)
 
 
 def _group_kept_audio_by_language(

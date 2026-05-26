@@ -540,6 +540,27 @@ class TestExtractImdbSpokenCodes:
         result = _extract_imdb_spoken_codes([{"name": "German"}, {"name": "German"}])
         assert result == ["ger"]
 
+    def test_three_plus_char_string_names(self) -> None:
+        """3+ char strings treated as language names resolve to codes."""
+        from trimarr.native_language import _extract_imdb_spoken_codes
+
+        result = _extract_imdb_spoken_codes(["English", "German"])
+        assert result == ["eng", "ger"]
+
+    def test_three_plus_char_duplicate(self) -> None:
+        """Duplicate 3+ char strings produce a single code."""
+        from trimarr.native_language import _extract_imdb_spoken_codes
+
+        result = _extract_imdb_spoken_codes(["English", "English"])
+        assert result == ["eng"]
+
+    def test_three_plus_char_unknown_name(self) -> None:
+        """Unknown 3+ char string returns None."""
+        from trimarr.native_language import _extract_imdb_spoken_codes
+
+        result = _extract_imdb_spoken_codes(["ObscureMadeUpLanguage"])
+        assert result is None
+
 
 class TestLookupPycountryLanguage:
     """Direct tests for _lookup_pycountry_language()."""

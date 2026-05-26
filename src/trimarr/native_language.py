@@ -13,7 +13,7 @@ import re
 import unicodedata
 import urllib.parse
 import urllib.request
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from trimarr.processor import _ISO_639_1_TO_2, normalize_language_code
 
@@ -213,6 +213,41 @@ def _find_matching_imdb_id(
     return None
 
 
+def _search_and_match_imdb(
+    client: Any,
+    title: str,
+    year: str | None,
+    search_term: str,
+) -> str | None:
+    """Search IMDbPie and match title+year, returning imdb_id or None."""
+    try:
+        hits = client.search_for_title(search_term)
+    except Exception as exc:
+        logger.debug("IMDbPie search failed for '%s': %s", search_term, exc)
+        return None
+    if not hits:
+        logger.debug("IMDbPie returned no hits for '%s'.", search_term)
+        return None
+    matched_id = _find_matching_imdb_id(hits, title, year)
+    if not matched_id:
+        logger.debug("IMDbPie no title+year match for '%s'.", search_term)
+        return None
+    return matched_id
+
+
+def _fetch_imdb_spoken_languages(client: Any, matched_id: str) -> list[str] | None:
+    """Fetch auxiliary data and extract spoken language codes."""
+    try:
+        aux = client.get_title_auxiliary(matched_id)
+    except Exception as exc:
+        logger.debug("IMDbPie aux data failed for '%s': %s", matched_id, exc)
+        return None
+    spoken = aux.get("spokenLanguages") if aux else None
+    if not spoken:
+        return None
+    return _extract_imdb_spoken_codes(spoken)
+
+
 def _lookup_imdbpie(title: str, year: str | None) -> list[str] | None:
     """Return ISO 639-2/B language codes via IMDbPie, or None on failure."""
     try:
@@ -228,27 +263,10 @@ def _lookup_imdbpie(title: str, year: str | None) -> list[str] | None:
     search_term = title
     if year:
         search_term = f"{title} {year}"
-    try:
-        hits = client.search_for_title(search_term)
-    except Exception as exc:
-        logger.debug("IMDbPie search failed for '%s': %s", search_term, exc)
-        return None
-    if not hits:
-        logger.debug("IMDbPie returned no hits for '%s'.", search_term)
-        return None
-    matched_id = _find_matching_imdb_id(hits, title, year)
+    matched_id = _search_and_match_imdb(client, title, year, search_term)
     if not matched_id:
-        logger.debug("IMDbPie no title+year match for '%s'.", search_term)
         return None
-    try:
-        aux = client.get_title_auxiliary(matched_id)
-    except Exception as exc:
-        logger.debug("IMDbPie aux data failed for '%s': %s", matched_id, exc)
-        return None
-    spoken = aux.get("spokenLanguages") if aux else None
-    if not spoken:
-        return None
-    return _extract_imdb_spoken_codes(spoken)
+    return _fetch_imdb_spoken_languages(client, matched_id)
 
 
 def _extract_spoken_code_from_string(entry: str, codes: list[str]) -> None:
@@ -454,6 +472,25 @@ def _lookup_tmdb(title: str, year: str | None, api_key: str) -> list[str] | None
     return None
 
 
+_CACHE_MISS = object()
+
+
+def _check_native_language_cache(
+    db: Database | None,
+    file_path: Path,
+) -> object:
+    """Check DB cache for *file_path*; return stored value or ``_CACHE_MISS``."""
+    if db is not None:
+        cached = db.get_native_language_cache(file_path)
+        if cached is not None:
+            cached_langs, cached_source, _ = cached
+            if cached_langs:
+                _msg = "Native language cache hit for '%s': %s (source: %s)"
+                logger.debug(_msg, file_path.name, cached_langs, cached_source)
+            return cached_langs
+    return _CACHE_MISS
+
+
 def resolve_native_language(
     file_path: Path,
     db: Database | None,
@@ -465,14 +502,9 @@ def resolve_native_language(
     attempts IMDbPie lookup followed by TMDb fallback.  Caches the result
     (including failures) so subsequent runs are fast.
     """
-    if db is not None:
-        cached = db.get_native_language_cache(file_path)
-        if cached is not None:
-            cached_langs, cached_source, cached_error = cached
-            if cached_langs:
-                _msg = "Native language cache hit for '%s': %s (source: %s)"
-                logger.debug(_msg, file_path.name, cached_langs, cached_source)
-            return cached_langs
+    cached_langs = _check_native_language_cache(db, file_path)
+    if cached_langs is not _CACHE_MISS:
+        return cast("list[str] | None", cached_langs)
     title, year = parse_movie_title(file_path)
     if not title:
         logger.debug("Could not parse movie title from '%s'.", file_path.name)
