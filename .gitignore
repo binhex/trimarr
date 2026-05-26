@@ -1,1 +1,21 @@
-*.py,cover
+# Byte-compiled
+__pycache__/
+*.pyc
+
+# Coverage
+.coverage
+coverage.xml
+htmlcov/
+
+# Database
+db
+
+# Linting
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Build
+dist/
+build/
+*.egg-info/
