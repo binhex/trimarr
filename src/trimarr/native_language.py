@@ -204,11 +204,22 @@ def _lookup_pycountry_language(
 
 
 def _language_name_to_iso_639_2(name: str) -> str | None:
-    """Convert a spoken language name (e.g. 'German', 'English') to ISO 639-2/B."""
+    """Convert a spoken language name (e.g. 'German', 'English') to ISO 639-2/B.
+
+    Uses the built-in fallback dict first since it contains well-known English
+    language names that IMDbPie returns.  Pycountry is only consulted for names
+    not in the dict — this avoids pycountry matching short/ambiguous names
+    (e.g. ``"En"``) to completely different ISO codes (``"enc"``).
+    """
+    # Check the well-known fallback dict first — these are the language names
+    # IMDbPie actually returns ("English", "German", etc.).
+    fallback = _fallback_lang_name_to_code(name)
+    if fallback:
+        return fallback
     try:
         import pycountry
     except ImportError:
-        return _fallback_lang_name_to_code(name)
+        return None
     result = _lookup_pycountry_language(pycountry.languages.get(name=name))
     if result:
         return result
@@ -218,7 +229,7 @@ def _language_name_to_iso_639_2(name: str) -> str | None:
     result = _lookup_pycountry_language(pycountry.languages.get(bibliographic=name.lower()), fallback_code=name.lower())
     if result:
         return result
-    return _fallback_lang_name_to_code(name)
+    return None
 
 
 _LANG_NAME_TO_CODE: dict[str, str] = {
