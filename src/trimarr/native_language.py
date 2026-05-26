@@ -19,21 +19,27 @@ from trimarr.processor import _ISO_639_1_TO_2, normalize_language_code
 
 # Lazy module-level imports — attempted once at load time, cached in module
 # globals so every function call does not re-attempt the import.
+_imdbpie: Any
+_HAS_IMDBPIE: bool
 try:
-    import imdbpie as _imdbpie  # noqa: F811
+    import imdbpie as _imdbpie_lib  # noqa: F811
 
     _HAS_IMDBPIE = True
+    _imdbpie = _imdbpie_lib
 except ImportError:
-    _imdbpie = None
     _HAS_IMDBPIE = False
+    _imdbpie = None
 
+_pycountry: Any
+_HAS_PYCOUNTRY: bool
 try:
-    import pycountry as _pycountry
+    import pycountry as _pycountry_lib
 
     _HAS_PYCOUNTRY = True
+    _pycountry = _pycountry_lib
 except ImportError:
-    _pycountry = None
     _HAS_PYCOUNTRY = False
+    _pycountry = None
 
 if TYPE_CHECKING:
     from pathlib import Path
