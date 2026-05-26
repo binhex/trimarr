@@ -373,6 +373,13 @@ def resolve_native_language(
         logger.debug("Could not parse movie title from '%s'.", file_path.name)
         _maybe_cache_failure(db, file_path, "unable to parse title")
         return None
+    if not year:
+        logger.debug(
+            "Could not determine year for '%s' — skipping native language lookup (without a year the wrong film may be matched).",
+            file_path.name,
+        )
+        _maybe_cache_failure(db, file_path, "unable to determine year from filename or parent directory")
+        return None
     logger.debug("Looking up native language for '%s' (title=%s, year=%s).", file_path.name, title, year)
     codes = _lookup_imdbpie(title, year)
     source = "imdbpie"
