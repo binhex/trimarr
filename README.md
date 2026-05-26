@@ -18,6 +18,11 @@ automatically deduplicated.
   all tracks of that type are kept to prevent accidentally silencing a file. Additionally, if all
   language-matching audio tracks are commentary (e.g. Director's Commentary on a foreign-language
   film), audio filtering is also skipped. A warning is logged in both cases.
+- **Native language preservation** — with `--keep-native-audio`, trimarr identifies the film's
+  original spoken language(s) via IMDb (or TMDb as fallback) and preserves those audio tracks
+  even if they don't match your `--language` preference. Ideal for dubbed films (e.g., keeping
+  original Chinese audio alongside an English dub). Results are cached in the database so each
+  file is looked up only once.
 - **Auto-managed mkvmerge** — downloads the mkvmerge binary from MKVToolNix GitHub releases on
   first run and keeps it up to date automatically (disable with `--no-update-check`).
 - **Space savings summary** — reports bytes reclaimed at the end of each run and a cumulative
@@ -83,6 +88,8 @@ trimarr --help
 | `--delete-metadata-title` | Remove the container title metadata from each file. Mutually exclusive with `--edit-metadata-title`. | `false` | — | `flag` |
 | `--keep-subtitles` | Keep all subtitle tracks regardless of language. | `false` | — | `flag` |
 | `--keep-audio` | Keep all audio tracks regardless of language. | `false` | — | `flag` |
+| `--keep-native-audio` | Identify the film's native/original spoken language(s) via IMDb (or TMDb as fallback) and keep all audio tracks in those languages alongside your `--language` preference. Ignored when `--keep-audio` is set. First-time lookups require an internet connection; results are cached in the database. | `false` | — | `flag` |
+| `--tmdb-api-key` | TMDb API key used as fallback when IMDbPie cannot identify a film's native language. Optional — lookups that fail on IMDbPie silently fall back to standard behaviour. | — | `<key>` | `string` |
 | `--no-backup` | Delete the original file after successful processing instead of renaming it to `<name>.bak`. By default a backup is always created. | `false` | — | `flag` |
 | `--no-update-check` | Skip the automatic check for a newer mkvmerge version. Has no effect when `--mkvmerge-path` is supplied (user-managed binaries are never auto-updated). | `false` | — | `flag` |
 | `--strip-lower-channels` | After language filtering, drop any audio tracks whose channel count is strictly below the highest channel count among the surviving audio tracks. For example, given English tracks at 8ch, 8ch, and 2ch, the 2ch track is removed. Tracks with an unknown channel count are always kept. Has no effect when `--keep-audio` is set. **Disabled by default** — enable only when you are confident lower-channel duplicates are not needed. | `false` | — | `flag` |
@@ -164,6 +171,13 @@ flowchart TD
 > If a file needs no changes (all tracks already match, no metadata to edit), it is marked as
 > processed in the database and skipped on all future runs — unless the file content or processing
 > profile changes.
+
+> **Native audio preservation:** When `--keep-native-audio` is enabled, trimarr identifies the
+> film's original spoken language(s) via IMDb (or TMDb as fallback) and merges them into the
+> effective language list *before* the `Filter by --language` step. This means the native language
+> is treated identically to a user-supplied language — all existing safeguards (audio fallback,
+> commentary stripping, channel stripping) apply uniformly. The lookup result is cached in the
+> database so each unique file is resolved only once.
 
 ## Scheduler
 
