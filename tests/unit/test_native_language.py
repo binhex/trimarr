@@ -433,6 +433,133 @@ class TestResolveNativeLanguage:
             "no match from IMDbPie (tried filename and directory name, no TMDb API key configured)",
         )
 
+    def test_dir_title_fallback(self, mocker) -> None:
+        """Filename search returns None, directory search succeeds."""
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        # First call (filename) returns [], second call (directory) succeeds
+        instance.search_for_title.side_effect = [
+            [],
+            [{"title": "Das Boot", "year": 1981, "imdb_id": "tt0082096"}],
+        ]
+        instance.get_title_auxiliary.return_value = {
+            "spokenLanguages": [{"name": "German"}],
+        }
+        # File with noisy scene name in parent dir with clean name
+        path = Path("/media/Das Boot (1981)/Das.Boot.1981.DC.1080p.BluRay.x264-CtrlHD.mkv")
+        result = resolve_native_language(path, db=mock_db)
+        assert result == ["ger"]
+        # Should have called search twice (filename failed, directory succeeded)
+        assert instance.search_for_title.call_count == 2
+        mock_db.set_native_language_cache.assert_called_once_with(path, ["ger"], "imdbpie_directory", None)
+
+    def test_filename_success_no_fallback(self, mocker) -> None:
+        """Filename succeeds - directory fallback is never attempted."""
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.search_for_title.return_value = [
+            {"title": "Das Boot", "year": 1981, "imdb_id": "tt0082096"},
+        ]
+        instance.get_title_auxiliary.return_value = {
+            "spokenLanguages": [{"name": "German"}],
+        }
+        path = Path("/data/Das Boot (1981).mkv")
+        result = resolve_native_language(path, db=mock_db)
+        assert result == ["ger"]
+        # Should only have called search once (filename succeeded)
+        assert instance.search_for_title.call_count == 1
+        mock_db.set_native_language_cache.assert_called_once_with(path, ["ger"], "imdbpie_filename", None)
+
+    def test_dir_title_no_year(self, mocker) -> None:
+        """Directory has no year, directory step skipped, falls to TMDb."""
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.search_for_title.return_value = []
+        mock_urlopen = mocker.patch("trimarr.native_language.urllib.request.urlopen")
+        search_response = mocker.MagicMock()
+        search_response.__enter__.return_value = search_response
+        search_response.read.return_value = b"""
+        {"results": [{"id": 123, "title": "Some Movie", "original_title": "Some Movie"}]}
+        """
+        detail_response = mocker.MagicMock()
+        detail_response.__enter__.return_value = detail_response
+        detail_response.read.return_value = b"""
+        {"original_language": "en"}
+        """
+        mock_urlopen.side_effect = [search_response, detail_response]
+        # File in a directory with no year; filename itself has a year
+        path = Path("/data/Some Movie (2020).mkv")
+        result = resolve_native_language(path, db=mock_db, tmdb_api_key="fake-key")
+        assert result == ["eng"]
+        mock_db.set_native_language_cache.assert_called_once_with(path, ["eng"], "tmdb_filename", None)
+
+    def test_all_steps_fail(self, mocker) -> None:
+        """All 4 steps return None -> cached failure with combined error."""
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.search_for_title.return_value = []
+        mock_urlopen = mocker.patch("trimarr.native_language.urllib.request.urlopen")
+        mock_urlopen.side_effect = OSError("Connection refused")
+        path = Path("/data/Test Movie (2020).mkv")
+        result = resolve_native_language(path, db=mock_db, tmdb_api_key="fake-key")
+        assert result is None
+        mock_db.set_native_language_cache.assert_called_once()
+        args = mock_db.set_native_language_cache.call_args
+        assert args[0][3] == "no match from IMDbPie or TMDb (tried filename and directory name)"
+
+    def test_tmdb_fallback_dir(self, mocker) -> None:
+        """IMDbPie fails both steps, TMDb with directory succeeds."""
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.search_for_title.return_value = []
+        mock_urlopen = mocker.patch("trimarr.native_language.urllib.request.urlopen")
+        search_response = mocker.MagicMock()
+        search_response.__enter__.return_value = search_response
+        search_response.read.return_value = b"""
+        {"results": [{"id": 123, "title": "Some Movie", "original_title": "Some Movie"}]}
+        """
+        detail_response = mocker.MagicMock()
+        detail_response.__enter__.return_value = detail_response
+        detail_response.read.return_value = b"""
+        {"original_language": "fr"}
+        """
+        mock_urlopen.side_effect = [search_response, search_response, detail_response]
+        # IMDbPie fails on both filename and dir; TMDb succeeds on dir
+        path = Path("/media/Some Movie (2020)/Noisy.File.GROUP.mkv")
+        result = resolve_native_language(path, db=mock_db, tmdb_api_key="fake-key")
+        assert result == ["fre"]
+        mock_db.set_native_language_cache.assert_called_once_with(path, ["fre"], "tmdb_directory", None)
+
+    def test_no_tmdb_key_dir(self, mocker) -> None:
+        """No TMDb key, IMDbPie with directory succeeds (TMDb steps skipped)."""
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        # First call (filename) returns [], second call (directory) succeeds
+        instance.search_for_title.side_effect = [
+            [],
+            [{"title": "Some Movie", "year": 2020, "imdb_id": "tt0000000"}],
+        ]
+        instance.get_title_auxiliary.return_value = {
+            "spokenLanguages": [{"name": "English"}],
+        }
+        path = Path("/media/Some Movie (2020)/Noisy.File.mkv")
+        result = resolve_native_language(path, db=mock_db)
+        assert result == ["eng"]
+        assert instance.search_for_title.call_count == 2
+        mock_db.set_native_language_cache.assert_called_once_with(path, ["eng"], "imdbpie_directory", None)
+
 
 class TestNormaliseForCompare:
     """Tests for _normalise_for_compare()."""
