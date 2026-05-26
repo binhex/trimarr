@@ -13,27 +13,34 @@ import re
 import unicodedata
 import urllib.parse
 import urllib.request
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 from trimarr.processor import _ISO_639_1_TO_2, normalize_language_code
 
 # Lazy module-level imports — attempted once at load time, cached in module
 # globals so every function call does not re-attempt the import.
+_imdbpie: Any
+_HAS_IMDBPIE: bool
 try:
-    import imdbpie as _imdbpie  # noqa: F811
+    import imdbpie as _imdbpie_lib
 
     _HAS_IMDBPIE = True
+    _imdbpie = _imdbpie_lib
 except ImportError:
-    _imdbpie = None
     _HAS_IMDBPIE = False
+    _imdbpie = None
 
+_pycountry: Any
+_HAS_PYCOUNTRY: bool
 try:
-    import pycountry as _pycountry
+    import pycountry as _pycountry_lib
 
     _HAS_PYCOUNTRY = True
+    _pycountry = _pycountry_lib
 except ImportError:
-    _pycountry = None
     _HAS_PYCOUNTRY = False
+    _pycountry = None
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -167,10 +174,15 @@ def parse_movie_title(file_path: Path) -> tuple[str, str | None]:
     year_matches = _YEAR_RE.findall(cleaned)
     if year_matches:
         year = year_matches[-1]
-        # Remove the last year occurrence from the title string
+        # Take everything BEFORE the last year occurrence as the title.
+        # In scene naming conventions, everything after the year is
+        # metadata (resolution, codec, release group, edition tags),
+        # not part of the movie title.  Position-based extraction is
+        # far more robust than maintaining a blocklist of scene tags.
         year_pos = cleaned.rfind(year)
         if year_pos != -1:
-            cleaned = cleaned[:year_pos] + cleaned[year_pos + len(year) :]
+            before = cleaned[:year_pos].strip()
+            cleaned = before or cleaned[year_pos + len(year) :].strip()
 
     # If no year found in the filename, try the parent directory name
     if year is None:
@@ -200,6 +212,10 @@ def parse_movie_title(file_path: Path) -> tuple[str, str | None]:
         return "".join(result)
 
     cleaned = _strip_parens(cleaned)
+    # Strip any orphaned brackets or parens that survived position-based
+    # extraction (e.g. the opening paren before a year-wrapped-in-parens
+    # style filename like "Movie (2024)").
+    cleaned = re.sub(r"[\[\]()]", "", cleaned)
     cleaned = _strip_release_tags(cleaned)
     title = _normalise_title(" ".join(cleaned.split()))
     if not title:
@@ -507,6 +523,39 @@ def _check_native_language_cache(
     return _CACHE_MISS
 
 
+def _get_filename_title(file_path: Path) -> tuple[str, str | None]:
+    """Extract movie title from the filename stem via parse_movie_title."""
+    return parse_movie_title(file_path)
+
+
+def _get_directory_title(file_path: Path) -> tuple[str, str | None]:
+    """Extract movie title from the parent directory name via parse_movie_title."""
+    return parse_movie_title(file_path.parent)
+
+
+def _lookup_chain(tmdb_api_key: str | None) -> list[tuple]:
+    """Return ordered (lookup_fn, title_fn, source_label) triples."""
+    chain: list[tuple] = [
+        (_lookup_imdbpie, _get_filename_title, "imdbpie_filename"),
+        (_lookup_imdbpie, _get_directory_title, "imdbpie_directory"),
+    ]
+    if tmdb_api_key:
+        chain += [
+            (partial(_lookup_tmdb, api_key=tmdb_api_key), _get_filename_title, "tmdb_filename"),
+            (partial(_lookup_tmdb, api_key=tmdb_api_key), _get_directory_title, "tmdb_directory"),
+        ]
+    return chain
+
+
+def _describe_failure(source_label: str, tmdb_api_key: str | None) -> str:
+    """Return an error message for a failed lookup step."""
+    if "tmdb" in source_label:
+        return "no match from IMDbPie or TMDb (tried filename and directory name)"
+    if not tmdb_api_key:
+        return "no match from IMDbPie (tried filename and directory name, no TMDb API key configured)"
+    return "no match from IMDbPie"
+
+
 def resolve_native_language(
     file_path: Path,
     db: Database | None,
@@ -515,38 +564,52 @@ def resolve_native_language(
     """Return ISO 639-2/B native language codes for *file_path*, or None.
 
     Checks the database cache first (by file_path + fingerprint).  On miss,
-    attempts IMDbPie lookup followed by TMDb fallback.  Caches the result
-    (including failures) so subsequent runs are fast.
+    iterates through a fallback chain: IMDbPie+filename → IMDbPie+directory
+    → TMDb+filename → TMDb+directory.  Caches the result (including
+    failures) so subsequent runs are fast.
     """
     cached_langs = _check_native_language_cache(db, file_path)
     if cached_langs is not _CACHE_MISS:
         return cast("list[str] | None", cached_langs)
-    title, year = parse_movie_title(file_path)
-    if not title:
-        logger.debug("Could not parse movie title from '%s'.", file_path.name)
-        _maybe_cache_failure(db, file_path, "unable to parse title")
-        return None
-    if not year:
-        _msg = "Could not determine year for '%s' — skipping native language lookup (without a year the wrong film may be matched)."
-        logger.debug(_msg, file_path.name)
-        _maybe_cache_failure(db, file_path, "unable to determine year from filename or parent directory")
-        return None
-    logger.debug("Looking up native language for '%s' (title=%s, year=%s).", file_path.name, title, year)
-    codes = _lookup_imdbpie(title, year)
-    source = "imdbpie"
-    error = "no match from IMDbPie (no TMDb API key configured for fallback)"
-    if not codes and tmdb_api_key:
-        codes = _lookup_tmdb(title, year, tmdb_api_key)
-        source = "tmdb"
-        error = "no match from IMDbPie or TMDb"
-    if not codes:
-        logger.debug("No native language found for '%s'.", file_path.name)
-        _maybe_cache_failure(db, file_path, error)
-        return None
-    logger.info("Identified native language(s) for '%s': %s (source: %s).", file_path.name, codes, source)
-    if db is not None:
-        db.set_native_language_cache(file_path, codes, source, None)
-    return codes
+
+    last_error = "no match from any source"
+    chain = _lookup_chain(tmdb_api_key)
+    for lookup_fn, title_fn, source_label in chain:
+        title, year = title_fn(file_path)
+        if not title or not year:
+            logger.debug(
+                "Skipping lookup for '%s' — could not determine title/year.",
+                file_path.name,
+            )
+            continue
+        logger.debug(
+            "Looking up native language for '%s' (title=%s, year=%s, source=%s).",
+            file_path.name,
+            title,
+            year,
+            source_label,
+        )
+        codes = lookup_fn(title, year)
+        if codes is not None:
+            logger.info(
+                "Identified native language(s) for '%s': %s (source=%s).",
+                file_path.name,
+                codes,
+                source_label,
+            )
+            if db is not None:
+                db.set_native_language_cache(file_path, codes, source_label, None)
+            return cast("list[str]", codes)
+        last_error = _describe_failure(source_label, tmdb_api_key)
+        logger.debug(
+            "No native language found for '%s' via %s.",
+            file_path.name,
+            source_label,
+        )
+
+    logger.debug("No native language found for '%s' after exhausting all sources.", file_path.name)
+    _maybe_cache_failure(db, file_path, last_error)
+    return None
 
 
 def _maybe_cache_failure(db: Database | None, file_path: Path, error: str) -> None:
