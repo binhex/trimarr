@@ -167,10 +167,14 @@ def parse_movie_title(file_path: Path) -> tuple[str, str | None]:
     year_matches = _YEAR_RE.findall(cleaned)
     if year_matches:
         year = year_matches[-1]
-        # Remove the last year occurrence from the title string
+        # Take everything BEFORE the last year occurrence as the title.
+        # In scene naming conventions, everything after the year is
+        # metadata (resolution, codec, release group, edition tags),
+        # not part of the movie title.  Position-based extraction is
+        # far more robust than maintaining a blocklist of scene tags.
         year_pos = cleaned.rfind(year)
         if year_pos != -1:
-            cleaned = cleaned[:year_pos] + cleaned[year_pos + len(year) :]
+            cleaned = cleaned[:year_pos].strip()
 
     # If no year found in the filename, try the parent directory name
     if year is None:
@@ -200,6 +204,10 @@ def parse_movie_title(file_path: Path) -> tuple[str, str | None]:
         return "".join(result)
 
     cleaned = _strip_parens(cleaned)
+    # Strip any orphaned brackets or parens that survived position-based
+    # extraction (e.g. the opening paren before a year-wrapped-in-parens
+    # style filename like "Movie (2024)").
+    cleaned = re.sub(r"[\[\]()]", "", cleaned)
     cleaned = _strip_release_tags(cleaned)
     title = _normalise_title(" ".join(cleaned.split()))
     if not title:

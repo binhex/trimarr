@@ -28,6 +28,7 @@ class TestParseMovieTitle:
             ("/data/test movie 1999.mkv", "test movie", "1999"),
             ("/data/[Group] Movie Title (2020).mkv", "movie title", "2020"),
             ("/data/Movie_Title_2023_HDR.mkv", "movie title", "2023"),
+            ("/data/Das.Boot.1981.DC.1080p.BluRay.x264-CtrlHD.mkv", "das boot", "1981"),
         ],
     )
     def test_parse_movie_title(
