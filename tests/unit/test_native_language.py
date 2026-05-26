@@ -354,7 +354,7 @@ class TestResolveNativeLanguage:
         result = resolve_native_language(Path("/data/Das Boot (1981).mkv"), db=mock_db)
         assert result == ["ger"]
         mock_db.set_native_language_cache.assert_called_once_with(
-            Path("/data/Das Boot (1981).mkv"), ["ger"], "imdbpie", None
+            Path("/data/Das Boot (1981).mkv"), ["ger"], "imdbpie_filename", None
         )
 
     def test_cache_miss_all_fail(self, mocker) -> None:
@@ -405,7 +405,7 @@ class TestResolveNativeLanguage:
         mock_db.set_native_language_cache.assert_called_once()
 
     def test_empty_title(self, mocker) -> None:
-        """When parse_movie_title returns empty title, returns None and caches failure."""
+        """When parse_movie_title returns empty title, chain skips and fails."""
         import trimarr.native_language as nl
 
         mocker.patch.object(nl, "parse_movie_title", return_value=("", None))
@@ -414,7 +414,7 @@ class TestResolveNativeLanguage:
         result = resolve_native_language(Path("/data/Unknown.mkv"), db=mock_db)
         assert result is None
         mock_db.set_native_language_cache.assert_called_once_with(
-            Path("/data/Unknown.mkv"), None, None, "unable to parse title"
+            Path("/data/Unknown.mkv"), None, None, "no match from any source"
         )
 
     def test_imdbpie_fails_no_tmdb_key(self, mocker) -> None:
@@ -430,7 +430,7 @@ class TestResolveNativeLanguage:
             Path("/data/Test Movie (2020).mkv"),
             None,
             None,
-            "no match from IMDbPie (no TMDb API key configured for fallback)",
+            "no match from IMDbPie (tried filename and directory name, no TMDb API key configured)",
         )
 
 
