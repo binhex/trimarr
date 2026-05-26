@@ -325,6 +325,13 @@ class TestResolveNativeLanguage:
         assert result == ["chi"]
         mock_db.get_native_language_cache.assert_called_once()
 
+    def test_cache_hit_empty_langs(self, mocker) -> None:
+        """Cache hit with empty languages list (falsy) still returns empty list."""
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = ([], "imdbpie", None)
+        result = resolve_native_language(Path("/data/test.mkv"), db=mock_db)
+        assert result == []
+
     def test_cache_miss_then_imdbpie_success(self, mocker) -> None:
         """Cache miss triggers IMDbPie lookup, result is cached."""
         mock_db = mocker.MagicMock()
