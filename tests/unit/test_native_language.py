@@ -481,3 +481,122 @@ class TestNormaliseForCompare:
         title2, year2 = parse_movie_title(Path("/data/Pride & Prejudice (2005).mkv"))
         assert year2 == "2005"
         assert _normalise_for_compare(title2) == "prideandprejudice"
+
+
+class TestExtractImdbSpokenCodes:
+    """Direct tests for _extract_imdb_spoken_codes()."""
+
+    def test_string_format_codes(self) -> None:
+        """String entries (ISO 639-1 codes) are mapped through _ISO_639_1_TO_2."""
+        from trimarr.native_language import _extract_imdb_spoken_codes
+
+        result = _extract_imdb_spoken_codes(["en", "de"])
+        assert result == ["eng", "ger"]
+
+    def test_string_format_duplicate(self) -> None:
+        """Duplicate string entries produce a single code."""
+        from trimarr.native_language import _extract_imdb_spoken_codes
+
+        result = _extract_imdb_spoken_codes(["en", "en"])
+        assert result == ["eng"]
+
+    def test_dict_format_unknown_name(self) -> None:
+        """Dict entry with empty/unrecognised name returns None."""
+        from trimarr.native_language import _extract_imdb_spoken_codes
+
+        result = _extract_imdb_spoken_codes([{}])
+        assert result is None
+
+        result2 = _extract_imdb_spoken_codes([{"name": ""}])
+        assert result2 is None
+
+    def test_mixed_format_string_and_dict(self) -> None:
+        """Mixed string and dict entries are handled in the same list."""
+        from trimarr.native_language import _extract_imdb_spoken_codes
+
+        result = _extract_imdb_spoken_codes(["en", {"name": "German"}])
+        assert result == ["eng", "ger"]
+
+    def test_dict_format_duplicate_code(self) -> None:
+        """Duplicate dict entries produce a single code."""
+        from trimarr.native_language import _extract_imdb_spoken_codes
+
+        result = _extract_imdb_spoken_codes([{"name": "German"}, {"name": "German"}])
+        assert result == ["ger"]
+
+
+class TestLookupPycountryLanguage:
+    """Direct tests for _lookup_pycountry_language()."""
+
+    def test_lookup_none(self) -> None:
+        """When lang is None, returns None."""
+        from trimarr.native_language import _lookup_pycountry_language
+
+        assert _lookup_pycountry_language(None) is None
+
+    def test_alpha2_in_map_returns_direct(self) -> None:
+        """alpha_2 present in _ISO_639_1_TO_2 returns mapped code immediately."""
+        import pycountry
+
+        from trimarr.native_language import _lookup_pycountry_language
+
+        # German has alpha_2='de' which IS in _ISO_639_1_TO_2
+        lang = pycountry.languages.get(alpha_2="de")
+        result = _lookup_pycountry_language(lang)
+        assert result == "ger"
+
+    def test_bibliographic_fallback(self) -> None:
+        """alpha_2 not in map but bibliographic exists — returns bibliographic."""
+        import pycountry
+
+        from trimarr.native_language import _lookup_pycountry_language
+
+        # Tibetan has alpha_2='bo' (NOT in _ISO_639_1_TO_2) and bibliographic='tib'
+        lang = pycountry.languages.get(alpha_2="bo")
+        result = _lookup_pycountry_language(lang)
+        assert result == "tib"
+
+    def test_alpha3_fallback_inner(self) -> None:
+        """alpha_2 not in map, no bibliographic — falls back to inner alpha_3."""
+        import pycountry
+
+        from trimarr.native_language import _lookup_pycountry_language
+
+        # Abkhazian has alpha_2='ab' (NOT in _ISO_639_1_TO_2), no bibliographic, alpha_3='abk'
+        lang = pycountry.languages.get(alpha_3="abk")
+        result = _lookup_pycountry_language(lang)
+        assert result == "abk"
+
+    def test_no_alpha2_alpha3_fallback(self) -> None:
+        """No alpha_2 — falls back to outer alpha_3."""
+        import pycountry
+
+        from trimarr.native_language import _lookup_pycountry_language
+
+        # Ghotuo has no alpha_2, alpha_3='aaa'
+        lang = pycountry.languages.get(alpha_3="aaa")
+        result = _lookup_pycountry_language(lang)
+        assert result == "aaa"
+
+    def test_no_alpha2_fallback_code(self) -> None:
+        """No alpha_2 with fallback_code — returns fallback_code."""
+        import pycountry
+
+        from trimarr.native_language import _lookup_pycountry_language
+
+        # Ghotuo has no alpha_2 — with fallback_code, returns fallback_code
+        lang = pycountry.languages.get(alpha_3="aaa")
+        result = _lookup_pycountry_language(lang, fallback_code="zzz")
+        assert result == "zzz"
+
+    def test_no_alpha3(self) -> None:
+        """Lang object with no alpha_3 attribute returns None."""
+        from trimarr.native_language import _lookup_pycountry_language
+
+        class _NoAlpha3:
+            """Fake language object with no alpha_3."""
+
+            alpha_2 = None
+
+        result = _lookup_pycountry_language(_NoAlpha3())
+        assert result is None
