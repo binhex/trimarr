@@ -58,7 +58,8 @@ def _run_hook_command(
     try:
         result = subprocess.run(args, **kwargs)
     except subprocess.TimeoutExpired:
-        logger.warning(f"Hook command timed out after {timeout_seconds}s: {cmd_display}")
+        timeout_msg = f"{timeout_seconds}s" if timeout_seconds is not None else "(no timeout set)"
+        logger.warning(f"Hook command timed out after {timeout_msg}: {cmd_display}")
         return
     except OSError as exc:
         logger.warning(f"Hook command failed: {cmd_display}: {exc}")

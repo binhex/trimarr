@@ -22,7 +22,7 @@ from trimarr.processor import _ISO_639_1_TO_2, normalize_language_code
 _imdbpie: Any
 _HAS_IMDBPIE: bool
 try:
-    import imdbpie as _imdbpie_lib  # noqa: F811
+    import imdbpie as _imdbpie_lib
 
     _HAS_IMDBPIE = True
     _imdbpie = _imdbpie_lib
@@ -180,7 +180,8 @@ def parse_movie_title(file_path: Path) -> tuple[str, str | None]:
         # far more robust than maintaining a blocklist of scene tags.
         year_pos = cleaned.rfind(year)
         if year_pos != -1:
-            cleaned = cleaned[:year_pos].strip()
+            before = cleaned[:year_pos].strip()
+            cleaned = before or cleaned[year_pos + len(year) :].strip()
 
     # If no year found in the filename, try the parent directory name
     if year is None:
