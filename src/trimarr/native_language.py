@@ -551,7 +551,7 @@ def _describe_failure(source_label: str, tmdb_api_key: str | None) -> str:
     """Return an error message for a failed lookup step."""
     if "tmdb" in source_label:
         return "no match from IMDbPie or TMDb (tried filename and directory name)"
-    if tmdb_api_key is None:
+    if not tmdb_api_key:
         return "no match from IMDbPie (tried filename and directory name, no TMDb API key configured)"
     return "no match from IMDbPie"
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import platform
+import re
 import shlex
 import subprocess
 from typing import TYPE_CHECKING
@@ -21,12 +22,32 @@ def _resolve_hook_template(
     if not cmd_template.strip():
         return None
 
-    # Strip user-supplied quote wrapping around {leaf}/{dir} markers
+    # Strip user-supplied quote wrapping around {leaf}/{dir} markers.
+    # Use word-boundary assertions so that only standalone quote-wrapped
+    # markers are stripped (e.g. ``'{leaf}'``), NOT quotes inside larger
+    # arguments such as ``--file="{leaf}"``.
     template = cmd_template
     for marker in ("{leaf}", "{dir}"):
         for q in ("'", '"'):
-            template = template.replace(f"{q}{marker}", marker)
-            template = template.replace(f"{marker}{q}", marker)
+            escaped_q = re.escape(q)
+            escaped_marker = re.escape(marker)
+            # Balanced: q+marker+q -> marker
+            template = template.replace(f"{q}{marker}{q}", marker)
+            # Unbalanced: q+marker (only when q is preceded by start/whitespace)
+            template = re.sub(
+                rf"(^|\s){escaped_q}{escaped_marker}",
+                rf"\1{marker}",
+                template,
+            )
+            # Unbalanced: marker+q (only when marker is at word boundary
+            # AND q is followed by whitespace/end).  This avoids stripping
+            # quotes inside arguments like ``--file="{leaf}"`` where the
+            # closing quote is structural, not user-added wrapping.
+            template = re.sub(
+                rf"(?:^|(?<=\s)|(?<=['\"])){escaped_marker}{escaped_q}(\s|$)",
+                rf"{marker}\1",
+                template,
+            )
 
     try:
         posix = platform.system() != "Windows"
