@@ -156,13 +156,26 @@ def _lookup_imdbpie(title: str, year: str | None) -> list[str] | None:
 
 
 def _extract_imdb_spoken_codes(spoken: list) -> list[str] | None:
-    """Convert IMDb spoken language entries to ISO 639-2/B codes."""
+    """Convert IMDb spoken language entries to ISO 639-2/B codes.
+
+    IMDbPie returns ``spokenLanguages`` as a list of ISO 639-1 codes
+    (e.g. ``["en", "de"]``).  Map each 2-letter code through the
+    existing ``_ISO_639_1_TO_2`` table to get the 3-letter bibliographic
+    form.  Fall back to language-name resolution for any entry that is
+    not a recognised 2-letter code.
+    """
     codes: list[str] = []
     for entry in spoken:
-        lang_name = (entry.get("name") or entry.get("description") or "") if isinstance(entry, dict) else str(entry)
-        code = _language_name_to_iso_639_2(lang_name)
-        if code and code not in codes:
-            codes.append(code)
+        if isinstance(entry, str) and len(entry) == 2:
+            # ISO 639-1 code — map directly to 3-letter form
+            code = _ISO_639_1_TO_2.get(entry.lower())
+            if code and code not in codes:
+                codes.append(code)
+        else:
+            lang_name = entry.get("name") or entry.get("description") or "" if isinstance(entry, dict) else str(entry)  # noqa: E501
+            code = _language_name_to_iso_639_2(lang_name)
+            if code and code not in codes:
+                codes.append(code)
     return codes or None
 
 
