@@ -13,6 +13,7 @@ import re
 import unicodedata
 import urllib.parse
 import urllib.request
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 from trimarr.processor import _ISO_639_1_TO_2, normalize_language_code
@@ -520,6 +521,39 @@ def _check_native_language_cache(
                 logger.debug(_msg, file_path.name, cached_langs, cached_source)
             return cached_langs
     return _CACHE_MISS
+
+
+def _get_filename_title(file_path: Path) -> tuple[str, str | None]:
+    """Extract movie title from the filename stem via parse_movie_title."""
+    return parse_movie_title(file_path)
+
+
+def _get_directory_title(file_path: Path) -> tuple[str, str | None]:
+    """Extract movie title from the parent directory name via parse_movie_title."""
+    return parse_movie_title(file_path.parent)
+
+
+def _lookup_chain(tmdb_api_key: str | None) -> list[tuple]:
+    """Return ordered (lookup_fn, title_fn, source_label) triples."""
+    chain: list[tuple] = [
+        (_lookup_imdbpie, _get_filename_title, "imdbpie_filename"),
+        (_lookup_imdbpie, _get_directory_title, "imdbpie_directory"),
+    ]
+    if tmdb_api_key:
+        chain += [
+            (partial(_lookup_tmdb, api_key=tmdb_api_key), _get_filename_title, "tmdb_filename"),
+            (partial(_lookup_tmdb, api_key=tmdb_api_key), _get_directory_title, "tmdb_directory"),
+        ]
+    return chain
+
+
+def _describe_failure(source_label: str, tmdb_api_key: str | None) -> str:
+    """Return an error message for a failed lookup step."""
+    if "tmdb" in source_label:
+        return "no match from IMDbPie or TMDb (tried filename and directory name)"
+    if tmdb_api_key is None:
+        return "no match from IMDbPie (tried filename and directory name, no TMDb API key configured)"
+    return "no match from IMDbPie"
 
 
 def resolve_native_language(

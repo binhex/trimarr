@@ -639,3 +639,90 @@ class TestLookupPycountryLanguage:
 
         result = _lookup_pycountry_language(_NoAlpha3())
         assert result is None
+
+
+class TestHelpers:
+    """Tests for the new helper functions (Task 1)."""
+
+    def test_get_filename_title(self) -> None:
+        """_get_filename_title returns parse_movie_title result for file stem."""
+        from trimarr.native_language import _get_filename_title
+
+        result = _get_filename_title(Path("/data/Das Boot (1981).mkv"))
+        assert result == ("das boot", "1981")
+
+    def test_get_directory_title(self) -> None:
+        """_get_directory_title returns parse_movie_title result for parent dir."""
+        from trimarr.native_language import _get_directory_title
+
+        result = _get_directory_title(Path("/data/Great Expectations (1946)/Great Expectations.mkv"))
+        assert result == ("great expectations", "1946")
+
+    def test_get_directory_title_no_year(self) -> None:
+        """_get_directory_title with no year in dir name returns title only."""
+        from trimarr.native_language import _get_directory_title
+
+        result = _get_directory_title(Path("/data/Movie/File.mkv"))
+        assert result[0] == "movie"
+        assert result[1] is None
+
+    def test_lookup_chain_no_api_key(self) -> None:
+        """_lookup_chain without TMDb key returns only IMDbPie entries."""
+        from trimarr.native_language import _lookup_chain, _lookup_imdbpie
+
+        chain = _lookup_chain(None)
+        assert len(chain) == 2
+        for entry in chain:
+            assert len(entry) == 3
+            assert entry[0] is _lookup_imdbpie
+            assert "imdbpie" in entry[2]
+
+    def test_lookup_chain_with_api_key(self) -> None:
+        """_lookup_chain with TMDb key includes IMDbPie and TMDb entries."""
+        from trimarr.native_language import _lookup_chain, _lookup_imdbpie
+
+        chain = _lookup_chain("fake-key")
+        assert len(chain) == 4
+        # First two are imdbpie-based
+        assert chain[0][0] is _lookup_imdbpie
+        assert chain[0][2] == "imdbpie_filename"
+        assert chain[1][2] == "imdbpie_directory"
+        # Last two are tmdb-based (using partial)
+        assert chain[2][2] == "tmdb_filename"
+        assert chain[3][2] == "tmdb_directory"
+
+    def test_lookup_chain_title_functions(self) -> None:
+        """_lookup_chain title_fns correctly extract titles via Path."""
+        from trimarr.native_language import _lookup_chain
+
+        chain = _lookup_chain("fake-key")
+        # Test filename title function
+        fn_title_fn = chain[0][1]
+        dir_title_fn = chain[1][1]
+        result_fn = fn_title_fn(Path("/data/Test Movie (2020).mkv"))
+        assert result_fn == ("test movie", "2020")
+        result_dir = dir_title_fn(Path("/data/Some Dir (1999)/File.mkv"))
+        assert result_dir == ("some dir", "1999")
+
+    def test_describe_failure_imdbpie_only(self) -> None:
+        """_describe_failure when source is imdbpie and no TMDb key."""
+        from trimarr.native_language import _describe_failure
+
+        msg = _describe_failure("imdbpie_filename", None)
+        assert "no match from IMDbPie" in msg
+        assert "no TMDb API key configured" in msg
+
+    def test_describe_failure_imdbpie_with_key(self) -> None:
+        """_describe_failure when source is imdbpie but TMDb key exists."""
+        from trimarr.native_language import _describe_failure
+
+        msg = _describe_failure("imdbpie_filename", "fake-key")
+        assert msg == "no match from IMDbPie"
+
+    def test_describe_failure_tmdb(self) -> None:
+        """_describe_failure when source is tmdb."""
+        from trimarr.native_language import _describe_failure
+
+        msg = _describe_failure("tmdb_filename", "fake-key")
+        assert "no match from IMDbPie or TMDb" in msg
+        assert "tried filename and directory name" in msg
