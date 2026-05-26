@@ -564,38 +564,52 @@ def resolve_native_language(
     """Return ISO 639-2/B native language codes for *file_path*, or None.
 
     Checks the database cache first (by file_path + fingerprint).  On miss,
-    attempts IMDbPie lookup followed by TMDb fallback.  Caches the result
-    (including failures) so subsequent runs are fast.
+    iterates through a fallback chain: IMDbPie+filename → IMDbPie+directory
+    → TMDb+filename → TMDb+directory.  Caches the result (including
+    failures) so subsequent runs are fast.
     """
     cached_langs = _check_native_language_cache(db, file_path)
     if cached_langs is not _CACHE_MISS:
         return cast("list[str] | None", cached_langs)
-    title, year = parse_movie_title(file_path)
-    if not title:
-        logger.debug("Could not parse movie title from '%s'.", file_path.name)
-        _maybe_cache_failure(db, file_path, "unable to parse title")
-        return None
-    if not year:
-        _msg = "Could not determine year for '%s' — skipping native language lookup (without a year the wrong film may be matched)."
-        logger.debug(_msg, file_path.name)
-        _maybe_cache_failure(db, file_path, "unable to determine year from filename or parent directory")
-        return None
-    logger.debug("Looking up native language for '%s' (title=%s, year=%s).", file_path.name, title, year)
-    codes = _lookup_imdbpie(title, year)
-    source = "imdbpie"
-    error = "no match from IMDbPie (no TMDb API key configured for fallback)"
-    if not codes and tmdb_api_key:
-        codes = _lookup_tmdb(title, year, tmdb_api_key)
-        source = "tmdb"
-        error = "no match from IMDbPie or TMDb"
-    if not codes:
-        logger.debug("No native language found for '%s'.", file_path.name)
-        _maybe_cache_failure(db, file_path, error)
-        return None
-    logger.info("Identified native language(s) for '%s': %s (source: %s).", file_path.name, codes, source)
-    if db is not None:
-        db.set_native_language_cache(file_path, codes, source, None)
-    return codes
+
+    last_error = "no match from any source"
+    chain = _lookup_chain(tmdb_api_key)
+    for lookup_fn, title_fn, source_label in chain:
+        title, year = title_fn(file_path)
+        if not title or not year:
+            logger.debug(
+                "Skipping lookup for '%s' — could not determine title/year.",
+                file_path.name,
+            )
+            continue
+        logger.debug(
+            "Looking up native language for '%s' (title=%s, year=%s, source=%s).",
+            file_path.name,
+            title,
+            year,
+            source_label,
+        )
+        codes = lookup_fn(title, year)
+        if codes is not None:
+            logger.info(
+                "Identified native language(s) for '%s': %s (source=%s).",
+                file_path.name,
+                codes,
+                source_label,
+            )
+            if db is not None:
+                db.set_native_language_cache(file_path, codes, source_label, None)
+            return cast("list[str]", codes)
+        last_error = _describe_failure(source_label, tmdb_api_key)
+        logger.debug(
+            "No native language found for '%s' via %s.",
+            file_path.name,
+            source_label,
+        )
+
+    logger.debug("No native language found for '%s' after exhausting all sources.", file_path.name)
+    _maybe_cache_failure(db, file_path, last_error)
+    return None
 
 
 def _maybe_cache_failure(db: Database | None, file_path: Path, error: str) -> None:
