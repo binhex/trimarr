@@ -428,7 +428,7 @@ class TestResolveNativeLanguage:
             Path("/data/Test Movie (2020).mkv"),
             None,
             None,
-            "no match from API",
+            "no match from IMDbPie (no TMDb API key configured for fallback)",
         )
 
 

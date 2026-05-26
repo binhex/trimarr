@@ -121,7 +121,7 @@ def _normalise_for_compare(text: str) -> str:
     result = unicodedata.normalize("NFKD", result)
     result = result.encode("ascii", "ignore").decode("ascii")
     result = result.replace("&", "and")
-    result = result.replace("imdb", "")
+    result = re.sub(r"\bimdb\b", "", result)
     for pattern, digit in _NUMERAL_PATTERNS:
         result = pattern.sub(digit, result)
     result = _RE_POSSESSIVE_S.sub("", result)
@@ -253,10 +253,9 @@ def _lookup_imdbpie(title: str, year: str | None) -> list[str] | None:
 
 def _extract_spoken_code_from_string(entry: str, codes: list[str]) -> None:
     """Handle a 2-letter ISO 639-1 code entry."""
-    if len(entry) == 2:
-        code = _ISO_639_1_TO_2.get(entry.lower())
-        if code and code not in codes:
-            codes.append(code)
+    code = _ISO_639_1_TO_2.get(entry.lower())
+    if code and code not in codes:
+        codes.append(code)
 
 
 def _extract_spoken_code_from_dict(entry: dict, codes: list[str]) -> None:
@@ -278,8 +277,14 @@ def _extract_imdb_spoken_codes(spoken: list) -> list[str] | None:
     """
     codes: list[str] = []
     for entry in spoken:
-        if isinstance(entry, str) and len(entry) == 2:
-            _extract_spoken_code_from_string(entry, codes)
+        if isinstance(entry, str):
+            if len(entry) == 2:
+                _extract_spoken_code_from_string(entry, codes)
+            else:
+                # 3+ char string — treat as a language name/code via name resolution
+                code = _language_name_to_iso_639_2(entry)
+                if code and code not in codes:
+                    codes.append(code)
         elif isinstance(entry, dict):
             _extract_spoken_code_from_dict(entry, codes)
     return codes or None
@@ -481,7 +486,7 @@ def resolve_native_language(
     logger.debug("Looking up native language for '%s' (title=%s, year=%s).", file_path.name, title, year)
     codes = _lookup_imdbpie(title, year)
     source = "imdbpie"
-    error = "no match from API"
+    error = "no match from IMDbPie (no TMDb API key configured for fallback)"
     if not codes and tmdb_api_key:
         codes = _lookup_tmdb(title, year, tmdb_api_key)
         source = "tmdb"
