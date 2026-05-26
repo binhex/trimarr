@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "Trimarr"
-version = "1.1.8"
+version = "1.2.0"
 description = "Automated tool"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -23,7 +23,9 @@ classifiers = [
 dependencies = [
     "click",
     "croniter>=6.0.0",
+    "imdbpie",
     "loguru",
+    "pycountry",
     "requests",
     "urllib3",
 ]
@@ -84,13 +86,23 @@ explicit_package_bases = true
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+disallow_incomplete_defs = false
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "croniter"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["requests","tests.unit.test_utils"]
+module = "imdbpie"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "pycountry"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "requests"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -104,6 +116,7 @@ addopts = """
     --cov-report=term-missing
     --cov-report=html
     --cov-report=xml
+    --cov-fail-under=95
 """
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
@@ -135,6 +148,8 @@ dev = [
     "pytest-crap @ git+https://github.com/binhex/pytest-crap.git@v0.3.1",
     "types-requests>=2.31.0",
     "types-pyyaml>=6.0.0",
-    "pre-commit",
     "types-croniter>=6.2.2.20260518",
+    "pre-commit",
+    "mypy",
+    "ruff"
 ]

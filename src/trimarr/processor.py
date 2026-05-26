@@ -307,10 +307,13 @@ def _normalize_language_code(lang: str | None) -> str | None:
     Converts the mkvmerge ``"und"`` sentinel to *None*, maps ISO 639-1 2-char
     codes to their ISO 639-2 equivalents, and converts ISO 639-2 terminologic
     (T) codes to bibliographic (B) form.  Unknown codes are returned unchanged.
+
+    The tag is lower-cased before lookup so that uppercase codes (e.g. ``"EN"``,
+    ``"FRA"``) are matched correctly against the dict keys.
     """
     if lang is None or lang == "und":
         return None
-    base = lang.split("-")[0]
+    base = lang.split("-")[0].lower()
     if len(base) == 2:
         return _ISO_639_1_TO_2.get(base, base)
     if len(base) == 3:
@@ -552,6 +555,20 @@ def _apply_strip_commentary(
         _strip_subtitle_commentary_unsafe(result, tracks)
 
 
+def _match_subtitle_regex_patterns(
+    track: MkvTrack,
+    patterns: list[re.Pattern],
+    result: _FilterResult,
+) -> None:
+    """If *track* name matches any *pattern*, move it to sub_drop."""
+    for pattern in patterns:
+        if pattern.search(track.name):
+            result.sub_keep.remove(track.id)
+            result.sub_drop.append(track.id)
+            result.subtitle_regex_drop_ids.add(track.id)
+            return
+
+
 def _apply_strip_subtitle_regex(
     result: _FilterResult,
     tracks: list[MkvTrack],
@@ -576,12 +593,7 @@ def _apply_strip_subtitle_regex(
             continue
         if track.name is None:
             continue
-        for pattern in patterns:
-            if pattern.search(track.name):
-                result.sub_keep.remove(track.id)
-                result.sub_drop.append(track.id)
-                result.subtitle_regex_drop_ids.add(track.id)
-                break  # matched one pattern, no need to check others
+        _match_subtitle_regex_patterns(track, patterns, result)
 
 
 def _group_kept_audio_by_language(
@@ -1107,6 +1119,14 @@ def process_file(
 
         return None
 
+    except OSError as exc:
+        logger.error(f"File system error processing '{file_path}': {exc}")
+        logger.debug("", exc_info=True)
+        return f"filesystem error: {str(exc).splitlines()[0].strip()}"
+    except subprocess.TimeoutExpired as exc:
+        logger.error(f"mkvmerge timed out processing '{file_path}': {exc}")
+        logger.debug("", exc_info=True)
+        return f"mkvmerge timeout: {str(exc).splitlines()[0].strip()}"
     except Exception as exc:
         logger.error(f"Unexpected error processing '{file_path}': {exc}")
         logger.debug("", exc_info=True)

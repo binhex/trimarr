@@ -147,7 +147,7 @@ class TestRunHook:
         logger = MagicMock()
         with patch("trimarr.hooks.subprocess.run") as mock_run:
             _run_hook(
-                'echo "{leaf}',  # unclosed double quote
+                "echo 'unclosed",  # unclosed single quote (no {leaf}/{dir} involved)
                 "file.mkv",
                 "/some/dir",
                 timeout_seconds=300,
@@ -209,3 +209,22 @@ class TestRunHook:
         args_list = _args[0]
         # The leaf value is passed directly as a single arg (no shell)
         assert "99 Homes (2014)" in args_list, f"Expected leaf value in args, got {args_list}"
+
+    def test_unbalanced_quotes_around_leaf_are_stripped(self) -> None:
+        """Unbalanced quotes around {leaf} are stripped, not left for shlex.split to choke on."""
+        logger = MagicMock()
+        with patch("trimarr.hooks.subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            _run_hook(
+                'echo "{leaf}',  # double-quote before {leaf}, no closing quote
+                "some file.mkv",
+                "/some/dir",
+                timeout_seconds=300,
+                logger=logger,
+            )
+
+        _args, kwargs = mock_run.call_args
+        args_list = _args[0]
+        # The value is passed directly (no doubled or dangling quotes)
+        assert "some file.mkv" in args_list, f"Expected leaf value in args, got {args_list}"
+        logger.warning.assert_not_called()
