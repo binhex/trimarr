@@ -414,3 +414,70 @@ class TestResolveNativeLanguage:
         mock_db.set_native_language_cache.assert_called_once_with(
             Path("/data/Unknown.mkv"), None, None, "unable to parse title"
         )
+
+
+class TestNormaliseForCompare:
+    """Tests for _normalise_for_compare()."""
+
+    def test_accents_folded(self) -> None:
+        """Accented characters are NFKD-folded to ASCII."""
+        from trimarr.native_language import _normalise_for_compare
+
+        assert _normalise_for_compare("Amélie") == "amelie"
+        assert _normalise_for_compare("José") == "jose"
+        assert _normalise_for_compare("Café Society") == "cafesociety"
+
+    def test_ampersand_to_and(self) -> None:
+        """& is converted to 'and'."""
+        from trimarr.native_language import _normalise_for_compare
+
+        assert _normalise_for_compare("Tom & Jerry") == "tomandjerry"
+        assert _normalise_for_compare("Pride & Prejudice") == "prideandprejudice"
+
+    def test_written_numerals_to_digits(self) -> None:
+        """Written number words are converted to digits (including at start of title)."""
+        from trimarr.native_language import _normalise_for_compare
+
+        assert _normalise_for_compare("Twelve Years a Slave") == "12yearsaslave"
+        assert _normalise_for_compare("Seven Samurai") == "7samurai"
+
+    def test_roman_numerals_to_digits(self) -> None:
+        """Roman numerals in titles are converted to digits."""
+        from trimarr.native_language import _normalise_for_compare
+
+        assert _normalise_for_compare("Rocky IV") == "rocky4"
+        assert _normalise_for_compare("Rocky II") == "rocky2"
+
+    def test_possessive_s_stripped(self) -> None:
+        """Possessive 's after s-ending words is stripped; other possessives pass through."""
+        from trimarr.native_language import _normalise_for_compare
+
+        assert _normalise_for_compare("Jones's") == "jones"
+        # "Alex's" does NOT end in 's' so the possessive pattern doesn't apply.
+        # The apostrophe is stripped by the punctuation cleaner at the end.
+        assert _normalise_for_compare("Alex's") == "alexs"
+
+    def test_punctuation_stripped(self) -> None:
+        """Colons, apostrophes, quotes, commas are stripped (comparison is a single token)."""
+        from trimarr.native_language import _normalise_for_compare
+
+        assert _normalise_for_compare("Harry, Ron and Hermione") == "harryronandhermione"
+        assert _normalise_for_compare("Don't Look Up") == "dontlookup"
+
+    def test_imdb_keyword_stripped(self) -> None:
+        """The word 'imdb' is stripped from titles."""
+        from trimarr.native_language import _normalise_for_compare
+
+        assert _normalise_for_compare("IMDb Top 250") == "top250"
+
+    def test_combined_with_parse(self) -> None:
+        """Full pipeline: parse_movie_title + normalise_for_compare produces clean search tokens."""
+        from trimarr.native_language import _normalise_for_compare
+
+        title, year = parse_movie_title(Path("/data/Amélie (2001).mkv"))
+        assert year == "2001"
+        assert _normalise_for_compare(title) == "amelie"
+
+        title2, year2 = parse_movie_title(Path("/data/Pride & Prejudice (2005).mkv"))
+        assert year2 == "2005"
+        assert _normalise_for_compare(title2) == "prideandprejudice"

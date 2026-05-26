@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 import urllib.parse
 import urllib.request
 from typing import TYPE_CHECKING
@@ -46,6 +47,86 @@ _WORD_SEPARATORS = re.compile(r"[._\-+]")
 def _normalise_title(s: str) -> str:
     """Lower-case, collapse whitespace, and strip leading/trailing spaces."""
     return " ".join(s.lower().split())
+
+
+# Mapping of written number words and Roman numerals to digit strings.
+# Only the first ten are mapped — higher ordinals are rarely relevant.
+_WORD_TO_INT: dict[str, str] = {
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+    "ten": "10",
+    "eleven": "11",
+    "twelve": "12",
+    "thirteen": "13",
+    "fourteen": "14",
+    "fifteen": "15",
+    "sixteen": "16",
+    "seventeen": "17",
+    "eighteen": "18",
+    "nineteen": "19",
+    "twenty": "20",
+}
+_ROMAN_TO_INT: dict[str, str] = {
+    "i": "1",
+    "ii": "2",
+    "iii": "3",
+    "iv": "4",
+    "v": "5",
+    "vi": "6",
+    "vii": "7",
+    "viii": "8",
+    "ix": "9",
+    "x": "10",
+}
+
+# Pre-compiled patterns for word/numeral replacement — avoids recompiling per call.
+_NUMERAL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(rf"(?:^|(?<=[\s.\-_]))({word})(?=[\s.\-_]|$)", re.IGNORECASE), digit)
+    for mapping in (_WORD_TO_INT, _ROMAN_TO_INT)
+    for word, digit in mapping.items()
+]
+
+# Strips possessive 's after an s-ending word (e.g. "Jones's" → "Jones").
+_RE_POSSESSIVE_S = re.compile(r"(?<=s)['\u2018\u2019\u02bc\u02bb]s?\b", re.IGNORECASE)
+
+# Separator characters to strip during comparison normalisation
+# (also collapses whitespace by removing everything at once).
+_RE_COMPARE_STRIP = re.compile(r"[\s\.\-\_\:\+\'\"\!\,\@\#\u2018\u2019\u02bc\u02bb]+")
+
+
+def _normalise_for_compare(text: str) -> str:
+    """Normalise a movie title for fuzzy comparison against API results.
+
+    Steps (in order):
+    1. Lower-case
+    2. NFKD-decompose accented characters to ASCII
+    3. Replace ``&`` with ``and``
+    4. Strip ``imdb`` keyword
+    5. Convert written/Roman numerals to digits
+    6. Strip possessive ``'s`` after ``s``-ending words
+    7. Strip punctuation and whitespace separators (collapses to a single
+       continuous string for comparison)
+
+    Based on movarr's ``parsing.normalise_for_compare``.
+    """
+    result = text.lower()
+    # NFKD decomposition: é → e + combining accent → strip non-ASCII → "e"
+    result = unicodedata.normalize("NFKD", result)
+    result = result.encode("ascii", "ignore").decode("ascii")
+    result = result.replace("&", "and")
+    result = result.replace("imdb", "")
+    for pattern, digit in _NUMERAL_PATTERNS:
+        result = pattern.sub(digit, result)
+    result = _RE_POSSESSIVE_S.sub("", result)
+    result = _RE_COMPARE_STRIP.sub("", result)
+    return result
 
 
 def _strip_release_tags(title: str) -> str:
@@ -114,9 +195,10 @@ def _find_matching_imdb_id(
     year: str | None,
 ) -> str | None:
     """Find and return the IMDb ID of the first hit matching *title* and *year*."""
+    norm_title = _normalise_for_compare(title)
     for hit in hits:
-        hit_title = (hit.get("title") or "").strip().lower()
-        if _normalise_title(hit_title) != _normalise_title(title):
+        hit_title = (hit.get("title") or "").strip()
+        if _normalise_for_compare(hit_title) != norm_title:
             continue
         hit_year = hit.get("year")
         if year and hit_year is not None:
