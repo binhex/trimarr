@@ -47,10 +47,13 @@ def _run_hook(
     # Strip user-supplied quote wrapping around {leaf}/{dir} markers —
     # the quoting fix from commit 4a8f86c prevents double-quoting when
     # users write ``--include-folders '{leaf}'``.
+    # Handle both balanced (``'{leaf}'``) and unbalanced (``'{leaf}``)
+    # wrapping so that shlex.split does not fail on a lone quote.
     template = cmd_template
-    for q in ("'", '"'):
-        template = template.replace(f"{q}{{leaf}}{q}", "{leaf}")
-        template = template.replace(f"{q}{{dir}}{q}", "{dir}")
+    for marker in ("{leaf}", "{dir}"):
+        for q in ("'", '"'):
+            template = template.replace(f"{q}{marker}", marker)
+            template = template.replace(f"{marker}{q}", marker)
 
     # Parse the template into a list of arguments using shlex.split() so
     # shell metacharacters (|, >, $, etc.) in argument values are treated

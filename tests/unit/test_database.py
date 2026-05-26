@@ -219,17 +219,18 @@ class TestBytesTracking:
             db.mark_processed(files[2], profile_hash=PROFILE_HASH, bytes_saved=2_000_000)
             assert db.total_bytes_saved() == 4_000_000
 
-    def test_upsert_accumulates_bytes_saved(self, tmp_path: Path) -> None:
+    def test_upsert_replaces_bytes_saved_when_file_changes(self, tmp_path: Path) -> None:
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"v1 content")
         db_path = tmp_path / "trimarr.db"
 
         with Database(db_path) as db:
             db.mark_processed(mkv, profile_hash=PROFILE_HASH, bytes_saved=100)
-            # Simulate file being updated and re-processed — savings accumulate.
+            # Simulate file being replaced on disk (new content = new fingerprint)
+            # — savings from the old version are replaced, not accumulated.
             mkv.write_bytes(b"v2 updated content")
             db.mark_processed(mkv, profile_hash=PROFILE_HASH, bytes_saved=200)
-            assert db.total_bytes_saved() == 300  # 100 + 200 accumulated
+            assert db.total_bytes_saved() == 200  # old savings replaced
 
     def test_no_change_preserves_prior_savings(self, tmp_path: Path) -> None:
         """Marking a file as processed with bytes_saved=0 must not erase prior savings."""

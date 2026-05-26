@@ -192,7 +192,11 @@ class Database:
             ON CONFLICT(file_path) DO UPDATE SET
                 file_hash    = excluded.file_hash,
                 profile_hash = excluded.profile_hash,
-                bytes_saved  = processed_files.bytes_saved + excluded.bytes_saved,
+                bytes_saved  = CASE
+                    WHEN excluded.file_hash = processed_files.file_hash
+                    THEN processed_files.bytes_saved + excluded.bytes_saved
+                    ELSE excluded.bytes_saved
+                END,
                 processed_at = CURRENT_TIMESTAMP
             """,
             (str(path), current_hash, profile_hash, bytes_saved),

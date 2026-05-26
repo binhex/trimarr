@@ -307,10 +307,13 @@ def _normalize_language_code(lang: str | None) -> str | None:
     Converts the mkvmerge ``"und"`` sentinel to *None*, maps ISO 639-1 2-char
     codes to their ISO 639-2 equivalents, and converts ISO 639-2 terminologic
     (T) codes to bibliographic (B) form.  Unknown codes are returned unchanged.
+
+    The tag is lower-cased before lookup so that uppercase codes (e.g. ``"EN"``,
+    ``"FRA"``) are matched correctly against the dict keys.
     """
     if lang is None or lang == "und":
         return None
-    base = lang.split("-")[0]
+    base = lang.split("-")[0].lower()
     if len(base) == 2:
         return _ISO_639_1_TO_2.get(base, base)
     if len(base) == 3:

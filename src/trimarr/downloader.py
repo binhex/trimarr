@@ -156,6 +156,25 @@ def _get_latest_release_info(repo: str, asset_name: str) -> tuple[str, str]:
     # the asset does not exist in the latest release).
     head_resp = requests.head(download_url, allow_redirects=True, timeout=30)
     head_resp.raise_for_status()
+
+    # Security: ensure every hop in the redirect chain stays within GitHub's
+    # trusted domains so downloads cannot be hijacked via an attacker-controlled
+    # redirector.  Allow the apex domain (github.com), its official subdomains
+    # (*.github.com), and the object-storage CDN domain (*.githubusercontent.com)
+    # that GitHub uses for release assets.
+    from urllib.parse import urlparse
+
+    _safe_host_suffixes = (".github.com", ".githubusercontent.com")
+    for resp in head_resp.history + [head_resp]:
+        parsed = urlparse(resp.url)
+        hostname = parsed.hostname or ""
+        if hostname == "github.com":
+            continue
+        if not any(hostname.endswith(suffix) for suffix in _safe_host_suffixes):
+            raise RuntimeError(
+                f"Download URL '{download_url}' redirected to untrusted host "
+                f"'{hostname}' — refusing to download for security."
+            )
     content_type = head_resp.headers.get("Content-Type", "").lower()
     if "text/html" in content_type:
         raise RuntimeError(
@@ -202,12 +221,17 @@ def get_installed_mkvmerge_tag(dest_dir: str | Path | None = None) -> str | None
 def _stream_to_file(url: str, dest_path: Path) -> None:
     """Download *url* via streaming HTTP and write the content to *dest_path*.
 
+    Validates the response ``Content-Length`` header (when present) against the
+    number of bytes actually written, rejecting truncated downloads that would
+    otherwise pass the magic-byte and minimum-size checks.
+
     Args:
         url: HTTPS download URL.
         dest_path: Local filesystem path to write the downloaded bytes to.
 
     Raises:
-        RuntimeError: If the HTTP request fails.
+        RuntimeError: If the HTTP request fails, or if the response body is
+            shorter than the advertised ``Content-Length`` (partial download).
         requests.HTTPError: On non-2xx responses.
     """
     try:
@@ -215,9 +239,17 @@ def _stream_to_file(url: str, dest_path: Path) -> None:
     except requests.exceptions.RequestException as exc:
         raise RuntimeError(f"Failed to download mkvmerge from '{url}': {exc}") from exc
     response.raise_for_status()
+
+    expected = response.headers.get("Content-Length")
     with dest_path.open("wb") as f:
         for chunk in response.iter_content(chunk_size=8192):
             f.write(chunk)
+
+    if expected is not None:
+        written = dest_path.stat().st_size
+        expected_int = int(expected)
+        if written < expected_int:
+            raise RuntimeError(f"Truncated download from '{url}': expected {expected_int} bytes, got {written} bytes.")
 
 
 def _extract_archive_binary(

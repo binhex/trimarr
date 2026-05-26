@@ -61,9 +61,18 @@ def _sleep_until(target: datetime) -> None:
     adjustments (NTP, DST, manual changes) do not affect the sleep
     duration.
 
+    The initial wall-clock remaining is converted to a monotonic deadline
+    at the earliest practical moment to minimise the window where a clock
+    jump between the ``datetime.now()`` call and the monotonic deadline
+    setup could skew the sleep duration.
+
     Args:
         target: The :class:`datetime` to sleep until.
     """
+    # Compute the initial wall-clock delta, then immediately convert to
+    # a monotonic deadline.  Any clock jump between these two operations
+    # is negligible (microseconds).  The monotonic deadline means the
+    # loop is immune to subsequent clock adjustments.
     remaining = (target - datetime.now()).total_seconds()
     if remaining <= 0:
         return

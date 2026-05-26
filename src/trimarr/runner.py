@@ -523,8 +523,11 @@ def _dir_has_work(
     assumed so that pre hooks fire).  Returns False only when every file in
     *files_in_dir* is confirmed already processed and no errors occurred.
     """
-    # When keep_native_audio is active, conservatively fire hooks since
-    # per-file profile hashes can't be computed here.
+    # When keep_native_audio is active, conservatively fire hooks.
+    # The *profile_hash* passed to this function is the global pre-native-language
+    # hash, so ``is_processed(fp, profile_hash=profile_hash)`` would not reflect
+    # the per-file effective language merged by ``_process_one_file``.
+    # Rather than probing every file just to decide hooks, always assume work.
     if cfg.keep_native_audio and not cfg.keep_audio:
         return True
 

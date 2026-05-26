@@ -328,9 +328,18 @@ class TestGetLatestReleaseInfo:
         mock.headers = {"Content-Type": "application/octet-stream"}
         return mock
 
+    def _mock_head_with_url(self, url: str, content_type: str = "application/octet-stream") -> MagicMock:
+        """Return a mock HEAD response at *url* with no redirect history (direct hit)."""
+        mock = MagicMock()
+        mock.status_code = 200
+        mock.headers = {"Content-Type": content_type}
+        mock.url = url
+        mock.history = []
+        return mock
+
     def test_returns_github_download_url(self) -> None:
         """Constructs download URL from the /latest/download/ pattern."""
-        head_mock = self._mock_head_ok()
+        head_mock = self._mock_head_with_url("https://github.com/owner/repo/releases/latest/download/asset.tar.xz")
         with (
             patch("trimarr.downloader._get_latest_release_tag", return_value="v1.0"),
             patch("trimarr.downloader.requests.head", return_value=head_mock),
@@ -339,9 +348,42 @@ class TestGetLatestReleaseInfo:
         assert url == "https://github.com/owner/repo/releases/latest/download/asset.tar.xz"
         assert tag == "v1.0"
 
+    def test_accepts_cdn_redirect(self) -> None:
+        """A redirect to objects.githubusercontent.com (GitHub CDN) must be accepted."""
+        head_mock = MagicMock()
+        head_mock.status_code = 200
+        head_mock.headers = {"Content-Type": "application/octet-stream"}
+        head_mock.url = "https://objects.githubusercontent.com/github-release-asset"
+        # Simulate a redirect from github.com to the CDN
+        redirect_mock = MagicMock()
+        redirect_mock.url = "https://github.com/owner/repo/releases/latest/download/asset.tar.xz"
+        head_mock.history = [redirect_mock]
+        with (
+            patch("trimarr.downloader._get_latest_release_tag", return_value="v1.0"),
+            patch("trimarr.downloader.requests.head", return_value=head_mock),
+        ):
+            url, tag = _get_latest_release_info("owner/repo", "asset.tar.xz")
+        assert tag == "v1.0"
+
+    def test_rejects_untrusted_redirect(self) -> None:
+        """A redirect to an untrusted host must raise RuntimeError."""
+        head_mock = MagicMock()
+        head_mock.status_code = 200
+        head_mock.headers = {"Content-Type": "application/octet-stream"}
+        head_mock.url = "https://evil.com/malware"
+        redirect_mock = MagicMock()
+        redirect_mock.url = "https://github.com/owner/repo/releases/latest/download/asset.tar.xz"
+        head_mock.history = [redirect_mock]
+        with (
+            patch("trimarr.downloader._get_latest_release_tag", return_value="v1.0"),
+            patch("trimarr.downloader.requests.head", return_value=head_mock),
+            pytest.raises(RuntimeError, match="untrusted host"),
+        ):
+            _get_latest_release_info("owner/repo", "asset.tar.xz")
+
     def test_all_download_urls_are_trusted(self) -> None:
         """Constructed URLs always use github.com HTTPS."""
-        head_mock = self._mock_head_ok()
+        head_mock = self._mock_head_with_url("https://github.com/some/repo/releases/latest/download/binary.zip")
         with (
             patch("trimarr.downloader._get_latest_release_tag", return_value="v2.0"),
             patch("trimarr.downloader.requests.head", return_value=head_mock),

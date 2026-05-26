@@ -88,6 +88,7 @@ def _resolve_mkvmerge_path(
     """
     user_supplied = mkvmerge_path is not None
     resolved = mkvmerge_path if mkvmerge_path is not None else _DEFAULT_MKVMERGE_PATH
+    just_downloaded = False
 
     if not Path(resolved).is_file():
         if user_supplied:
@@ -98,9 +99,11 @@ def _resolve_mkvmerge_path(
         try:
             resolved = str(download_mkvmerge(dest_dir=_APP_DATA_DIR / "bin"))
             logger.success(f"mkvmerge installed at: {resolved}")
+            just_downloaded = True
         except Exception as exc:
             raise click.ClickException(f"Could not download mkvmerge: {exc}") from exc
-    elif not user_supplied and not no_update_check:
+
+    if not user_supplied and not no_update_check and not just_downloaded:
         resolved = _check_for_mkvmerge_update(resolved, logger)
 
     return resolved

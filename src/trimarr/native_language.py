@@ -17,6 +17,24 @@ from typing import TYPE_CHECKING, Any, cast
 
 from trimarr.processor import _ISO_639_1_TO_2, normalize_language_code
 
+# Lazy module-level imports — attempted once at load time, cached in module
+# globals so every function call does not re-attempt the import.
+try:
+    import imdbpie as _imdbpie  # noqa: F811
+
+    _HAS_IMDBPIE = True
+except ImportError:
+    _imdbpie = None
+    _HAS_IMDBPIE = False
+
+try:
+    import pycountry as _pycountry
+
+    _HAS_PYCOUNTRY = True
+except ImportError:
+    _pycountry = None
+    _HAS_PYCOUNTRY = False
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -250,13 +268,11 @@ def _fetch_imdb_spoken_languages(client: Any, matched_id: str) -> list[str] | No
 
 def _lookup_imdbpie(title: str, year: str | None) -> list[str] | None:
     """Return ISO 639-2/B language codes via IMDbPie, or None on failure."""
-    try:
-        import imdbpie
-    except ImportError:
+    if not _HAS_IMDBPIE:
         logger.warning("imdbpie not installed — cannot perform IMDb lookup.")
         return None
     try:
-        client = imdbpie.Imdb()
+        client = _imdbpie.Imdb()
     except Exception as exc:
         logger.warning("Failed to create IMDbPie client: %s", exc)
         return None
@@ -367,17 +383,17 @@ def _language_name_to_iso_639_2(name: str) -> str | None:
     fallback = _fallback_lang_name_to_code(name)
     if fallback:
         return fallback
-    try:
-        import pycountry
-    except ImportError:
+    if not _HAS_PYCOUNTRY:
         return None
-    result = _lookup_pycountry_language(pycountry.languages.get(name=name))
+    result = _lookup_pycountry_language(_pycountry.languages.get(name=name))
     if result:
         return result
-    result = _lookup_pycountry_language(pycountry.languages.get(alpha_3=name.lower()), fallback_code=name.lower())
+    result = _lookup_pycountry_language(_pycountry.languages.get(alpha_3=name.lower()), fallback_code=name.lower())
     if result:
         return result
-    result = _lookup_pycountry_language(pycountry.languages.get(bibliographic=name.lower()), fallback_code=name.lower())
+    result = _lookup_pycountry_language(
+        _pycountry.languages.get(bibliographic=name.lower()), fallback_code=name.lower()
+    )
     if result:
         return result
     return None
@@ -522,6 +538,7 @@ def resolve_native_language(
     if not codes and tmdb_api_key:
         codes = _lookup_tmdb(title, year, tmdb_api_key)
         source = "tmdb"
+        error = "no match from IMDbPie or TMDb"
     if not codes:
         logger.debug("No native language found for '%s'.", file_path.name)
         _maybe_cache_failure(db, file_path, error)
