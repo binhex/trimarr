@@ -161,7 +161,7 @@ def _build_profile_hash(
     # equivalent aliases (e.g. "fre" and "fra") produce the same profile hash.
     from trimarr.processor import normalize_language_code
 
-    canonical_language = sorted(normalize_language_code(c) for c in language)
+    canonical_language = sorted({normalize_language_code(c) for c in language})
     profile = {
         "delete_metadata_title": delete_metadata_title,
         "edit_metadata_title": edit_metadata_title,
@@ -322,6 +322,7 @@ def _resolve_effective_language(
         return cfg.language
 
     from trimarr.native_language import resolve_native_language  # noqa: PLC0415
+    from trimarr.processor import normalize_language_code  # noqa: PLC0415
 
     native = resolve_native_language(
         file_path=file_path,
@@ -331,9 +332,12 @@ def _resolve_effective_language(
     if not native:
         return cfg.language
 
-    # Merge and deduplicate — cfg.language is a list[str]
-    seen = set(cfg.language)
-    return cfg.language + [code for code in native if code not in seen]
+    # Canonicalize and deduplicate
+    canonical_user = [normalize_language_code(c) for c in cfg.language]
+    canonical_native = [normalize_language_code(c) for c in native] if native else []
+    seen = set(canonical_user)
+    result = canonical_user + [c for c in canonical_native if c not in seen]
+    return result
 
 
 def _process_one_file(

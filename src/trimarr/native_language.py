@@ -58,10 +58,13 @@ def parse_movie_title(file_path: Path) -> tuple[str, str | None]:
     stem = file_path.stem
     cleaned = _WORD_SEPARATORS.sub(" ", stem)
     year: str | None = None
-    year_match = _YEAR_RE.search(cleaned)
-    if year_match:
-        year = year_match.group(1)
-        cleaned = cleaned.replace(year_match.group(0), "")
+    year_matches = _YEAR_RE.findall(cleaned)
+    if year_matches:
+        year = year_matches[-1]
+        # Remove the last year occurrence from the title string
+        year_pos = cleaned.rfind(year)
+        if year_pos != -1:
+            cleaned = cleaned[:year_pos] + cleaned[year_pos + len(year) :]
 
     def _strip_brackets(s: str) -> str:
         parts = re.split(r"(\[[^\]]*\])", s)
@@ -156,7 +159,7 @@ def _extract_imdb_spoken_codes(spoken: list) -> list[str] | None:
     """Convert IMDb spoken language entries to ISO 639-2/B codes."""
     codes: list[str] = []
     for entry in spoken:
-        lang_name = entry.get("name") or entry.get("description", "") if isinstance(entry, dict) else str(entry)
+        lang_name = (entry.get("name") or entry.get("description") or "") if isinstance(entry, dict) else str(entry)
         code = _language_name_to_iso_639_2(lang_name)
         if code and code not in codes:
             codes.append(code)
@@ -182,7 +185,16 @@ def _lookup_pycountry_language(
     if lang is not None:
         alpha_2 = getattr(lang, "alpha_2", None)
         if isinstance(alpha_2, str) and alpha_2:
-            return _ISO_639_1_TO_2.get(alpha_2.lower(), alpha_2.lower())
+            code = _ISO_639_1_TO_2.get(alpha_2.lower())
+            if code:
+                return code
+            # alpha_2 not in map — try bibliographic or alpha_3
+            biblio = getattr(lang, "bibliographic", None)
+            if isinstance(biblio, str) and biblio:
+                return normalize_language_code(biblio.lower())
+            alpha_3 = getattr(lang, "alpha_3", None)
+            if isinstance(alpha_3, str) and alpha_3:
+                return normalize_language_code(alpha_3.lower())
         if fallback_code is not None:
             return normalize_language_code(fallback_code)
         alpha_3 = getattr(lang, "alpha_3", None)
@@ -255,7 +267,8 @@ def _try_tmdb_detail(hit: dict, title: str, api_key: str) -> list[str] | None:
             tmdb_id = hit.get("id")
             if tmdb_id is None:
                 continue
-            detail_url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={api_key}"
+            encoded_key = urllib.parse.quote(api_key, safe="")
+            detail_url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={encoded_key}"
             try:
                 with urllib.request.urlopen(detail_url, timeout=15) as resp2:
                     detail = json.loads(resp2.read().decode())
@@ -276,7 +289,8 @@ def _try_tmdb_detail(hit: dict, title: str, api_key: str) -> list[str] | None:
 def _lookup_tmdb(title: str, year: str | None, api_key: str) -> list[str] | None:
     """Return ISO 639-2/B language codes via TMDb, or None on failure."""
     encoded_title = urllib.parse.quote(title)
-    search_url = f"https://api.themoviedb.org/3/search/movie?query={encoded_title}&api_key={api_key}"
+    encoded_key = urllib.parse.quote(api_key, safe="")
+    search_url = f"https://api.themoviedb.org/3/search/movie?query={encoded_title}&api_key={encoded_key}"
     if year:
         search_url += f"&year={year}"
     try:
