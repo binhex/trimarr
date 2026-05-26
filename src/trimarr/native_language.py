@@ -54,7 +54,14 @@ def _strip_release_tags(title: str) -> str:
 
 
 def parse_movie_title(file_path: Path) -> tuple[str, str | None]:
-    """Extract a searchable movie title and optional year from *file_path*."""
+    """Extract a searchable movie title and optional year from *file_path*.
+
+    Searches the filename first, then falls back to the parent directory
+    name for the year.  This handles two common naming conventions:
+
+    * ``/path/Movie Name (2020).mkv`` — year in the filename
+    * ``/path/Movie Name (2020)/Movie Name.mkv`` — year in the parent dir
+    """
     stem = file_path.stem
     cleaned = _WORD_SEPARATORS.sub(" ", stem)
     year: str | None = None
@@ -65,6 +72,13 @@ def parse_movie_title(file_path: Path) -> tuple[str, str | None]:
         year_pos = cleaned.rfind(year)
         if year_pos != -1:
             cleaned = cleaned[:year_pos] + cleaned[year_pos + len(year) :]
+
+    # If no year found in the filename, try the parent directory name
+    if year is None:
+        parent_cleaned = _WORD_SEPARATORS.sub(" ", file_path.parent.stem)
+        parent_year_matches = _YEAR_RE.findall(parent_cleaned)
+        if parent_year_matches:
+            year = parent_year_matches[-1]
 
     def _strip_brackets(s: str) -> str:
         parts = re.split(r"(\[[^\]]*\])", s)

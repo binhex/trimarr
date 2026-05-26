@@ -51,6 +51,11 @@ class TestParseMovieTitle:
         result2 = parse_movie_title(Path("/data/WEBRip.1080p.mkv"))
         assert result2 == ("webrip.1080p", None)
 
+    def test_year_from_parent_directory(self) -> None:
+        """Year in parent directory name when filename has no year."""
+        result = parse_movie_title(Path("/data/Great Expectations (1946)/Great Expectations.mkv"))
+        assert result == ("great expectations", "1946"), f"Got {result}"
+
 
 class TestLanguageNameToCode:
     @pytest.mark.parametrize(
