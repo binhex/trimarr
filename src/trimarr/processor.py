@@ -1119,6 +1119,14 @@ def process_file(
 
         return None
 
+    except OSError as exc:
+        logger.error(f"File system error processing '{file_path}': {exc}")
+        logger.debug("", exc_info=True)
+        return f"filesystem error: {str(exc).splitlines()[0].strip()}"
+    except subprocess.TimeoutExpired as exc:
+        logger.error(f"mkvmerge timed out processing '{file_path}': {exc}")
+        logger.debug("", exc_info=True)
+        return f"mkvmerge timeout: {str(exc).splitlines()[0].strip()}"
     except Exception as exc:
         logger.error(f"Unexpected error processing '{file_path}': {exc}")
         logger.debug("", exc_info=True)

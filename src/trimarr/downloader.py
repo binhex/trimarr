@@ -53,6 +53,16 @@ _GITHUB_WEB = "https://github.com"
 _VERSION_FILE = "mkvmerge.version"
 
 
+# Mapping from (OS, machine) to (asset_filename, binary_name).
+# Only Linux x86_64 and Windows x86_64 are supported.
+_PLATFORM_ASSETS: dict[tuple[str, str], tuple[str, str]] = {
+    ("Linux", "x86_64"): ("mkvtoolnix-x86_64-linux.tar.xz", "mkvmerge"),
+    ("Linux", "amd64"): ("mkvtoolnix-x86_64-linux.tar.xz", "mkvmerge"),
+    ("Windows", "amd64"): ("mkvtoolnix-x86_64-win.zip", "mkvmerge.exe"),
+    ("Windows", "x86_64"): ("mkvtoolnix-x86_64-win.zip", "mkvmerge.exe"),
+}
+
+
 def _get_platform_asset() -> tuple[str, str]:
     """Return ``(asset_filename, binary_name)`` for the current OS and CPU architecture.
 
@@ -62,15 +72,13 @@ def _get_platform_asset() -> tuple[str, str]:
     system = platform.system()
     machine = platform.machine().lower()
 
-    if system == "Linux" and machine in ("x86_64", "amd64"):
-        return "mkvtoolnix-x86_64-linux.tar.xz", "mkvmerge"
-    if system == "Windows" and machine in ("amd64", "x86_64"):
-        return "mkvtoolnix-x86_64-win.zip", "mkvmerge.exe"
-
-    raise RuntimeError(
-        f"No pre-built mkvmerge binary is available for {system}/{platform.machine()}. "
-        "Install mkvmerge manually and specify its path with --mkvmerge-path."
-    )
+    try:
+        return _PLATFORM_ASSETS[(system, machine)]
+    except KeyError:
+        raise RuntimeError(
+            f"No pre-built mkvmerge binary is available for {system}/{platform.machine()}. "
+            "Install mkvmerge manually and specify its path with --mkvmerge-path."
+        ) from None
 
 
 def _extract_from_tar(archive_path: Path, binary_name: str, tmp_dir: Path) -> Path:

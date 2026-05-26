@@ -94,7 +94,7 @@ module = "croniter"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["imdbpie", "imdbpie.*"]
+module = "imdbpie"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

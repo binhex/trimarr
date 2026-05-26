@@ -16,8 +16,6 @@ from trimarr.processor import CorruptOutputError, MkvTrack, _spinner, build_mkvm
 # Helpers
 # ---------------------------------------------------------------------------
 
-ENG: list[str] = ["eng"]
-FRE = "fre"
 MKVMERGE = "/usr/bin/mkvmerge"
 
 
@@ -53,7 +51,7 @@ def _make_tracks(
 
 def _build_cmd(
     tracks: list[MkvTrack],
-    language: list[str] = ENG,
+    language: list[str] | None = None,
     keep_audio: bool = False,
     keep_subtitles: bool = False,
     edit_metadata_title: bool = False,
@@ -66,6 +64,8 @@ def _build_cmd(
     strip_subtitle_regex_patterns: list[re.Pattern] | None = None,
 ) -> list[str] | None:
     """Thin wrapper around build_mkvmerge_command with test-friendly defaults."""
+    if language is None:
+        language = ["eng"]
     return build_mkvmerge_command(
         mkvmerge_path=MKVMERGE,
         input_path=input_path or Path("/media/Movie.mkv"),
