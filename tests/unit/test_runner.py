@@ -10,6 +10,7 @@ from pathlib import Path
 from trimarr.database import Database
 from trimarr.runner import (
     _build_profile_hash,
+    _dir_has_work,
     _process_one_file,
     _ProcessingConfig,
     _resolve_effective_language,
@@ -258,6 +259,97 @@ class TestResolveEffectiveLanguage:
             logger=MagicMock(),
         )
         assert cfg.language == original
+
+    def test_native_lookup_returns_none(self, mocker) -> None:
+        """When resolve_native_language returns None, fall back to cfg.language."""
+        from unittest.mock import MagicMock
+
+        cfg = _ProcessingConfig(
+            mkvmerge_path="/fake/mkvmerge",
+            language=["eng"],
+            keep_audio=False,
+            keep_native_audio=True,
+            keep_subtitles=False,
+            edit_metadata_title=False,
+            delete_metadata_title=False,
+            strip_lower_channels=False,
+            strip_commentary=False,
+            skip_size_check=False,
+            dry_run=True,
+            no_backup=True,
+        )
+        mocker.patch(
+            "trimarr.native_language.resolve_native_language",
+            return_value=None,
+        )
+        result = _resolve_effective_language(
+            file_path=Path("/fake/test.mkv"),
+            cfg=cfg,
+            db=MagicMock(),
+            logger=MagicMock(),
+        )
+        assert result == ["eng"]
+
+    def test_native_lookup_returns_empty(self, mocker) -> None:
+        """When resolve_native_language returns an empty list, fall back to cfg.language."""
+        from unittest.mock import MagicMock
+
+        cfg = _ProcessingConfig(
+            mkvmerge_path="/fake/mkvmerge",
+            language=["eng"],
+            keep_audio=False,
+            keep_native_audio=True,
+            keep_subtitles=False,
+            edit_metadata_title=False,
+            delete_metadata_title=False,
+            strip_lower_channels=False,
+            strip_commentary=False,
+            skip_size_check=False,
+            dry_run=True,
+            no_backup=True,
+        )
+        mocker.patch(
+            "trimarr.native_language.resolve_native_language",
+            return_value=[],
+        )
+        result = _resolve_effective_language(
+            file_path=Path("/fake/test.mkv"),
+            cfg=cfg,
+            db=MagicMock(),
+            logger=MagicMock(),
+        )
+        assert result == ["eng"]
+
+
+class TestDirHasWork:
+    """Tests for _dir_has_work()."""
+
+    def test_keep_native_audio_assumes_work(self) -> None:
+        """With keep_native_audio active, _dir_has_work always returns True."""
+        from unittest.mock import MagicMock
+
+        cfg = _ProcessingConfig(
+            mkvmerge_path="/fake/mkvmerge",
+            language=["eng"],
+            keep_audio=False,
+            keep_native_audio=True,
+            keep_subtitles=False,
+            edit_metadata_title=False,
+            delete_metadata_title=False,
+            strip_lower_channels=False,
+            strip_commentary=False,
+            skip_size_check=False,
+            dry_run=True,
+            no_backup=True,
+        )
+        result = _dir_has_work(
+            files_in_dir=[],
+            db=MagicMock(),
+            profile_hash="",
+            cfg=cfg,
+            logger=MagicMock(),
+        )
+        assert result is True
 
 
 class TestProcessOneFileDryRun:

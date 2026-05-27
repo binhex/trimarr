@@ -334,7 +334,7 @@ def _resolve_effective_language(
 
     # Canonicalize and deduplicate
     canonical_user = [normalize_language_code(c) for c in cfg.language]
-    canonical_native = [normalize_language_code(c) for c in native] if native else []
+    canonical_native = [normalize_language_code(c) for c in native]
     seen = set(canonical_user)
     result = canonical_user + [c for c in canonical_native if c not in seen]
     return result
