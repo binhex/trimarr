@@ -1222,7 +1222,7 @@ class TestResolveNativeLanguageNfo:
         assert result == ["ger"]
 
     def test_nfo_no_title(self, mocker, tmp_path: Path) -> None:
-        """NFO has no title/original_title, skips Phase 1c, falls to Phase 2."""
+        """NFO direct ID fails (no spoken languages), no embedded ID, NFO has no title, falls to filename chain."""
         from trimarr.native_language import resolve_native_language
 
         d = tmp_path / "Das Boot (1981)"
@@ -1263,7 +1263,7 @@ class TestResolveNativeLanguageNfo:
         assert result is None
 
     def test_nfo_tmdb_title_search_fails(self, mocker, tmp_path: Path) -> None:
-        """NFO title search via both APIs fails, falls to Phase 2, Phase 2 also fails."""
+        """NFO title search fails, falls to Phase 4 (filename/directory chain) which also fails."""
         from trimarr.native_language import resolve_native_language
 
         d = tmp_path / "Unknown (2020)"
