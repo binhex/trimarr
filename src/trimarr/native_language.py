@@ -322,7 +322,7 @@ def _lookup_imdbpie_by_id(imdb_id: str) -> list[str] | None:
     or no spoken language data is returned.
     """
     if not _HAS_IMDBPIE:
-        logger.debug("imdbpie not installed \u2014 cannot perform IMDb ID lookup.")
+        logger.warning("imdbpie not installed - cannot perform IMDb ID lookup.")
         return None
     try:
         client = _imdbpie.Imdb()
@@ -687,7 +687,13 @@ def _resolve_nfo_title_search(
     if not search_title:
         return None
 
-    codes = _lookup_imdbpie(search_title, nfo_meta.year)
+    # Sanitize year: NFO may contain air dates ("2019-06-05") — extract
+    # just the 4-digit year for API compatibility, or None if unparseable.
+    year: str | None = None
+    if nfo_meta.year and len(nfo_meta.year) >= 4 and nfo_meta.year[:4].isdigit():
+        year = nfo_meta.year[:4]
+
+    codes = _lookup_imdbpie(search_title, year)
     if codes is not None:
         _msg = "Identified native language(s) for '%s': %s (source=nfo_imdbpie_title)."
         logger.info(_msg, file_path.name, codes)
@@ -695,7 +701,7 @@ def _resolve_nfo_title_search(
         return codes
 
     if tmdb_api_key:
-        codes = _lookup_tmdb(search_title, nfo_meta.year, tmdb_api_key)
+        codes = _lookup_tmdb(search_title, year, tmdb_api_key)
         if codes is not None:
             _msg = "Identified native language(s) for '%s': %s (source=nfo_tmdb_title)."
             logger.info(_msg, file_path.name, codes)

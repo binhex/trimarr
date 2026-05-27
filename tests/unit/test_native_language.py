@@ -1228,3 +1228,30 @@ class TestResolveNativeLanguageNfo:
 
         result = resolve_native_language(mkv, db=None, tmdb_api_key="fake-key")
         assert result is None
+
+    def test_nfo_title_search_with_air_date_year(self, mocker, tmp_path: Path) -> None:
+        """NFO with air-date year (2019-06-05) extracts just the 4-digit year."""
+        from trimarr.native_language import resolve_native_language
+
+        d = tmp_path / "Test (2019)"
+        d.mkdir()
+        nfo = d / "Test.nfo"
+        nfo.write_text("""<?xml version="1.0"?>
+<movie><title>Test Movie</title><year>2019-06-05</year></movie>""")
+        mkv = d / "Test.mkv"
+        mkv.write_text("dummy")
+
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        # search_for_title should be called with "Test Movie 2019" (not "2019-06-05")
+        instance.search_for_title.return_value = [
+            {"title": "Test Movie", "year": 2019, "imdb_id": "tt0000001"},
+        ]
+        instance.get_title_auxiliary.return_value = {
+            "spokenLanguages": [{"name": "English"}],
+        }
+
+        result = resolve_native_language(mkv, db=None)
+        assert result == ["eng"]
+        # Verify the search term used only the 4-digit year
+        instance.search_for_title.assert_called_once_with("Test Movie 2019")
