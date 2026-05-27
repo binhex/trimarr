@@ -1132,3 +1132,99 @@ class TestResolveNativeLanguageNfo:
 
         result = resolve_native_language(mkv, db=None, tmdb_api_key="fake-key")
         assert result == ["chi"]
+
+    def test_nfo_tmdb_id_lookup_fails(self, mocker, tmp_path: Path) -> None:
+        """NFO TMDb ID lookup fails, falls through to title search."""
+        from trimarr.native_language import resolve_native_language
+
+        d = tmp_path / "Test (2024)"
+        d.mkdir()
+        nfo = d / "Test.nfo"
+        nfo.write_text("""<?xml version="1.0"?>
+<movie><title>Das Boot</title><year>1981</year>
+<imdbid>tt0000000</imdbid><tmdbid>999</tmdbid></movie>""")
+        mkv = d / "Test.mkv"
+        mkv.write_text("dummy")
+
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        # IMDb ID lookup fails
+        instance.get_title_auxiliary.return_value = {"spokenLanguages": None}
+        # TMDb ID lookup fails
+        mock_urlopen = mocker.patch("trimarr.native_language.urllib.request.urlopen")
+        mock_urlopen.side_effect = OSError("Network error")
+        # Search succeeds
+        instance.search_for_title.return_value = [
+            {"title": "Das Boot", "year": 1981, "imdb_id": "tt0082096"},
+        ]
+
+        # Use side_effect on aux so the second call (from search) succeeds
+        def _aux(imdb_id: str) -> dict:
+            return {"spokenLanguages": [{"name": "German"}]} if imdb_id == "tt0082096" else {"spokenLanguages": None}
+
+        instance.get_title_auxiliary.side_effect = _aux
+
+        result = resolve_native_language(mkv, db=None, tmdb_api_key="fake-key")
+        assert result == ["ger"]
+
+    def test_nfo_no_title(self, mocker, tmp_path: Path) -> None:
+        """NFO has no title/original_title, skips Phase 1c, falls to Phase 2."""
+        from trimarr.native_language import resolve_native_language
+
+        d = tmp_path / "Das Boot (1981)"
+        d.mkdir()
+        nfo = d / "Das Boot.nfo"
+        nfo.write_text("""<?xml version="1.0"?>
+<movie><imdbid>tt0000000</imdbid></movie>""")
+        mkv = d / "Das Boot (1981).mkv"
+        mkv.write_text("dummy")
+
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        # NFO IMDb ID lookup fails
+        instance.get_title_auxiliary.return_value = {"spokenLanguages": None}
+        # Filename + directory searches also fail (no match)
+        instance.search_for_title.return_value = []
+
+        result = resolve_native_language(mkv, db=None)
+        assert result is None
+
+    def test_nfo_imdbpie_title_fails_no_api(self, mocker, tmp_path: Path) -> None:
+        """NFO title IMDbPie search fails, no TMDb API key, falls through."""
+        from trimarr.native_language import resolve_native_language
+
+        d = tmp_path / "Unknown (2020)"
+        d.mkdir()
+        nfo = d / "Unknown.nfo"
+        nfo.write_text("""<?xml version="1.0"?>
+<movie><title>Unknown Movie</title><year>2020</year></movie>""")
+        mkv = d / "Unknown.mkv"
+        mkv.write_text("dummy")
+
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.search_for_title.return_value = []
+
+        result = resolve_native_language(mkv, db=None)
+        assert result is None
+
+    def test_nfo_tmdb_title_search_fails(self, mocker, tmp_path: Path) -> None:
+        """NFO title search via both APIs fails, falls to Phase 2, Phase 2 also fails."""
+        from trimarr.native_language import resolve_native_language
+
+        d = tmp_path / "Unknown (2020)"
+        d.mkdir()
+        nfo = d / "Unknown.nfo"
+        nfo.write_text("""<?xml version="1.0"?>
+<movie><title>Unknown Movie</title><year>2020</year></movie>""")
+        mkv = d / "Unknown.mkv"
+        mkv.write_text("dummy")
+
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.search_for_title.return_value = []
+        mock_urlopen = mocker.patch("trimarr.native_language.urllib.request.urlopen")
+        mock_urlopen.side_effect = OSError("Network error")
+
+        result = resolve_native_language(mkv, db=None, tmdb_api_key="fake-key")
+        assert result is None
