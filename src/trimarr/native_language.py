@@ -235,6 +235,18 @@ def parse_movie_title(file_path: Path) -> tuple[str, str | None]:
 
     cleaned = _strip_brackets(cleaned)
 
+    def _strip_curlies(s: str) -> str:
+        """Strip curly-brace blocks that don't contain a year."""
+        parts = re.split(r"(\{[^}]*\})", s)
+        result = []
+        for part in parts:
+            if part.startswith("{") and part.endswith("}") and not _YEAR_RE.search(part):
+                continue
+            result.append(part)
+        return "".join(result)
+
+    cleaned = _strip_curlies(cleaned)
+
     def _strip_parens(s: str) -> str:
         parts = re.split(r"(\([^)]*\))", s)
         result = []
@@ -843,10 +855,12 @@ def resolve_native_language(
                 return codes
             # IMDb ID found but lookup failed — try embedded TMDb ID before
             # falling through (rare, but handles dual-ID filenames).
-            embedded2 = _extract_embedded_id(file_stem)
-            if embedded2 is not None and embedded2[0] == "tmdb":
-                eid2 = embedded2[1]
-                if tmdb_api_key:
+            # NOTE: _extract_embedded_id always prefers IMDb over TMDb, so
+            # we must search with _EMBEDDED_TMDB_RE directly here.
+            tmdb_m = _EMBEDDED_TMDB_RE.search(file_stem)
+            if tmdb_m:
+                eid2 = tmdb_m.group(1) or tmdb_m.group(2) or tmdb_m.group(3)
+                if eid2 and tmdb_api_key:
                     codes = _lookup_tmdb_by_id(eid2, tmdb_api_key)
                     if codes is not None:
                         logger.info(
@@ -856,7 +870,7 @@ def resolve_native_language(
                         )
                         _maybe_cache_result(db, file_path, codes, "tmdb_embedded_id", None)
                         return codes
-                else:
+                elif not tmdb_api_key:
                     logger.debug(
                         "Skipping TMDb embedded ID lookup for '%s' \u2014 no API key configured.",
                         file_path.name,
@@ -883,6 +897,7 @@ def resolve_native_language(
                     "Skipping TMDb embedded ID lookup for '%s' \u2014 no API key configured.",
                     file_path.name,
                 )
+                codes = None
         if codes is None:
             logger.debug(
                 "No native language found for '%s' via embedded ID (%s=%s).",
