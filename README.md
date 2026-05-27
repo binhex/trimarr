@@ -190,7 +190,7 @@ flowchart TD
     A([Start]) --> B{NFO file exists
 for this media?}
 
-    %% ── NFO direct ID ── %%
+    %% NFO direct ID --
     B -- Yes --> C[Parse NFO XML]
     C --> D{Has IMDb or
 TMDb ID?}
@@ -202,7 +202,7 @@ native languages?}
 native languages])
     F -- No --> H
 
-    %% ── NFO title search ── %%
+    %% NFO title search --
     D -- No --> H[Use NFO title + year
 for API search]
     H --> I{Search
@@ -211,9 +211,9 @@ succeeds?}
 native languages])
     I -- No --> K
 
-    %% ── Embedded ID in filename ── %%
+    %% Embedded ID in filename --
     B -- No --> K{Filename contains
-{imdb-tt…} or {tmdb-…}?}
+imdb-tt... or tmdb-...?}
     K -- Yes --> L[Extract ID from
 filename stem]
     L --> M[Look up by ID]
@@ -222,7 +222,7 @@ native languages?}
     N -- Yes --> G
     N -- No --> O
 
-    %% ── Filename parsing ── %%
+    %% Filename parsing --
     K -- No --> O[Parse filename stem
 strip scene tags,
 extract year]
@@ -234,7 +234,7 @@ filename title + year]
     S -- Yes --> G
     S -- No --> R
 
-    %% ── Directory name ── %%
+    %% Directory name --
     R[Parse parent
 directory name]
     R --> T[Search IMDbPie by
@@ -243,7 +243,7 @@ directory title + year]
     U -- Yes --> G
     U -- No --> V
 
-    %% ── TMDb fallback ── %%
+    %% TMDb fallback --
     V{--tmdb-api-key
 configured?}
     V -- No --> W([⚠️ Cannot determine
