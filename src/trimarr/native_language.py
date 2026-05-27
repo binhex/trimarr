@@ -50,6 +50,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Regex patterns for filename-embedded IMDb/TMDb IDs.
+# Matches {imdb-tt123}, [imdb-tt123], imdb-tt123 and same for tmdb-{id}.
+_EMBEDDED_IMDB_RE = re.compile(r"""[\[\{]?imdb-(tt\d+)[\]\}]?""", re.VERBOSE | re.IGNORECASE)
+_EMBEDDED_TMDB_RE = re.compile(r"""[\[\{]?tmdb-(\d+)[\]\}]?""", re.VERBOSE | re.IGNORECASE)
+
 # Common release-group tags and container metadata to strip from filenames.
 _RELEASE_TAGS_RE = re.compile(
     r"""
@@ -68,6 +73,24 @@ _RELEASE_TAGS_RE = re.compile(
 _YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 
 _WORD_SEPARATORS = re.compile(r"[._\-+]")
+
+
+def _extract_embedded_id(stem: str) -> tuple[str, str] | None:
+    """Scan *stem* for an embedded IMDb or TMDb ID.
+
+    Supports curly ``{imdb-tt...}``, square ``[imdb-tt...]``, and
+    bare ``imdb-tt...`` syntax (same for ``tmdb-...``).
+
+    Returns ``("imdb", "tt0077914")``, ``("tmdb", "77914")``, or
+    ``None`` if no recognised ID pattern is found.
+    """
+    m = _EMBEDDED_IMDB_RE.search(stem)
+    if m:
+        return ("imdb", m.group(1).lower())
+    m = _EMBEDDED_TMDB_RE.search(stem)
+    if m:
+        return ("tmdb", m.group(1))
+    return None
 
 
 def _normalise_title(s: str) -> str:
