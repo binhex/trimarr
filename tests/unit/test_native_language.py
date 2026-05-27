@@ -853,3 +853,97 @@ class TestHelpers:
         msg = _describe_failure("tmdb_filename", "fake-key")
         assert "no match from IMDbPie or TMDb" in msg
         assert "tried filename and directory name" in msg
+
+
+class TestLookupImdbpieById:
+    """Tests for _lookup_imdbpie_by_id()."""
+
+    def test_success(self, mocker) -> None:
+        """Direct IMDb ID lookup returns spoken languages."""
+        from trimarr.native_language import _lookup_imdbpie_by_id
+
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.get_title_auxiliary.return_value = {
+            "spokenLanguages": [{"name": "German"}],
+        }
+        result = _lookup_imdbpie_by_id("tt0082096")
+        assert result == ["ger"]
+        instance.search_for_title.assert_not_called()
+
+    def test_aux_failure(self, mocker) -> None:
+        """When get_title_auxiliary raises, returns None."""
+        from trimarr.native_language import _lookup_imdbpie_by_id
+
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.get_title_auxiliary.side_effect = RuntimeError("API error")
+        result = _lookup_imdbpie_by_id("tt0082096")
+        assert result is None
+
+    def test_no_spoken_languages(self, mocker) -> None:
+        """When aux has no spokenLanguages, returns None."""
+        from trimarr.native_language import _lookup_imdbpie_by_id
+
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.get_title_auxiliary.return_value = {"spokenLanguages": None}
+        result = _lookup_imdbpie_by_id("tt0082096")
+        assert result is None
+
+    def test_imdbpie_not_installed(self, mocker) -> None:
+        """When imdbpie is not installed, returns None."""
+        from trimarr.native_language import _lookup_imdbpie_by_id
+
+        mocker.patch("trimarr.native_language._HAS_IMDBPIE", False)
+        result = _lookup_imdbpie_by_id("tt0082096")
+        assert result is None
+
+
+class TestLookupTmdbById:
+    """Tests for _lookup_tmdb_by_id()."""
+
+    def test_success(self, mocker) -> None:
+        """Direct TMDb ID lookup returns language codes."""
+        from trimarr.native_language import _lookup_tmdb_by_id
+
+        mock_urlopen = mocker.patch("trimarr.native_language.urllib.request.urlopen")
+        detail_response = mocker.MagicMock()
+        detail_response.__enter__.return_value = detail_response
+        detail_response.read.return_value = b'{"original_language": "zh"}'
+        mock_urlopen.return_value = detail_response
+        result = _lookup_tmdb_by_id("155", "fake-key")
+        assert result == ["chi"]
+
+    def test_network_error(self, mocker) -> None:
+        """Network error during detail fetch returns None."""
+        from trimarr.native_language import _lookup_tmdb_by_id
+
+        mock_urlopen = mocker.patch("trimarr.native_language.urllib.request.urlopen")
+        mock_urlopen.side_effect = OSError("Connection refused")
+        result = _lookup_tmdb_by_id("155", "fake-key")
+        assert result is None
+
+    def test_empty_original_language(self, mocker) -> None:
+        """Detail has no original_language -> None."""
+        from trimarr.native_language import _lookup_tmdb_by_id
+
+        mock_urlopen = mocker.patch("trimarr.native_language.urllib.request.urlopen")
+        detail_response = mocker.MagicMock()
+        detail_response.__enter__.return_value = detail_response
+        detail_response.read.return_value = b'{"original_language": ""}'
+        mock_urlopen.return_value = detail_response
+        result = _lookup_tmdb_by_id("155", "fake-key")
+        assert result is None
+
+    def test_three_letter_code(self, mocker) -> None:
+        """3-letter original_language is normalised (e.g. deu -> ger)."""
+        from trimarr.native_language import _lookup_tmdb_by_id
+
+        mock_urlopen = mocker.patch("trimarr.native_language.urllib.request.urlopen")
+        detail_response = mocker.MagicMock()
+        detail_response.__enter__.return_value = detail_response
+        detail_response.read.return_value = b'{"original_language": "deu"}'
+        mock_urlopen.return_value = detail_response
+        result = _lookup_tmdb_by_id("155", "fake-key")
+        assert result == ["ger"]

@@ -313,6 +313,24 @@ def _lookup_imdbpie(title: str, year: str | None) -> list[str] | None:
     return _fetch_imdb_spoken_languages(client, matched_id)
 
 
+def _lookup_imdbpie_by_id(imdb_id: str) -> list[str] | None:
+    """Return ISO 639-2/B language codes via IMDbPie using a known IMDb ID.
+
+    Skips the search+match step and directly fetches auxiliary data by ID.
+    Returns *None* when imdbpie is unavailable, the client cannot be created,
+    or no spoken language data is returned.
+    """
+    if not _HAS_IMDBPIE:
+        logger.debug("imdbpie not installed \u2014 cannot perform IMDb ID lookup.")
+        return None
+    try:
+        client = _imdbpie.Imdb()
+    except Exception as exc:
+        logger.warning("Failed to create IMDbPie client: %s", exc)
+        return None
+    return _fetch_imdb_spoken_languages(client, imdb_id)
+
+
 def _extract_spoken_code_from_string(entry: str, codes: list[str]) -> None:
     """Handle a 2-letter ISO 639-1 code entry."""
     code = _ISO_639_1_TO_2.get(entry.lower())
@@ -537,6 +555,24 @@ def _lookup_tmdb(title: str, year: str | None, api_key: str) -> list[str] | None
         if codes:
             return codes
     return None
+
+
+def _lookup_tmdb_by_id(tmdb_id: str, api_key: str) -> list[str] | None:
+    """Return ISO 639-2/B language codes via TMDb using a known TMDb ID.
+
+    Skips the search+match step and directly fetches the movie detail by ID.
+    Returns *None* when the detail endpoint fails or returns no usable
+    ``original_language``.
+    """
+    encoded_key = urllib.parse.quote(api_key, safe="")
+    detail_url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={encoded_key}"
+    try:
+        with urllib.request.urlopen(detail_url, timeout=15) as resp:
+            detail = json.loads(resp.read().decode())
+    except Exception as exc:
+        logger.debug("TMDb detail failed for id %s: %s", tmdb_id, exc)
+        return None
+    return _extract_tmdb_language_code(detail)
 
 
 _CACHE_MISS = object()
