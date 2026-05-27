@@ -1255,3 +1255,56 @@ class TestResolveNativeLanguageNfo:
         assert result == ["eng"]
         # Verify the search term used only the 4-digit year
         instance.search_for_title.assert_called_once_with("Test Movie 2019")
+
+
+class TestExtractEmbeddedId:
+    """Tests for _extract_embedded_id()."""
+
+    @pytest.mark.parametrize(
+        ("stem", "expected"),
+        [
+            # IMDb: curly, square, bare
+            ("Martin (1977) {imdb-tt0077914} 2160p", ("imdb", "tt0077914")),
+            ("Martin [imdb-tt0077914] 2160p", ("imdb", "tt0077914")),
+            ("Martin imdb-tt0077914 2160p", ("imdb", "tt0077914")),
+            # IMDb: case insensitive
+            ("Martin {IMDB-tt0077914} 2160p", ("imdb", "tt0077914")),
+            # TMDb: curly, square, bare
+            ("Martin (1977) {tmdb-77914} 2160p", ("tmdb", "77914")),
+            ("Martin [tmdb-77914] 2160p", ("tmdb", "77914")),
+            ("Martin tmdb-77914 2160p", ("tmdb", "77914")),
+        ],
+    )
+    def test_extract_embedded_id(self, stem: str, expected: tuple[str, str]) -> None:
+        from trimarr.native_language import _extract_embedded_id
+
+        result = _extract_embedded_id(stem)
+        assert result == expected
+
+    @pytest.mark.parametrize(
+        "stem",
+        [
+            "Martin (1977) 2160p",
+            "Martin [some-other-id] 2160p",
+            "tmdb-abc",  # TMDb ID must be numeric
+            "imdb-movie",  # IMDb ID must start with tt
+        ],
+    )
+    def test_extract_embedded_id_no_match(self, stem: str) -> None:
+        from trimarr.native_language import _extract_embedded_id
+
+        assert _extract_embedded_id(stem) is None
+
+    @pytest.mark.parametrize(
+        ("stem", "expected"),
+        [
+            # Both present: IMDb wins (checked first)
+            ("{imdb-tt0077914} {tmdb-77914}", ("imdb", "tt0077914")),
+            ("[tmdb-77914] [imdb-tt0077914]", ("imdb", "tt0077914")),
+        ],
+    )
+    def test_extract_embedded_id_both_present(self, stem: str, expected: tuple[str, str]) -> None:
+        from trimarr.native_language import _extract_embedded_id
+
+        result = _extract_embedded_id(stem)
+        assert result == expected
