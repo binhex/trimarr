@@ -173,11 +173,91 @@ flowchart TD
 > profile changes.
 
 > **Native audio preservation:** When `--keep-native-audio` is enabled, trimarr identifies the
-> film's original spoken language(s) via IMDb (or TMDb as fallback) and merges them into the
-> effective language list *before* the `Filter by --language` step. This means the native language
-> is treated identically to a user-supplied language — all existing safeguards (audio fallback,
-> commentary stripping, channel stripping) apply uniformly. The lookup result is cached in the
-> database so each unique file is resolved only once.
+> film's original spoken language(s) and merges them into the effective language list *before*
+> the `Filter by --language` step. This means the native language is treated identically to a
+> user-supplied language — all existing safeguards (audio fallback, commentary stripping,
+> channel stripping) apply uniformly. The lookup result is cached in the database so each
+> unique file is resolved only once.
+
+### Native language resolution flow
+
+When `--keep-native-audio` is enabled, trimarr walks the following chain to identify the
+movie or TV show and look up its original spoken language(s). Each level is attempted in
+order; the first successful result is cached in the database and returned.
+
+```mermaid
+flowchart TD
+    A([Start]) --> B{NFO file exists
+for this media?}
+
+    %% ── NFO direct ID ── %%
+    B -- Yes --> C[Parse NFO XML]
+    C --> D{Has IMDb or
+TMDb ID?}
+    D -- Yes --> E[Look up IMDb/TMDb
+by ID]
+    E --> F{API returns
+native languages?}
+    F -- Yes --> G([✅ Cache & return
+native languages])
+    F -- No --> H
+
+    %% ── NFO title search ── %%
+    D -- No --> H[Use NFO title + year
+for API search]
+    H --> I{Search
+succeeds?}
+    I -- Yes --> J([✅ Cache & return
+native languages])
+    I -- No --> K
+
+    %% ── Embedded ID in filename ── %%
+    B -- No --> K{Filename contains
+{imdb-tt…} or {tmdb-…}?}
+    K -- Yes --> L[Extract ID from
+filename stem]
+    L --> M[Look up by ID]
+    M --> N{API returns
+native languages?}
+    N -- Yes --> G
+    N -- No --> O
+
+    %% ── Filename parsing ── %%
+    K -- No --> O[Parse filename stem
+strip scene tags,
+extract year]
+    O --> P{Year found?}
+    P -- Yes --> Q[Search IMDbPie by
+filename title + year]
+    P -- No --> R
+    Q --> S{Found?}
+    S -- Yes --> G
+    S -- No --> R
+
+    %% ── Directory name ── %%
+    R[Parse parent
+directory name]
+    R --> T[Search IMDbPie by
+directory title + year]
+    T --> U{Found?}
+    U -- Yes --> G
+    U -- No --> V
+
+    %% ── TMDb fallback ── %%
+    V{--tmdb-api-key
+configured?}
+    V -- No --> W([⚠️ Cannot determine
+native language])
+    V -- Yes --> X[Search TMDb by
+filename title + year]
+    X --> Y{Found?}
+    Y -- Yes --> G
+    Y -- No --> Z[Search TMDb by
+directory title + year]
+    Z --> AA{Found?}
+    AA -- Yes --> G
+    AA -- No --> W
+```
 
 ## Scheduler
 

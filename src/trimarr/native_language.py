@@ -50,6 +50,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Regex patterns for filename-embedded IMDb/TMDb IDs.
+# Matches {imdb-tt123}, [imdb-tt123], imdb-tt123 and same for tmdb-{id}.
+_EMBEDDED_IMDB_RE = re.compile(
+    r"""(?:\[imdb-(tt\d{7,})\]|\{imdb-(tt\d{7,})\}|imdb-(tt\d{7,}))""", re.VERBOSE | re.IGNORECASE
+)
+_EMBEDDED_TMDB_RE = re.compile(r"""(?:\[tmdb-(\d+)\]|\{tmdb-(\d+)\}|tmdb-(\d+))""", re.VERBOSE | re.IGNORECASE)
+
 # Common release-group tags and container metadata to strip from filenames.
 _RELEASE_TAGS_RE = re.compile(
     r"""
@@ -60,7 +67,8 @@ _RELEASE_TAGS_RE = re.compile(
        MULTi|DUAL|PROPER|REPACK|EXTENDED|UNRATED|DIRECTOR.?S.?CUT|
        REMUX|ENCODE|INTERNAL|READNFO|COMPLETE|
        HDR|HDR10|HDR10PLUS|SDR|DV|DoVi|DolbyVision|
-       AMZN|NF|WEB|iTunes|MA|DSNP|HMAX|ATVP)\b
+       AMZN|NF|WEB|iTunes|MA|DSNP|HMAX|ATVP|
+       imdb-tt\d{7,}|tmdb-\d+)\b
     """,
     re.IGNORECASE | re.VERBOSE,
 )
@@ -68,6 +76,30 @@ _RELEASE_TAGS_RE = re.compile(
 _YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 
 _WORD_SEPARATORS = re.compile(r"[._\-+]")
+
+
+def _extract_embedded_id(stem: str) -> tuple[str, str] | None:
+    """Scan *stem* for an embedded IMDb or TMDb ID.
+
+    Supports curly ``{imdb-tt...}``, square ``[imdb-tt...]``, and
+    bare ``imdb-tt...`` syntax (same for ``tmdb-...``). IMDb IDs
+    must be at least 7 characters long (``tt0000001``).
+
+    Returns ``("imdb", "tt0077914")``, ``("tmdb", "77914")``, or
+    ``None`` if no recognised ID pattern is found.
+    """
+    m = _EMBEDDED_IMDB_RE.search(stem)
+    if m:
+        # Group 1 = [...], Group 2 = {...}, Group 3 = bare
+        imdb_id = m.group(1) or m.group(2) or m.group(3)
+        if imdb_id:
+            return ("imdb", imdb_id.lower())
+    m = _EMBEDDED_TMDB_RE.search(stem)
+    if m:
+        tmdb_id = m.group(1) or m.group(2) or m.group(3)
+        if tmdb_id:
+            return ("tmdb", tmdb_id)
+    return None
 
 
 def _normalise_title(s: str) -> str:
@@ -183,6 +215,10 @@ def parse_movie_title(file_path: Path) -> tuple[str, str | None]:
         year_pos = cleaned.rfind(year)
         if year_pos != -1:
             before = cleaned[:year_pos].strip()
+            # Strip orphaned opening braces/brackets/parens left behind
+            # when the year was inside a curly or bracketed block.
+            while before.endswith(("{", "(", "[")):
+                before = before[:-1].strip()
             cleaned = before or cleaned[year_pos + len(year) :].strip()
 
     # If no year found in the filename, try the parent directory name
@@ -202,6 +238,18 @@ def parse_movie_title(file_path: Path) -> tuple[str, str | None]:
         return "".join(result)
 
     cleaned = _strip_brackets(cleaned)
+
+    def _strip_curlies(s: str) -> str:
+        """Strip curly-brace blocks that don't contain a year."""
+        parts = re.split(r"(\{[^}]*\})", s)
+        result = []
+        for part in parts:
+            if part.startswith("{") and part.endswith("}") and not _YEAR_RE.search(part):
+                continue
+            result.append(part)
+        return "".join(result)
+
+    cleaned = _strip_curlies(cleaned)
 
     def _strip_parens(s: str) -> str:
         parts = re.split(r"(\([^)]*\))", s)
@@ -772,8 +820,9 @@ def resolve_native_language(
     """Return ISO 639-2/B native language codes for *file_path*, or None.
 
     Checks the database cache first (by file_path + fingerprint).  On miss,
-    tries an NFO-based fast path (direct ID lookups, then NFO-title search),
-    then falls through to the existing filename/directory chain.
+    tries an NFO-based fast path (direct ID lookups), then filename-embedded
+    ID scan, then NFO-title search, then falls through to the existing
+    filename/directory chain.
 
     The NFO phase supports both ``<movie>`` and ``<tvshow>`` XML formats
     created by Radarr, Sonarr, Kodi, etc.
@@ -783,19 +832,94 @@ def resolve_native_language(
         return cast("list[str] | None", cached_langs)
 
     # ------------------------------------------------------------------
-    # Phase 1 — NFO-based lookups
+    # Phase 1 — NFO direct ID lookups (most reliable)
     # ------------------------------------------------------------------
     nfo_meta = _get_nfo_metadata(file_path)
     if nfo_meta is not None:
         result = _resolve_nfo_id_lookups(nfo_meta, file_path, db, tmdb_api_key)
         if result is not None:
             return result
+
+    # ------------------------------------------------------------------
+    # Phase 2 — Embedded ID in filename (direct ID, highly reliable)
+    # ------------------------------------------------------------------
+    file_stem = file_path.stem
+    embedded = _extract_embedded_id(file_stem)
+    if embedded is not None:
+        source, eid = embedded
+        if source == "imdb":
+            codes = _lookup_imdbpie_by_id(eid)
+            if codes is not None:
+                logger.info(
+                    "Identified native language(s) for '%s': %s (source=imdbpie_embedded_id).",
+                    file_path.name,
+                    codes,
+                )
+                _maybe_cache_result(db, file_path, codes, "imdbpie_embedded_id", None)
+                return codes
+            # IMDb ID found but lookup failed — try embedded TMDb ID before
+            # falling through (rare, but handles dual-ID filenames).
+            # NOTE: _extract_embedded_id always prefers IMDb over TMDb, so
+            # we must search with _EMBEDDED_TMDB_RE directly here.
+            tmdb_m = _EMBEDDED_TMDB_RE.search(file_stem)
+            if tmdb_m:
+                eid2 = tmdb_m.group(1) or tmdb_m.group(2) or tmdb_m.group(3)
+                if eid2 and tmdb_api_key:
+                    codes = _lookup_tmdb_by_id(eid2, tmdb_api_key)
+                    if codes is not None:
+                        logger.info(
+                            "Identified native language(s) for '%s': %s (source=tmdb_embedded_id).",
+                            file_path.name,
+                            codes,
+                        )
+                        _maybe_cache_result(db, file_path, codes, "tmdb_embedded_id", None)
+                        return codes
+                elif not tmdb_api_key:
+                    logger.debug(
+                        "Skipping TMDb embedded ID lookup for '%s' \u2014 no API key configured.",
+                        file_path.name,
+                    )
+            else:
+                logger.debug(
+                    "No native language found for '%s' via embedded IMDb ID (%s).",
+                    file_path.name,
+                    eid,
+                )
+        else:  # tmdb
+            if tmdb_api_key:
+                codes = _lookup_tmdb_by_id(eid, tmdb_api_key)
+                if codes is not None:
+                    logger.info(
+                        "Identified native language(s) for '%s': %s (source=tmdb_embedded_id).",
+                        file_path.name,
+                        codes,
+                    )
+                    _maybe_cache_result(db, file_path, codes, "tmdb_embedded_id", None)
+                    return codes
+            else:
+                logger.debug(
+                    "Skipping TMDb embedded ID lookup for '%s' \u2014 no API key configured.",
+                    file_path.name,
+                )
+                codes = None
+        if codes is None:
+            logger.debug(
+                "No native language found for '%s' via embedded ID (%s=%s).",
+                file_path.name,
+                source,
+                eid,
+            )
+
+    # ------------------------------------------------------------------
+    # Phase 3 — NFO title search (fuzzy, less reliable)
+    # ------------------------------------------------------------------
+    if nfo_meta is not None:
         result = _resolve_nfo_title_search(nfo_meta, file_path, db, tmdb_api_key)
         if result is not None:
             return result
 
     # ------------------------------------------------------------------
-    # Phase 2 — Filename/directory fallback chain (existing behaviour)
+    # Phase 4 — Filename/directory fallback chain (least reliable)
     # ------------------------------------------------------------------
     return _run_filename_directory_chain(file_path, db, tmdb_api_key)
 
