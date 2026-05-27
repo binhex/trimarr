@@ -101,6 +101,18 @@ class TestParseNfo:
         assert result.title == "Wo Hu Cang Long"
         assert result.original_title == "Crouching Tiger, Hidden Dragon"
 
+    def test_parse_originaltitle_only(self, tmp_path: Path) -> None:
+        """NFO with only originaltitle (no title) is valid."""
+        nfo = tmp_path / "originalonly.nfo"
+        nfo.write_text("""<?xml version="1.0"?>
+<movie>
+  <originaltitle>Das Boot</originaltitle>
+</movie>""")
+        result = parse_nfo(nfo)
+        assert result is not None
+        assert result.title is None
+        assert result.original_title == "Das Boot"
+
     def test_parse_uniqueid_fallback_no_imdbid(self, tmp_path: Path) -> None:
         """When <imdbid> is missing, uses <uniqueid type='imdb'>."""
         nfo = tmp_path / "uniqueid.nfo"
@@ -212,6 +224,18 @@ class TestDiscoverNfo:
         season = series / "Season 1"
         season.mkdir(parents=True)
         tvshow_nfo = series / "tvshow.NFO"
+        tvshow_nfo.write_text("<tvshow><title>Breaking Bad</title></tvshow>")
+        mkv = season / "Breaking Bad S01E01.mkv"
+        mkv.write_text("dummy")
+        result = discover_nfo(mkv)
+        assert result == tvshow_nfo
+
+    def test_tvshow_upwalk_mixed_case(self, tmp_path: Path) -> None:
+        """TvShow.Nfo (mixed case) found by upwalk glob."""
+        series = tmp_path / "Breaking Bad"
+        season = series / "Season 1"
+        season.mkdir(parents=True)
+        tvshow_nfo = series / "TvShow.Nfo"
         tvshow_nfo.write_text("<tvshow><title>Breaking Bad</title></tvshow>")
         mkv = season / "Breaking Bad S01E01.mkv"
         mkv.write_text("dummy")

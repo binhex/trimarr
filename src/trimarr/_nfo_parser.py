@@ -69,15 +69,13 @@ def discover_nfo(mkv_path: Path) -> Path | None:
     if nfo_files:
         return nfo_files[0]
 
-    # 3. Walk up for tvshow.nfo
+    # 3. Walk up for tvshow.nfo (case-insensitive)
     current = parent
     for _ in range(_MAX_TVSHOW_UPWALK_DEPTH):
-        tvshow_nfo = current / "tvshow.nfo"
-        if tvshow_nfo.is_file():
-            return tvshow_nfo
-        tvshow_nfo_upper = current / "tvshow.NFO"
-        if tvshow_nfo_upper.is_file():
-            return tvshow_nfo_upper
+        tvshow_candidates = sorted(current.glob("*.[nN][fF][oO]"))
+        for candidate in tvshow_candidates:
+            if candidate.stem.lower() == "tvshow":
+                return candidate
         parent_of = current.parent
         if parent_of == current:
             break  # reached filesystem root
@@ -110,9 +108,14 @@ def _is_valid_nfo_root(root: ET.Element | None) -> bool:
     return root is not None and root.tag in ("movie", "tvshow")
 
 
-def _has_nfo_content(title: str | None, imdb_id: str | None, tmdb_id: str | None) -> bool:
+def _has_nfo_content(
+    title: str | None,
+    original_title: str | None,
+    imdb_id: str | None,
+    tmdb_id: str | None,
+) -> bool:
     """Return True if at least one useful metadata field is present."""
-    return title is not None or imdb_id is not None or tmdb_id is not None
+    return title is not None or original_title is not None or imdb_id is not None or tmdb_id is not None
 
 
 def parse_nfo(path: Path) -> NfoMetadata | None:
@@ -158,7 +161,7 @@ def parse_nfo(path: Path) -> NfoMetadata | None:
     if tmdb_id is None:
         tmdb_id = _extract_uniqueid(root, "tmdb")
 
-    if not _has_nfo_content(title, imdb_id, tmdb_id):
+    if not _has_nfo_content(title, original_title, imdb_id, tmdb_id):
         logger.debug("NFO '%s' has no usable fields (no title/IMDb/TMDb ID).", path)
         return None
 
