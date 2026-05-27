@@ -818,7 +818,31 @@ def resolve_native_language(
             return result
 
     # ------------------------------------------------------------------
-    # Phase 2 — Filename/directory fallback chain (existing behaviour)
+    # Phase 2 — Embedded ID in filename (before filename/directory parsing)
+    # ------------------------------------------------------------------
+    file_stem = file_path.stem
+    embedded = _extract_embedded_id(file_stem)
+    if embedded is not None:
+        source, eid = embedded
+        if source == "imdb":
+            codes = _lookup_imdbpie_by_id(eid)
+            if codes is not None:
+                _maybe_cache_result(db, file_path, codes, "imdbpie_embedded_id", None)
+                return codes
+        else:  # tmdb
+            if tmdb_api_key:
+                codes = _lookup_tmdb_by_id(eid, tmdb_api_key)
+                if codes is not None:
+                    _maybe_cache_result(db, file_path, codes, "tmdb_embedded_id", None)
+                    return codes
+            else:
+                logger.debug(
+                    "Skipping TMDb embedded ID lookup for '%s' \u2014 no API key configured.",
+                    file_path.name,
+                )
+
+    # ------------------------------------------------------------------
+    # Phase 3 — Filename/directory fallback chain (existing behaviour)
     # ------------------------------------------------------------------
     return _run_filename_directory_chain(file_path, db, tmdb_api_key)
 
