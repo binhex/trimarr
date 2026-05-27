@@ -215,6 +215,10 @@ def parse_movie_title(file_path: Path) -> tuple[str, str | None]:
         year_pos = cleaned.rfind(year)
         if year_pos != -1:
             before = cleaned[:year_pos].strip()
+            # Strip orphaned opening braces/brackets/parens left behind
+            # when the year was inside a curly or bracketed block.
+            while before.endswith(("{", "(", "[")):
+                before = before[:-1].strip()
             cleaned = before or cleaned[year_pos + len(year) :].strip()
 
     # If no year found in the filename, try the parent directory name
