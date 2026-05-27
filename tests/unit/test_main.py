@@ -67,13 +67,16 @@ def _run_kwargs(tmp_path: Path, *, dry_run: bool, db_path: str) -> dict:
 class TestDryRunDoesNotRecordToDatabase:
     """Verify that dry_run=True never writes to the processed-files database."""
 
-    def test_dry_run_marks_processed_when_changes_needed(self, tmp_path: Path) -> None:
-        """When a file needs track removal, dry run must still record the fingerprint.
+    def test_dry_run_does_not_write_to_db(self, tmp_path: Path) -> None:
+        """Dry-run must not record fingerprints in the processed-files database.
 
-        Recording the fingerprint avoids re-probing with mkvmerge -J on every
-        run, which would inflate the kernel page cache (visible as Docker
-        container memory).  The file is not actually modified — it is merely
-        recorded so unchanged files can be skipped in future runs.
+        The original (buggy) code called ``db.mark_processed()`` during dry-run,
+        persisting the file fingerprint + profile hash into SQLite.  On the next
+        real (non-dry-run) run, ``db.is_processed()`` returned ``True`` for every
+        file and zero files were processed.
+
+        Dry-run must NEVER write to the database — its purpose is to show what
+        *would* happen without making any persistent changes.
         """
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"fake mkv")
@@ -90,7 +93,7 @@ class TestDryRunDoesNotRecordToDatabase:
             run(**_run_kwargs(tmp_path, dry_run=True, db_path=db_path))
 
         mock_process.assert_not_called()
-        mock_mark.assert_called_once()
+        mock_mark.assert_not_called()
 
     def test_dry_run_colour_log_does_not_crash_with_angle_brackets(self, tmp_path: Path) -> None:
         """logger.opt(colors=True) must not raise ValueError for any dry-run log message.

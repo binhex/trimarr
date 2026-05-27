@@ -223,6 +223,23 @@ def parse_movie_title(file_path: Path) -> tuple[str, str | None]:
     return title, year
 
 
+def _years_equal(expected: str | None, actual: object) -> bool:
+    """Compare a year string against a hit's year value (int, str, or None).
+
+    Returns *True* when the years match OR when *expected* is *None* (caller
+    has no year to compare against).  Returns *False* when the values differ
+    or cannot be parsed.
+    """
+    if expected is None or actual is None:
+        return True
+    if not isinstance(actual, (int, str)):
+        return False
+    try:
+        return int(actual) == int(expected)
+    except (ValueError, TypeError):
+        return False
+
+
 def _find_matching_imdb_id(
     hits: list[dict],
     title: str,
@@ -234,13 +251,8 @@ def _find_matching_imdb_id(
         hit_title = (hit.get("title") or "").strip()
         if _normalise_for_compare(hit_title) != norm_title:
             continue
-        hit_year = hit.get("year")
-        if year and hit_year is not None:
-            try:
-                if int(hit_year) != int(year):
-                    continue
-            except (ValueError, TypeError):
-                continue
+        if not _years_equal(year, hit.get("year")):
+            continue
         matched_id: str | None = hit.get("imdb_id")
         if matched_id:
             return matched_id
@@ -369,21 +381,31 @@ def _lookup_pycountry_language(
         usable code.
     """
     if lang is not None:
-        alpha_2 = getattr(lang, "alpha_2", None)
-        if isinstance(alpha_2, str) and alpha_2:
-            code = _ISO_639_1_TO_2.get(alpha_2.lower())
-            if code:
-                return code
-            # alpha_2 not in map — try bibliographic or alpha_3
-            result = _resolve_alpha2_fallback(lang)
-            if result:
-                return result
+        result = _try_alpha2_lookup(lang)
+        if result is not None:
+            return result
         if fallback_code is not None:
             return normalize_language_code(fallback_code)
         alpha_3 = getattr(lang, "alpha_3", None)
         if isinstance(alpha_3, str) and alpha_3:
             return normalize_language_code(alpha_3.lower())
     return None
+
+
+def _try_alpha2_lookup(lang: object) -> str | None:
+    """Try to extract an ISO 639-2/B code from *lang* via alpha_2.
+
+    Returns the code from the well-known BCP-47 map, or falls back to
+    bibliographic/alpha_3 resolution.  Returns *None* when no usable
+    alpha_2 field exists.
+    """
+    alpha_2 = getattr(lang, "alpha_2", None)
+    if not isinstance(alpha_2, str) or not alpha_2:
+        return None
+    code = _ISO_639_1_TO_2.get(alpha_2.lower())
+    if code:
+        return code
+    return _resolve_alpha2_fallback(lang)
 
 
 def _language_name_to_iso_639_2(name: str) -> str | None:
@@ -453,30 +475,43 @@ def _is_three_letter_code(s: str) -> bool:
     return len(s) == 3 and s.isalpha()
 
 
+def _extract_tmdb_language_code(detail: dict) -> list[str] | None:
+    """Extract ISO 639-2/B language codes from a TMDb detail response.
+
+    Returns a single-element list with the normalised code, or *None* if
+    the detail response has no usable ``original_language`` field.
+    """
+    raw_lang = detail.get("original_language")
+    if not raw_lang:
+        return None
+    code = _ISO_639_1_TO_2.get(raw_lang.lower())
+    if code:
+        return [normalize_language_code(code)]
+    if _is_three_letter_code(raw_lang):
+        return [normalize_language_code(raw_lang.lower())]
+    return None
+
+
 def _try_tmdb_detail(hit: dict, title: str, api_key: str) -> list[str] | None:
     """If *hit* matches *title*, fetch TMDb detail and extract language codes."""
     for field in ("title", "original_title"):
         hit_title = (hit.get(field) or "").strip().lower()
-        if _normalise_title(hit_title) == _normalise_title(title):
-            tmdb_id = hit.get("id")
-            if tmdb_id is None:
-                continue
-            encoded_key = urllib.parse.quote(api_key, safe="")
-            detail_url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={encoded_key}"
-            try:
-                with urllib.request.urlopen(detail_url, timeout=15) as resp2:
-                    detail = json.loads(resp2.read().decode())
-            except Exception as exc:
-                logger.debug("TMDb detail failed for id %s: %s", tmdb_id, exc)
-                continue
-            raw_lang = detail.get("original_language")
-            if not raw_lang:
-                continue
-            code = _ISO_639_1_TO_2.get(raw_lang.lower())
-            if code:
-                return [normalize_language_code(code)]
-            if _is_three_letter_code(raw_lang):
-                return [normalize_language_code(raw_lang.lower())]
+        if _normalise_title(hit_title) != _normalise_title(title):
+            continue
+        tmdb_id = hit.get("id")
+        if tmdb_id is None:
+            continue
+        encoded_key = urllib.parse.quote(api_key, safe="")
+        detail_url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={encoded_key}"
+        try:
+            with urllib.request.urlopen(detail_url, timeout=15) as resp2:
+                detail = json.loads(resp2.read().decode())
+        except Exception as exc:
+            logger.debug("TMDb detail failed for id %s: %s", tmdb_id, exc)
+            continue
+        codes = _extract_tmdb_language_code(detail)
+        if codes:
+            return codes
     return None
 
 
