@@ -640,74 +640,88 @@ def _get_nfo_metadata(file_path: Path) -> NfoMetadata | None:
     return parse_nfo(nfo_path)
 
 
-def resolve_native_language(
+def _resolve_nfo_id_lookups(
+    nfo_meta: NfoMetadata,
     file_path: Path,
     db: Database | None,
-    tmdb_api_key: str | None = None,
+    tmdb_api_key: str | None,
 ) -> list[str] | None:
-    """Return ISO 639-2/B native language codes for *file_path*, or None.
+    """Try direct IMDb/TMDb ID lookups from NFO metadata.
 
-    Checks the database cache first (by file_path + fingerprint).  On miss,
-    tries an NFO-based fast path (direct ID lookups, then NFO-title search),
-    then falls through to the existing filename/directory chain.
-
-    The NFO phase supports both ``<movie>`` and ``<tvshow>`` XML formats
-    created by Radarr, Sonarr, Kodi, etc.
+    Returns language codes if either lookup succeeds, or *None* to
+    continue to the next fallback phase.
     """
-    cached_langs = _check_native_language_cache(db, file_path)
-    if cached_langs is not _CACHE_MISS:
-        return cast("list[str] | None", cached_langs)
+    # Direct IMDb ID lookup (most reliable — no search+match)
+    if nfo_meta.imdb_id:
+        codes = _lookup_imdbpie_by_id(nfo_meta.imdb_id)
+        if codes is not None:
+            _msg = "Identified native language(s) for '%s': %s (source=nfo_imdbpie_id)."
+            logger.info(_msg, file_path.name, codes)
+            _maybe_cache_result(db, file_path, codes, "nfo_imdbpie_id", None)
+            return codes
 
-    # ------------------------------------------------------------------
-    # Phase 1 — NFO-based lookups
-    # ------------------------------------------------------------------
-    nfo_meta = _get_nfo_metadata(file_path)
-    if nfo_meta is not None:
-        # 1a. Direct IMDb ID lookup (most reliable — no search+match)
-        if nfo_meta.imdb_id:
-            codes = _lookup_imdbpie_by_id(nfo_meta.imdb_id)
-            if codes is not None:
-                _msg = "Identified native language(s) for '%s': %s (source=nfo_imdbpie_id)."
-                logger.info(_msg, file_path.name, codes)
-                _maybe_cache_result(db, file_path, codes, "nfo_imdbpie_id", None)
-                return codes
+    # Direct TMDb ID lookup
+    if nfo_meta.tmdb_id and tmdb_api_key:
+        codes = _lookup_tmdb_by_id(nfo_meta.tmdb_id, tmdb_api_key)
+        if codes is not None:
+            _msg = "Identified native language(s) for '%s': %s (source=nfo_tmdb_id)."
+            logger.info(_msg, file_path.name, codes)
+            _maybe_cache_result(db, file_path, codes, "nfo_tmdb_id", None)
+            return codes
 
-        # 1b. Direct TMDb ID lookup
-        if nfo_meta.tmdb_id and tmdb_api_key:
-            codes = _lookup_tmdb_by_id(nfo_meta.tmdb_id, tmdb_api_key)
-            if codes is not None:
-                _msg = "Identified native language(s) for '%s': %s (source=nfo_tmdb_id)."
-                logger.info(_msg, file_path.name, codes)
-                _maybe_cache_result(db, file_path, codes, "nfo_tmdb_id", None)
-                return codes
+    return None
 
-        # 1c. NFO title search (clean title from NFO, no noisy scene tags)
-        search_title = nfo_meta.original_title or nfo_meta.title
-        if search_title:
-            codes = _lookup_imdbpie(search_title, nfo_meta.year)
-            if codes is not None:
-                _msg = "Identified native language(s) for '%s': %s (source=nfo_imdbpie_title)."
-                logger.info(_msg, file_path.name, codes)
-                _maybe_cache_result(db, file_path, codes, "nfo_imdbpie_title", None)
-                return codes
-            if tmdb_api_key:
-                codes = _lookup_tmdb(search_title, nfo_meta.year, tmdb_api_key)
-                if codes is not None:
-                    _msg = "Identified native language(s) for '%s': %s (source=nfo_tmdb_title)."
-                    logger.info(_msg, file_path.name, codes)
-                    _maybe_cache_result(db, file_path, codes, "nfo_tmdb_title", None)
-                    return codes
 
-    # ------------------------------------------------------------------
-    # Phase 2 — Filename/directory fallback chain (existing behaviour)
-    # ------------------------------------------------------------------
+def _resolve_nfo_title_search(
+    nfo_meta: NfoMetadata,
+    file_path: Path,
+    db: Database | None,
+    tmdb_api_key: str | None,
+) -> list[str] | None:
+    """Search IMDbPie/TMDb using the clean title from NFO metadata.
+
+    Falls back from IMDbPie to TMDb when no API key is configured for
+    the first attempt.  Returns language codes or *None*.
+    """
+    search_title = nfo_meta.original_title or nfo_meta.title
+    if not search_title:
+        return None
+
+    codes = _lookup_imdbpie(search_title, nfo_meta.year)
+    if codes is not None:
+        _msg = "Identified native language(s) for '%s': %s (source=nfo_imdbpie_title)."
+        logger.info(_msg, file_path.name, codes)
+        _maybe_cache_result(db, file_path, codes, "nfo_imdbpie_title", None)
+        return codes
+
+    if tmdb_api_key:
+        codes = _lookup_tmdb(search_title, nfo_meta.year, tmdb_api_key)
+        if codes is not None:
+            _msg = "Identified native language(s) for '%s': %s (source=nfo_tmdb_title)."
+            logger.info(_msg, file_path.name, codes)
+            _maybe_cache_result(db, file_path, codes, "nfo_tmdb_title", None)
+            return codes
+
+    return None
+
+
+def _run_filename_directory_chain(
+    file_path: Path,
+    db: Database | None,
+    tmdb_api_key: str | None,
+) -> list[str] | None:
+    """Run the existing filename/directory lookup chain.
+
+    Iterates the fallback chain (IMDbPie/TMDb with filename/directory
+    titles) and returns the first match or *None*.
+    """
     last_error = "no match from any source"
     chain = _lookup_chain(tmdb_api_key)
     for lookup_fn, title_fn, source_label in chain:
         title, year = title_fn(file_path)
         if not title or not year:
             logger.debug(
-                "Skipping lookup for '%s' — could not determine title/year.",
+                "Skipping lookup for '%s' - could not determine title/year.",
                 file_path.name,
             )
             continue
@@ -736,9 +750,48 @@ def resolve_native_language(
             source_label,
         )
 
-    logger.debug("No native language found for '%s' after exhausting all sources.", file_path.name)
+    logger.debug(
+        "No native language found for '%s' after exhausting all sources.",
+        file_path.name,
+    )
     _maybe_cache_failure(db, file_path, last_error)
     return None
+
+
+def resolve_native_language(
+    file_path: Path,
+    db: Database | None,
+    tmdb_api_key: str | None = None,
+) -> list[str] | None:
+    """Return ISO 639-2/B native language codes for *file_path*, or None.
+
+    Checks the database cache first (by file_path + fingerprint).  On miss,
+    tries an NFO-based fast path (direct ID lookups, then NFO-title search),
+    then falls through to the existing filename/directory chain.
+
+    The NFO phase supports both ``<movie>`` and ``<tvshow>`` XML formats
+    created by Radarr, Sonarr, Kodi, etc.
+    """
+    cached_langs = _check_native_language_cache(db, file_path)
+    if cached_langs is not _CACHE_MISS:
+        return cast("list[str] | None", cached_langs)
+
+    # ------------------------------------------------------------------
+    # Phase 1 — NFO-based lookups
+    # ------------------------------------------------------------------
+    nfo_meta = _get_nfo_metadata(file_path)
+    if nfo_meta is not None:
+        result = _resolve_nfo_id_lookups(nfo_meta, file_path, db, tmdb_api_key)
+        if result is not None:
+            return result
+        result = _resolve_nfo_title_search(nfo_meta, file_path, db, tmdb_api_key)
+        if result is not None:
+            return result
+
+    # ------------------------------------------------------------------
+    # Phase 2 — Filename/directory fallback chain (existing behaviour)
+    # ------------------------------------------------------------------
+    return _run_filename_directory_chain(file_path, db, tmdb_api_key)
 
 
 def _maybe_cache_result(

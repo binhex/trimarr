@@ -105,6 +105,16 @@ def _extract_uniqueid(parent: ET.Element, id_type: str) -> str | None:
     return None
 
 
+def _is_valid_nfo_root(root: ET.Element | None) -> bool:
+    """Return True if *root* is a valid NFO root element (movie/tvshow)."""
+    return root is not None and root.tag in ("movie", "tvshow")
+
+
+def _has_nfo_content(title: str | None, imdb_id: str | None, tmdb_id: str | None) -> bool:
+    """Return True if at least one useful metadata field is present."""
+    return title is not None or imdb_id is not None or tmdb_id is not None
+
+
 def parse_nfo(path: Path) -> NfoMetadata | None:
     """Parse an ``.nfo`` XML file and return a structured ``NfoMetadata``.
 
@@ -126,7 +136,7 @@ def parse_nfo(path: Path) -> NfoMetadata | None:
         return None
 
     root = tree.getroot()
-    if root is None or root.tag not in ("movie", "tvshow"):
+    if not _is_valid_nfo_root(root):
         logger.debug(
             "NFO '%s' has unexpected root element: %s",
             path,
@@ -148,7 +158,7 @@ def parse_nfo(path: Path) -> NfoMetadata | None:
     if tmdb_id is None:
         tmdb_id = _extract_uniqueid(root, "tmdb")
 
-    if title is None and imdb_id is None and tmdb_id is None:
+    if not _has_nfo_content(title, imdb_id, tmdb_id):
         logger.debug("NFO '%s' has no usable fields (no title/IMDb/TMDb ID).", path)
         return None
 
