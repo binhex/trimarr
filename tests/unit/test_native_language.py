@@ -947,3 +947,188 @@ class TestLookupTmdbById:
         mock_urlopen.return_value = detail_response
         result = _lookup_tmdb_by_id("155", "fake-key")
         assert result == ["ger"]
+
+
+class TestResolveNativeLanguageNfo:
+    """Tests for resolve_native_language with NFO integration."""
+
+    def test_nfo_imdbpie_id_success(self, mocker, tmp_path: Path) -> None:
+        """NFO with IMDb ID uses direct lookup, no search."""
+        from trimarr.native_language import resolve_native_language
+
+        d = tmp_path / "Test (2024)"
+        d.mkdir()
+        nfo = d / "Test.nfo"
+        nfo.write_text("""<?xml version="1.0"?>
+<movie><title>Test</title><year>2024</year>
+<imdbid>tt1234567</imdbid><tmdbid>999</tmdbid></movie>""")
+        mkv = d / "Test.mkv"
+        mkv.write_text("dummy")
+
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.get_title_auxiliary.return_value = {
+            "spokenLanguages": [{"name": "English"}],
+        }
+        result = resolve_native_language(mkv, db=None)
+        assert result == ["eng"]
+        instance.search_for_title.assert_not_called()
+
+    def test_nfo_tmdb_id_fallback(self, mocker, tmp_path: Path) -> None:
+        """NFO IMDb ID fails, TMDb ID succeeds."""
+        from trimarr.native_language import resolve_native_language
+
+        d = tmp_path / "Test (2024)"
+        d.mkdir()
+        nfo = d / "Test.nfo"
+        nfo.write_text("""<?xml version="1.0"?>
+<movie><title>Test</title><year>2024</year>
+<imdbid>tt1234567</imdbid><tmdbid>999</tmdbid></movie>""")
+        mkv = d / "Test.mkv"
+        mkv.write_text("dummy")
+
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.get_title_auxiliary.return_value = {"spokenLanguages": None}
+        mock_urlopen = mocker.patch("trimarr.native_language.urllib.request.urlopen")
+        detail_response = mocker.MagicMock()
+        detail_response.__enter__.return_value = detail_response
+        detail_response.read.return_value = b'{"original_language": "fr"}'
+        mock_urlopen.return_value = detail_response
+
+        result = resolve_native_language(mkv, db=None, tmdb_api_key="fake-key")
+        assert result == ["fre"]
+
+    def test_nfo_title_search_fallback(self, mocker, tmp_path: Path) -> None:
+        """NFO IDs absent, NFO title used for search succeeds."""
+        from trimarr.native_language import resolve_native_language
+
+        d = tmp_path / "Test (1981)"
+        d.mkdir()
+        nfo = d / "Test.nfo"
+        nfo.write_text("""<?xml version="1.0"?>
+<movie><title>Das Boot</title><year>1981</year></movie>""")
+        mkv = d / "Test.mkv"
+        mkv.write_text("dummy")
+
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.search_for_title.return_value = [
+            {"title": "Das Boot", "year": 1981, "imdb_id": "tt0082096"},
+        ]
+        instance.get_title_auxiliary.return_value = {
+            "spokenLanguages": [{"name": "German"}],
+        }
+        result = resolve_native_language(mkv, db=None)
+        assert result == ["ger"]
+
+    def test_nfo_all_fail_then_filename(self, mocker, tmp_path: Path) -> None:
+        """NFO steps all fail, falls through to filename search."""
+        from trimarr.native_language import resolve_native_language
+
+        d = tmp_path / "Das Boot (1981)"
+        d.mkdir()
+        nfo = d / "Das Boot.nfo"
+        nfo.write_text("""<?xml version="1.0"?>
+<movie><title>Das Boot</title><year>1981</year>
+<imdbid>tt0000000</imdbid></movie>""")
+        mkv = d / "Das Boot (1981).mkv"
+        mkv.write_text("dummy")
+
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+
+        def aux_side_effect(imdb_id: str) -> dict:
+            return {"spokenLanguages": None} if imdb_id == "tt0000000" else {"spokenLanguages": [{"name": "German"}]}
+
+        instance.get_title_auxiliary.side_effect = aux_side_effect
+        instance.search_for_title.return_value = [
+            {"title": "Das Boot", "year": 1981, "imdb_id": "tt0082096"},
+        ]
+        result = resolve_native_language(mkv, db=None)
+        assert result == ["ger"]
+        instance.search_for_title.assert_called()
+
+    def test_no_nfo_existing_chain(self, mocker, tmp_path: Path) -> None:
+        """No NFO -> existing filename chain behaviour unchanged."""
+        from trimarr.native_language import resolve_native_language
+
+        d = tmp_path / "Das Boot (1981)"
+        d.mkdir()
+        mkv = d / "Das Boot (1981).mkv"
+        mkv.write_text("dummy")
+
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.search_for_title.return_value = [
+            {"title": "Das Boot", "year": 1981, "imdb_id": "tt0082096"},
+        ]
+        instance.get_title_auxiliary.return_value = {
+            "spokenLanguages": [{"name": "German"}],
+        }
+        result = resolve_native_language(mkv, db=None)
+        assert result == ["ger"]
+        instance.search_for_title.assert_called_once()
+
+    def test_nfo_cache_source_label(self, mocker, tmp_path: Path) -> None:
+        """Cache source label starts with 'nfo_' for nfo-based results."""
+        from trimarr.native_language import resolve_native_language
+
+        d = tmp_path / "Test (2024)"
+        d.mkdir()
+        nfo = d / "Test.nfo"
+        nfo.write_text("""<?xml version="1.0"?>
+<movie><title>Test</title><imdbid>tt1234567</imdbid></movie>""")
+        mkv = d / "Test.mkv"
+        mkv.write_text("dummy")
+
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.get_title_auxiliary.return_value = {"spokenLanguages": [{"name": "English"}]}
+        resolve_native_language(mkv, db=mock_db)
+        call_args = mock_db.set_native_language_cache.call_args
+        assert call_args is not None
+        source = call_args[0][2]
+        assert source.startswith("nfo_")
+
+    def test_nfo_cache_hit(self, mocker, tmp_path: Path) -> None:
+        """DB cache hit returns without NFO re-parse."""
+        from trimarr.native_language import resolve_native_language
+
+        mkv = Path("/data/test.mkv")
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = (["chi"], "nfo_imdbpie_id", None)
+        result = resolve_native_language(mkv, db=mock_db)
+        assert result == ["chi"]
+        mock_db.get_native_language_cache.assert_called_once()
+
+    def test_nfo_tmdb_title_with_api_key(self, mocker, tmp_path: Path) -> None:
+        """NFO title + TMDb search succeeds with API key."""
+        from trimarr.native_language import resolve_native_language
+
+        d = tmp_path / "Test (2000)"
+        d.mkdir()
+        nfo = d / "Test.nfo"
+        nfo.write_text("""<?xml version="1.0"?>
+<movie><title>Wo Hu Cang Long</title><year>2000</year></movie>""")
+        mkv = d / "Test.mkv"
+        mkv.write_text("dummy")
+
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.search_for_title.return_value = []
+        mock_urlopen = mocker.patch("trimarr.native_language.urllib.request.urlopen")
+        search_response = mocker.MagicMock()
+        search_response.__enter__.return_value = search_response
+        search_response.read.return_value = (
+            b'{"results": [{"id": 123, "title": "Wo Hu Cang Long", "original_title": "Wo Hu Cang Long"}]}'
+        )
+        detail_response = mocker.MagicMock()
+        detail_response.__enter__.return_value = detail_response
+        detail_response.read.return_value = b'{"original_language": "zh"}'
+        mock_urlopen.side_effect = [search_response, detail_response]
+
+        result = resolve_native_language(mkv, db=None, tmdb_api_key="fake-key")
+        assert result == ["chi"]
