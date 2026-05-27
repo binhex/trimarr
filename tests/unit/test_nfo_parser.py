@@ -141,6 +141,25 @@ class TestParseNfo:
         assert result.title == "The Dark Knight"
         assert result.year == "2008"
 
+    def test_parse_unexpected_root(self, tmp_path: Path) -> None:
+        """Valid XML with unexpected root element returns None."""
+        nfo = tmp_path / "weird.nfo"
+        nfo.write_text('<?xml version="1.0"?><foo><title>X</title></foo>')
+        assert parse_nfo(nfo) is None
+
+    def test_parse_whitespace_uniqueid(self, tmp_path: Path) -> None:
+        """Whitespace-only uniqueid is skipped, next one used."""
+        nfo = tmp_path / "whitespaceid.nfo"
+        nfo.write_text("""<?xml version="1.0"?>
+<movie>
+  <title>Test</title>
+  <uniqueid type="imdb">   </uniqueid>
+  <uniqueid type="imdb" default="true">tt1234567</uniqueid>
+</movie>""")
+        result = parse_nfo(nfo)
+        assert result is not None
+        assert result.imdb_id == "tt1234567"
+
 
 class TestDiscoverNfo:
     """Tests for discover_nfo()."""
@@ -181,6 +200,18 @@ class TestDiscoverNfo:
         season = series / "Season 1"
         season.mkdir(parents=True)
         tvshow_nfo = series / "tvshow.nfo"
+        tvshow_nfo.write_text("<tvshow><title>Breaking Bad</title></tvshow>")
+        mkv = season / "Breaking Bad S01E01.mkv"
+        mkv.write_text("dummy")
+        result = discover_nfo(mkv)
+        assert result == tvshow_nfo
+
+    def test_tvshow_upwalk_uppercase(self, tmp_path: Path) -> None:
+        """tvshow.NFO (uppercase) found by walking up."""
+        series = tmp_path / "Breaking Bad"
+        season = series / "Season 1"
+        season.mkdir(parents=True)
+        tvshow_nfo = series / "tvshow.NFO"
         tvshow_nfo.write_text("<tvshow><title>Breaking Bad</title></tvshow>")
         mkv = season / "Breaking Bad S01E01.mkv"
         mkv.write_text("dummy")

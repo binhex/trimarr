@@ -121,7 +121,7 @@ def parse_nfo(path: Path) -> NfoMetadata | None:
     """
     try:
         tree = ET.parse(path)
-    except (ET.ParseError, FileNotFoundError, PermissionError) as exc:
+    except (ET.ParseError, FileNotFoundError, PermissionError, IsADirectoryError) as exc:
         logger.debug("Failed to parse NFO '%s': %s", path, exc)
         return None
 
