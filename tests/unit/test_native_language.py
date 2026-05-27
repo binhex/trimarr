@@ -560,6 +560,60 @@ class TestResolveNativeLanguage:
         assert instance.search_for_title.call_count == 2
         mock_db.set_native_language_cache.assert_called_once_with(path, ["eng"], "imdbpie_directory", None)
 
+    def test_integration_embedded_imdb_id(self, mocker) -> None:
+        """Embedded IMDb ID in filename triggers direct lookup."""
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        mock_lookup = mocker.patch(
+            "trimarr.native_language._lookup_imdbpie_by_id",
+            return_value=["ger", "eng"],
+        )
+        mock_tmdb = mocker.patch("trimarr.native_language._lookup_tmdb_by_id")
+        mocker.patch("trimarr.native_language._get_nfo_metadata", return_value=None)
+
+        result = resolve_native_language(
+            Path("/data/Movie {imdb-tt0077914} 2024.mkv"), db=mock_db, tmdb_api_key="test-key"
+        )
+
+        assert result == ["ger", "eng"]
+        mock_lookup.assert_called_once_with("tt0077914")
+        mock_tmdb.assert_not_called()
+
+    def test_integration_embedded_tmdb_id(self, mocker) -> None:
+        """Embedded TMDb ID in filename triggers TMDb direct lookup."""
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        mock_lookup = mocker.patch(
+            "trimarr.native_language._lookup_tmdb_by_id",
+            return_value=["chi"],
+        )
+        mocker.patch("trimarr.native_language._get_nfo_metadata", return_value=None)
+
+        result = resolve_native_language(Path("/data/Movie {tmdb-77914} 2024.mkv"), db=mock_db, tmdb_api_key="test-key")
+
+        assert result == ["chi"]
+        mock_lookup.assert_called_once_with("77914", "test-key")
+
+    def test_integration_embedded_id_fails_fallthrough(self, mocker) -> None:
+        """Embedded ID found but API fails; falls through to filename search."""
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        mocker.patch("trimarr.native_language._lookup_imdbpie_by_id", return_value=None)
+        mock_tmdb = mocker.patch("trimarr.native_language._lookup_tmdb_by_id")
+        mock_search = mocker.patch(
+            "trimarr.native_language._lookup_imdbpie",
+            return_value=["eng"],
+        )
+        mocker.patch("trimarr.native_language._get_nfo_metadata", return_value=None)
+
+        result = resolve_native_language(
+            Path("/data/Movie {imdb-tt0077914} 2024.mkv"), db=mock_db, tmdb_api_key="test-key"
+        )
+
+        assert result == ["eng"]
+        mock_tmdb.assert_not_called()
+        mock_search.assert_called_once()
+
 
 class TestNormaliseForCompare:
     """Tests for _normalise_for_compare()."""
