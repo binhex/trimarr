@@ -437,11 +437,6 @@ def _process_one_file(
         # colour parser does not mistake them for markup tags.
         cmd_str = " ".join(display_cmd).replace("<", r"\<").replace(">", r"\>")
         logger.opt(colors=True).info(f"<green>DRY-RUN</green>  | Would run: {cmd_str}")
-        # Record the fingerprint so subsequent runs skip this file
-        # instead of re-probing it with mkvmerge -J.  The profile_hash
-        # ensures that changing --language, --strip-commentary, etc.
-        # triggers a fresh probe.
-        db.mark_processed(file_path, profile_hash=profile_hash, bytes_saved=0)
         counts.processed += 1
         return
 

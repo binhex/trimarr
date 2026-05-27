@@ -7,7 +7,14 @@ import json
 import re
 from pathlib import Path
 
-from trimarr.runner import _build_profile_hash, _ProcessingConfig, _resolve_effective_language
+from trimarr.database import Database
+from trimarr.runner import (
+    _build_profile_hash,
+    _process_one_file,
+    _ProcessingConfig,
+    _resolve_effective_language,
+    _RunCounts,
+)
 
 
 class TestBuildProfileHash:
@@ -251,3 +258,77 @@ class TestResolveEffectiveLanguage:
             logger=MagicMock(),
         )
         assert cfg.language == original
+
+
+class TestProcessOneFileDryRun:
+    """Tests for _process_one_file() in dry-run mode."""
+
+    def test_dry_run_does_not_mark_processed(self, mocker, tmp_path) -> None:
+        """Dry-run must NOT mark files as processed in the database.
+
+        The bug: dry-run called ``db.mark_processed()``, persisting the file
+        fingerprint and profile hash into the SQLite DB.  On the next real
+        (non-dry-run) run, ``db.is_processed()`` returned ``True`` and every
+        file was skipped — zero files processed.
+        """
+        from unittest.mock import MagicMock
+
+        file = tmp_path / "test.mkv"
+        file.write_bytes(b"\x00" * 70000)  # larger than PARTIAL_HASH_BYTES (65536)
+
+        db_path = tmp_path / "test.db"
+        db = Database(db_path)
+        db.open()
+
+        cfg = _ProcessingConfig(
+            mkvmerge_path="/fake/mkvmerge",
+            language=["eng"],
+            keep_audio=False,
+            keep_native_audio=False,
+            keep_subtitles=False,
+            edit_metadata_title=False,
+            delete_metadata_title=False,
+            strip_lower_channels=False,
+            strip_commentary=False,
+            skip_size_check=False,
+            dry_run=True,  # KEY: dry-run is on
+            no_backup=True,
+        )
+
+        profile_hash = _build_profile_hash(
+            language=["eng"],
+            keep_audio=False,
+            keep_subtitles=False,
+            edit_metadata_title=False,
+            delete_metadata_title=False,
+            strip_lower_channels=False,
+            strip_commentary=False,
+        )
+
+        # Mock probe + build so we enter the dry-run path (cmd is not None)
+        mocker.patch("trimarr.runner.probe_file", return_value=[])
+        mocker.patch(
+            "trimarr.runner.build_mkvmerge_command",
+            return_value=["mkvmerge", "-o", "out", "in"],
+        )
+
+        counts = _RunCounts()
+        failures: list[tuple[Path, str]] = []
+
+        _process_one_file(
+            file_path=file,
+            root=tmp_path,
+            idx=1,
+            total=1,
+            db=db,
+            cfg=cfg,
+            counts=counts,
+            failures=failures,
+            logger=MagicMock(),
+        )
+
+        # THE ASSERTION: after dry-run the file must NOT be in the DB
+        assert not db.is_processed(file, profile_hash=profile_hash), (
+            "Dry-run must not mark files as processed in the database"
+        )
+        db.close()
