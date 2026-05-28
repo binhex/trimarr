@@ -91,14 +91,13 @@ def _extract_embedded_id(stem: str) -> tuple[str, str] | None:
     m = _EMBEDDED_IMDB_RE.search(stem)
     if m:
         # Group 1 = [...], Group 2 = {...}, Group 3 = bare
+        # At least one group must capture when the alternation matches.
         imdb_id = m.group(1) or m.group(2) or m.group(3)
-        if imdb_id:
-            return ("imdb", imdb_id.lower())
+        return ("imdb", imdb_id.lower())
     m = _EMBEDDED_TMDB_RE.search(stem)
     if m:
         tmdb_id = m.group(1) or m.group(2) or m.group(3)
-        if tmdb_id:
-            return ("tmdb", tmdb_id)
+        return ("tmdb", tmdb_id)
     return None
 
 
@@ -738,7 +737,7 @@ def _resolve_nfo_title_search(
     # Sanitize year: NFO may contain air dates ("2019-06-05") — extract
     # just the 4-digit year for API compatibility, or None if unparseable.
     year: str | None = None
-    if nfo_meta.year and len(nfo_meta.year) >= 4 and nfo_meta.year[:4].isdigit():
+    if nfo_meta.year and re.match(r"\d{4}", nfo_meta.year):
         year = nfo_meta.year[:4]
 
     codes = _lookup_imdbpie(search_title, year)
@@ -757,6 +756,114 @@ def _resolve_nfo_title_search(
             return codes
 
     return None
+
+
+def _resolve_imdb_embedded(
+    eid: str,
+    file_stem: str,
+    file_path: Path,
+    db: Database | None,
+    tmdb_api_key: str | None,
+) -> list[str] | None:
+    """Resolve via IMDb ID, falling back to an embedded TMDb ID on failure."""
+    codes = _lookup_imdbpie_by_id(eid)
+    if codes is not None:
+        logger.info(
+            "Identified native language(s) for '%s': %s (source=imdbpie_embedded_id).",
+            file_path.name,
+            codes,
+        )
+        _maybe_cache_result(db, file_path, codes, "imdbpie_embedded_id", None)
+        return codes
+
+    # IMDb failed — try TMDb dual-ID fallback
+    tmdb_m = _EMBEDDED_TMDB_RE.search(file_stem)
+    if not tmdb_m:
+        logger.debug(
+            "No native language found for '%s' via embedded IMDb ID (%s).",
+            file_path.name,
+            eid,
+        )
+        return None
+
+    eid2 = tmdb_m.group(1) or tmdb_m.group(2) or tmdb_m.group(3)
+    if not eid2:
+        return None
+
+    if not tmdb_api_key:
+        logger.debug(
+            "Skipping TMDb embedded ID lookup for '%s' \u2014 no API key configured.",
+            file_path.name,
+        )
+        return None
+
+    codes = _lookup_tmdb_by_id(eid2, tmdb_api_key)
+    if codes is None:
+        return None
+
+    logger.info(
+        "Identified native language(s) for '%s': %s (source=tmdb_embedded_id).",
+        file_path.name,
+        codes,
+    )
+    _maybe_cache_result(db, file_path, codes, "tmdb_embedded_id", None)
+    return codes
+
+
+def _resolve_tmdb_embedded(
+    eid: str,
+    file_path: Path,
+    db: Database | None,
+    tmdb_api_key: str | None,
+) -> list[str] | None:
+    """Resolve via a TMDb-only embedded ID."""
+    if not tmdb_api_key:
+        return None
+
+    codes = _lookup_tmdb_by_id(eid, tmdb_api_key)
+    if codes is None:
+        return None
+
+    logger.info(
+        "Identified native language(s) for '%s': %s (source=tmdb_embedded_id).",
+        file_path.name,
+        codes,
+    )
+    _maybe_cache_result(db, file_path, codes, "tmdb_embedded_id", None)
+    return codes
+
+
+def _resolve_embedded_id_phase(
+    file_stem: str,
+    file_path: Path,
+    db: Database | None,
+    tmdb_api_key: str | None,
+) -> list[str] | None:
+    """Try to resolve native language via an embedded IMDb/TMDb ID in *file_stem*.
+
+    Dispatches to ``_resolve_imdb_embedded`` or ``_resolve_tmdb_embedded``
+    depending on which ID type is found.
+
+    Returns ISO 639-2/B language codes or *None*.
+    """
+    embedded = _extract_embedded_id(file_stem)
+    if embedded is None:
+        return None
+
+    source, eid = embedded
+    if source == "imdb":
+        codes = _resolve_imdb_embedded(eid, file_stem, file_path, db, tmdb_api_key)
+    else:
+        codes = _resolve_tmdb_embedded(eid, file_path, db, tmdb_api_key)
+
+    if codes is None:
+        logger.debug(
+            "No native language found for '%s' via embedded ID (%s=%s).",
+            file_path.name,
+            source,
+            eid,
+        )
+    return codes
 
 
 def _run_filename_directory_chain(
@@ -843,72 +950,9 @@ def resolve_native_language(
     # ------------------------------------------------------------------
     # Phase 2 — Embedded ID in filename (direct ID, highly reliable)
     # ------------------------------------------------------------------
-    file_stem = file_path.stem
-    embedded = _extract_embedded_id(file_stem)
-    if embedded is not None:
-        source, eid = embedded
-        if source == "imdb":
-            codes = _lookup_imdbpie_by_id(eid)
-            if codes is not None:
-                logger.info(
-                    "Identified native language(s) for '%s': %s (source=imdbpie_embedded_id).",
-                    file_path.name,
-                    codes,
-                )
-                _maybe_cache_result(db, file_path, codes, "imdbpie_embedded_id", None)
-                return codes
-            # IMDb ID found but lookup failed — try embedded TMDb ID before
-            # falling through (rare, but handles dual-ID filenames).
-            # NOTE: _extract_embedded_id always prefers IMDb over TMDb, so
-            # we must search with _EMBEDDED_TMDB_RE directly here.
-            tmdb_m = _EMBEDDED_TMDB_RE.search(file_stem)
-            if tmdb_m:
-                eid2 = tmdb_m.group(1) or tmdb_m.group(2) or tmdb_m.group(3)
-                if eid2 and tmdb_api_key:
-                    codes = _lookup_tmdb_by_id(eid2, tmdb_api_key)
-                    if codes is not None:
-                        logger.info(
-                            "Identified native language(s) for '%s': %s (source=tmdb_embedded_id).",
-                            file_path.name,
-                            codes,
-                        )
-                        _maybe_cache_result(db, file_path, codes, "tmdb_embedded_id", None)
-                        return codes
-                elif not tmdb_api_key:
-                    logger.debug(
-                        "Skipping TMDb embedded ID lookup for '%s' \u2014 no API key configured.",
-                        file_path.name,
-                    )
-            else:
-                logger.debug(
-                    "No native language found for '%s' via embedded IMDb ID (%s).",
-                    file_path.name,
-                    eid,
-                )
-        else:  # tmdb
-            if tmdb_api_key:
-                codes = _lookup_tmdb_by_id(eid, tmdb_api_key)
-                if codes is not None:
-                    logger.info(
-                        "Identified native language(s) for '%s': %s (source=tmdb_embedded_id).",
-                        file_path.name,
-                        codes,
-                    )
-                    _maybe_cache_result(db, file_path, codes, "tmdb_embedded_id", None)
-                    return codes
-            else:
-                logger.debug(
-                    "Skipping TMDb embedded ID lookup for '%s' \u2014 no API key configured.",
-                    file_path.name,
-                )
-                codes = None
-        if codes is None:
-            logger.debug(
-                "No native language found for '%s' via embedded ID (%s=%s).",
-                file_path.name,
-                source,
-                eid,
-            )
+    result = _resolve_embedded_id_phase(file_path.stem, file_path, db, tmdb_api_key)
+    if result is not None:
+        return result
 
     # ------------------------------------------------------------------
     # Phase 3 — NFO title search (fuzzy, less reliable)
