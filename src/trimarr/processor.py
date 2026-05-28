@@ -1011,9 +1011,16 @@ def _atomic_file_replace(
         Any :class:`BaseException` raised by the file operations, after attempting
         rollback when in backup mode.
     """
+    # Capture the original file's permission bits before the rename so they
+    # can be applied to the temp file.  ``tempfile.mkstemp()`` creates files
+    # with mode 0o600 (masked by umask), which would otherwise replace the
+    # original's permissions with a restrictive set after the atomic rename.
+    original_mode = file_path.stat().st_mode
+
     backup_path = file_path.with_suffix(file_path.suffix + ".bak")
     if no_backup:
         # os.replace / Path.replace is atomic on POSIX; overwrites the destination.
+        tmp_path.chmod(original_mode & 0o777)
         tmp_path.replace(file_path)
     else:
         # Path.replace() overwrites an existing destination on all platforms.
@@ -1021,6 +1028,7 @@ def _atomic_file_replace(
         # file already exists from a previous run.
         file_path.replace(backup_path)
         try:
+            tmp_path.chmod(original_mode & 0o777)
             tmp_path.replace(file_path)
         except BaseException:
             # Always attempt rollback when the backup exists.  The original

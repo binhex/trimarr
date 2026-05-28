@@ -10,7 +10,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from trimarr.processor import CorruptOutputError, MkvTrack, _spinner, build_mkvmerge_command, probe_file, process_file
+from trimarr.processor import (
+    CorruptOutputError,
+    MkvTrack,
+    _atomic_file_replace,
+    _spinner,
+    build_mkvmerge_command,
+    probe_file,
+    process_file,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1033,6 +1041,49 @@ class TestProcessFile:
         assert logger.critical.call_count >= 1
         critical_calls = " ".join(str(c) for c in logger.critical.call_args_list)
         assert "backup" in critical_calls.lower()
+
+    def test_no_backup_preserves_permissions(self, tmp_path: Path) -> None:
+        """_atomic_file_replace in no_backup mode must preserve original file permissions.
+
+        ``tempfile.mkstemp()`` creates files with mode 0o600, but after the
+        atomic rename the original file must retain its original permissions.
+        """
+        original = tmp_path / "movie.mkv"
+        original.write_bytes(b"original")
+        original.chmod(0o775)  # typical media file permissions
+
+        temp = tmp_path / "temp.trimarr_tmp"
+        temp.write_bytes(b"processed")
+        temp.chmod(0o600)  # mkstemp default permissions
+
+        _atomic_file_replace(temp, original, no_backup=True, logger=_proc_logger())
+
+        assert original.read_bytes() == b"processed"
+        assert original.stat().st_mode & 0o777 == 0o775
+
+    def test_backup_mode_preserves_permissions(self, tmp_path: Path) -> None:
+        """_atomic_file_replace in backup mode must preserve original file permissions.
+
+        The file at the original path, as well as the .bak file, should retain
+        the original permissions after the atomic replace.
+        """
+        original = tmp_path / "movie.mkv"
+        original.write_bytes(b"original")
+        original.chmod(0o775)
+
+        temp = tmp_path / "temp.trimarr_tmp"
+        temp.write_bytes(b"processed")
+        temp.chmod(0o600)
+
+        _atomic_file_replace(temp, original, no_backup=False, logger=_proc_logger())
+
+        # Replaced file must keep original permissions
+        assert original.read_bytes() == b"processed"
+        assert original.stat().st_mode & 0o777 == 0o775
+        # Backup must also keep original permissions
+        backup = tmp_path / "movie.mkv.bak"
+        assert backup.read_bytes() == b"original"
+        assert backup.stat().st_mode & 0o777 == 0o775
 
 
 # ---------------------------------------------------------------------------
