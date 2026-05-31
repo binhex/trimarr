@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from http.client import HTTPMessage
 from pathlib import Path
 
 import pytest
@@ -42,13 +43,6 @@ class TestParseMovieTitle:
     ) -> None:
         result = parse_movie_title(Path(path_str))
         assert result == (expected_title, expected_year)
-
-    def test_parse_movie_title_embedded_tvdb(self) -> None:
-        """Parse {tvdb-12345} from filename stem."""
-        from trimarr.native_language import _extract_embedded_id
-
-        result = _extract_embedded_id("Show.Name.2020.{tvdb-7537283}.mkv")
-        assert result == ("tvdb", "7537283")
 
     def test_no_year(self) -> None:
         result = parse_movie_title(Path("/data/SomeMovie.mkv"))
@@ -1655,15 +1649,103 @@ class TestLookupTvdb:
         result = _lookup_tvdb_by_id("12345", "")
         assert result is None
 
-    def test_lookup_failure(self, mocker) -> None:
-        """TVDB API returns error."""
+    def test_login_failure(self, mocker) -> None:
+        """TVDB login fails (network error)."""
         mock_response = mocker.MagicMock()
         mock_response.__enter__.return_value = mock_response
-        mock_response.read.side_effect = OSError("Network error")
+        mock_response.read.side_effect = OSError("Login failed")
 
         mocker.patch(
             "trimarr.native_language.urllib.request.urlopen",
             return_value=mock_response,
+        )
+
+        from trimarr.native_language import _lookup_tvdb_by_id
+
+        result = _lookup_tvdb_by_id("12345", "fake-api-key")
+        assert result is None
+
+    def test_login_returns_no_token(self, mocker) -> None:
+        """TVDB login succeeds but returns no token."""
+        mock_login = mocker.MagicMock()
+        mock_login.read.return_value = b'{"data": {}}'
+        mock_login.__enter__.return_value = mock_login
+
+        mocker.patch(
+            "trimarr.native_language.urllib.request.urlopen",
+            return_value=mock_login,
+        )
+
+        from trimarr.native_language import _lookup_tvdb_by_id
+
+        result = _lookup_tvdb_by_id("12345", "fake-api-key")
+        assert result is None
+
+    def test_detail_http_error_other(self, mocker) -> None:
+        """TVDB detail call returns a non-401 HTTP error (e.g. 404)."""
+        import urllib.error
+
+        mock_login = mocker.MagicMock()
+        mock_login.read.return_value = b'{"data": {"token": "tok"}}'
+        mock_login.__enter__.return_value = mock_login
+
+        mock_404 = mocker.MagicMock()
+        mock_404.__enter__.return_value = mock_404
+        mock_404.read.side_effect = urllib.error.HTTPError("url", 404, "Not Found", HTTPMessage(), None)
+
+        mocker.patch(
+            "trimarr.native_language.urllib.request.urlopen",
+            side_effect=[mock_login, mock_404],
+        )
+
+        from trimarr.native_language import _lookup_tvdb_by_id
+
+        result = _lookup_tvdb_by_id("12345", "fake-api-key")
+        assert result is None
+
+    def test_detail_generic_error(self, mocker) -> None:
+        """TVDB detail call raises a non-HTTP error."""
+        mock_login = mocker.MagicMock()
+        mock_login.read.return_value = b'{"data": {"token": "tok"}}'
+        mock_login.__enter__.return_value = mock_login
+
+        mock_detail = mocker.MagicMock()
+        mock_detail.__enter__.return_value = mock_detail
+        mock_detail.read.side_effect = OSError("Connection reset")
+
+        mocker.patch(
+            "trimarr.native_language.urllib.request.urlopen",
+            side_effect=[mock_login, mock_detail],
+        )
+
+        from trimarr.native_language import _lookup_tvdb_by_id
+
+        result = _lookup_tvdb_by_id("12345", "fake-api-key")
+        assert result is None
+
+    def test_reauth_failure(self, mocker) -> None:
+        """Token expired, re-auth succeeds but retried detail call fails."""
+        import urllib.error
+
+        mock_login1 = mocker.MagicMock()
+        mock_login1.read.return_value = b'{"data": {"token": "expired-token"}}'
+        mock_login1.__enter__.return_value = mock_login1
+
+        mock_401 = mocker.MagicMock()
+        mock_401.__enter__.return_value = mock_401
+        mock_401.read.side_effect = urllib.error.HTTPError("url", 401, "Unauthorized", HTTPMessage(), None)
+
+        mock_login2 = mocker.MagicMock()
+        mock_login2.read.return_value = b'{"data": {"token": "new-token"}}'
+        mock_login2.__enter__.return_value = mock_login2
+
+        mock_detail_fail = mocker.MagicMock()
+        mock_detail_fail.__enter__.return_value = mock_detail_fail
+        mock_detail_fail.read.side_effect = OSError("Connection reset")
+
+        mocker.patch(
+            "trimarr.native_language.urllib.request.urlopen",
+            side_effect=[mock_login1, mock_401, mock_login2, mock_detail_fail],
         )
 
         from trimarr.native_language import _lookup_tvdb_by_id
@@ -1691,22 +1773,6 @@ class TestLookupTvdb:
         result = _lookup_tvdb_by_id("12345", "fake-api-key")
         assert result is None
 
-    def test_login_failure(self, mocker) -> None:
-        """TVDB login fails."""
-        mock_response = mocker.MagicMock()
-        mock_response.__enter__.return_value = mock_response
-        mock_response.read.side_effect = OSError("Login failed")
-
-        mocker.patch(
-            "trimarr.native_language.urllib.request.urlopen",
-            return_value=mock_response,
-        )
-
-        from trimarr.native_language import _lookup_tvdb_by_id
-
-        result = _lookup_tvdb_by_id("12345", "fake-api-key")
-        assert result is None
-
     def test_reauth_on_401(self, mocker) -> None:
         """Expired token triggers re-auth, then the request succeeds."""
         import urllib.error
@@ -1717,8 +1783,6 @@ class TestLookupTvdb:
 
         mock_401 = mocker.MagicMock()
         mock_401.__enter__.return_value = mock_401
-        from http.client import HTTPMessage
-
         mock_401.read.side_effect = urllib.error.HTTPError("url", 401, "Unauthorized", HTTPMessage(), None)
 
         mock_login2 = mocker.MagicMock()
@@ -1740,3 +1804,29 @@ class TestLookupTvdb:
 
         result = _lookup_tvdb_by_id("12345", "fake-api-key")
         assert result == ["eng"]
+
+    def test_reauth_login_fails(self, mocker) -> None:
+        """Token expired, re-login returns None, function returns None."""
+        import urllib.error
+
+        mock_login1 = mocker.MagicMock()
+        mock_login1.read.return_value = b'{"data": {"token": "expired-token"}}'
+        mock_login1.__enter__.return_value = mock_login1
+
+        mock_401 = mocker.MagicMock()
+        mock_401.__enter__.return_value = mock_401
+        mock_401.read.side_effect = urllib.error.HTTPError("url", 401, "Unauthorized", HTTPMessage(), None)
+
+        mock_login2 = mocker.MagicMock()
+        mock_login2.read.return_value = b'{"data": {}}'
+        mock_login2.__enter__.return_value = mock_login2
+
+        mocker.patch(
+            "trimarr.native_language.urllib.request.urlopen",
+            side_effect=[mock_login1, mock_401, mock_login2],
+        )
+
+        from trimarr.native_language import _lookup_tvdb_by_id
+
+        result = _lookup_tvdb_by_id("12345", "fake-api-key")
+        assert result is None

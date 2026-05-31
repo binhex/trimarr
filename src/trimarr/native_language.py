@@ -97,20 +97,15 @@ def _extract_embedded_id(stem: str) -> tuple[str, str] | None:
     ``("tvdb", "7537283")``, or *None* if no recognised ID pattern
     is found.
     """
-    m = _EMBEDDED_IMDB_RE.search(stem)
-    if m:
-        # Group 1 = [...], Group 2 = {...}, Group 3 = bare
-        # At least one group must capture when the alternation matches.
-        imdb_id = m.group(1) or m.group(2) or m.group(3)
-        return ("imdb", imdb_id.lower())
-    m = _EMBEDDED_TMDB_RE.search(stem)
-    if m:
-        tmdb_id = m.group(1) or m.group(2) or m.group(3)
-        return ("tmdb", tmdb_id)
-    m = _EMBEDDED_TVDB_RE.search(stem)
-    if m:
-        tvdb_id = m.group(1) or m.group(2) or m.group(3)
-        return ("tvdb", tvdb_id)
+    for pattern, source in (
+        (_EMBEDDED_IMDB_RE, "imdb"),
+        (_EMBEDDED_TMDB_RE, "tmdb"),
+        (_EMBEDDED_TVDB_RE, "tvdb"),
+    ):
+        m = pattern.search(stem)
+        if m:
+            eid = m.group(1) or m.group(2) or m.group(3)
+            return (source, eid.lower() if source == "imdb" else eid)
     return None
 
 
@@ -661,6 +656,48 @@ def _tvdb_login(api_key: str) -> str | None:
     return token
 
 
+def _tvdb_fetch_detail(
+    tvdb_id: str,
+    api_key: str,
+    detail_url: str,
+    token: str,
+) -> dict | None:
+    """Fetch series extended detail, retrying once on 401."""
+    import json as _json
+
+    req = urllib.request.Request(
+        detail_url,
+        headers={"Authorization": f"Bearer {token}"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return cast("dict", _json.loads(resp.read().decode()))
+    except urllib.error.HTTPError as exc:
+        if exc.code != 401:
+            logger.debug("TVDB detail failed for id %s (HTTP %s)", tvdb_id, exc.code)
+            return None
+        # Token expired — re-authenticate once
+        logger.debug("TVDB token expired, re-authenticating...")
+        new_token = _tvdb_login(api_key)
+        if new_token is None:
+            return None
+        req2 = urllib.request.Request(
+            detail_url,
+            headers={"Authorization": f"Bearer {new_token}"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(req2, timeout=15) as resp:
+                return cast("dict", _json.loads(resp.read().decode()))
+        except Exception as exc2:
+            logger.debug("TVDB detail failed after re-auth for id %s: %s", tvdb_id, exc2)
+            return None
+    except Exception as exc:
+        logger.debug("TVDB detail failed for id %s: %s", tvdb_id, exc)
+        return None
+
+
 def _lookup_tvdb_by_id(tvdb_id: str, api_key: str) -> list[str] | None:
     """Return ISO 639-2/B language codes via TVDB using a known TVDB ID.
 
@@ -671,8 +708,6 @@ def _lookup_tvdb_by_id(tvdb_id: str, api_key: str) -> list[str] | None:
     Results are not cached separately — the caller (``resolve_native_language``)
     handles database caching.
     """
-    import json as _json
-
     if not api_key:
         return None
 
@@ -683,37 +718,8 @@ def _lookup_tvdb_by_id(tvdb_id: str, api_key: str) -> list[str] | None:
 
     # Fetch series extended record
     detail_url = f"{_TVDB_BASE_URL}/series/{tvdb_id}/extended"
-    req = urllib.request.Request(
-        detail_url,
-        headers={"Authorization": f"Bearer {token}"},
-        method="GET",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            body = _json.loads(resp.read().decode())
-    except urllib.error.HTTPError as exc:
-        if exc.code == 401:
-            # Token expired — re-authenticate once
-            logger.debug("TVDB token expired, re-authenticating...")
-            token = _tvdb_login(api_key)
-            if token is None:
-                return None
-            req = urllib.request.Request(
-                detail_url,
-                headers={"Authorization": f"Bearer {token}"},
-                method="GET",
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    body = _json.loads(resp.read().decode())
-            except Exception as exc2:
-                logger.debug("TVDB detail failed after re-auth for id %s: %s", tvdb_id, exc2)
-                return None
-        else:
-            logger.debug("TVDB detail failed for id %s (HTTP %s)", tvdb_id, exc.code)
-            return None
-    except Exception as exc:
-        logger.debug("TVDB detail failed for id %s: %s", tvdb_id, exc)
+    body = _tvdb_fetch_detail(tvdb_id, api_key, detail_url, token)
+    if body is None:
         return None
 
     raw_lang: str | None = body.get("data", {}).get("originalLanguage")
@@ -721,10 +727,7 @@ def _lookup_tvdb_by_id(tvdb_id: str, api_key: str) -> list[str] | None:
         logger.debug("TVDB no originalLanguage for id %s.", tvdb_id)
         return None
 
-    code = normalize_language_code(raw_lang.lower())
-    if code:
-        return [code]
-    return None
+    return [normalize_language_code(raw_lang.lower())]
 
 
 _CACHE_MISS = object()
@@ -791,44 +794,66 @@ def _get_nfo_metadata(file_path: Path) -> NfoMetadata | None:
     return parse_nfo(nfo_path)
 
 
+def _lookup_and_cache(
+    lookup_fn: Any,
+    args: tuple[Any, ...],
+    file_path: Path,
+    db: Database | None,
+    source: str,
+) -> list[str] | None:
+    """Call *lookup_fn* with *args*; on success log, cache, and return codes."""
+    codes = cast("list[str] | None", lookup_fn(*args))
+    if codes is None:
+        return None
+    logger.info(
+        "Identified native language(s) for '%s': %s (source=%s).",
+        file_path.name,
+        codes,
+        source,
+    )
+    _maybe_cache_result(db, file_path, codes, source, None)
+    return codes
+
+
 def _resolve_nfo_id_lookups(
     nfo_meta: NfoMetadata,
     file_path: Path,
     db: Database | None,
     tmdb_api_key: str | None,
-    tvdb_api_key: str | None,  # NEW
+    tvdb_api_key: str | None,
 ) -> list[str] | None:
     """Try direct IMDb/TMDb/TVDB ID lookups from NFO metadata.
 
     Returns language codes if any lookup succeeds, or *None* to
     continue to the next fallback phase.
     """
-    # Direct IMDb ID lookup (most reliable — no search+match)
+    # Direct IMDb ID lookup (most reliable)
     if nfo_meta.imdb_id:
-        codes = _lookup_imdbpie_by_id(nfo_meta.imdb_id)
-        if codes is not None:
-            _msg = "Identified native language(s) for '%s': %s (source=nfo_imdbpie_id)."
-            logger.info(_msg, file_path.name, codes)
-            _maybe_cache_result(db, file_path, codes, "nfo_imdbpie_id", None)
-            return codes
+        result = _lookup_and_cache(
+            _lookup_imdbpie_by_id,
+            (nfo_meta.imdb_id,),
+            file_path,
+            db,
+            "nfo_imdbpie_id",
+        )
+        if result:
+            return result
 
-    # Direct TMDb ID lookup
-    if nfo_meta.tmdb_id and tmdb_api_key:
-        codes = _lookup_tmdb_by_id(nfo_meta.tmdb_id, tmdb_api_key)
-        if codes is not None:
-            _msg = "Identified native language(s) for '%s': %s (source=nfo_tmdb_id)."
-            logger.info(_msg, file_path.name, codes)
-            _maybe_cache_result(db, file_path, codes, "nfo_tmdb_id", None)
-            return codes
-
-    # Direct TVDB ID lookup (last resort for TV NFOs)
-    if nfo_meta.tvdb_id and tvdb_api_key:
-        codes = _lookup_tvdb_by_id(nfo_meta.tvdb_id, tvdb_api_key)
-        if codes is not None:
-            _msg = "Identified native language(s) for '%s': %s (source=nfo_tvdb_id)."
-            logger.info(_msg, file_path.name, codes)
-            _maybe_cache_result(db, file_path, codes, "nfo_tvdb_id", None)
-            return codes
+    # Direct TMDb/TVDB ID lookups (require API keys)
+    for lookup_fn, eid, api_key, source in (
+        (_lookup_tmdb_by_id, nfo_meta.tmdb_id, tmdb_api_key, "nfo_tmdb_id"),
+        (_lookup_tvdb_by_id, nfo_meta.tvdb_id, tvdb_api_key, "nfo_tvdb_id"),
+    ):
+        if eid and api_key:
+            result = _lookup_and_cache(
+                lookup_fn,
+                (eid, api_key),
+                file_path,
+                db,
+                source,
+            )
+            if result:
+                return result
 
     return None
 

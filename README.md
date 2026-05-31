@@ -18,10 +18,11 @@ automatically deduplicated.
   all tracks of that type are kept to prevent accidentally silencing a file. Additionally, if all
   language-matching audio tracks are commentary (e.g. Director's Commentary on a foreign-language
   film), audio filtering is also skipped. A warning is logged in both cases.
-- **Native language preservation** — with `--keep-native-audio`, trimarr identifies the film's
-  original spoken language(s) via IMDb (or TMDb as fallback) and preserves those audio tracks
-  even if they don't match your `--language` preference. Ideal for dubbed films (e.g., keeping
-  original Chinese audio alongside an English dub). Results are cached in the database so each
+- **Native language preservation** — with `--keep-native-audio`, trimarr identifies the file's
+  original spoken language(s) via IMDb (primary), TMDb, and TVDB (fallbacks) and preserves those
+  audio tracks even if they don't match your `--language` preference. Ideal for dubbed films
+  (e.g., keeping original Chinese audio alongside an English dub) and TV shows where Sonarr
+  NFO files carry only a TVDB ID. Results are cached in the database so each
   file is looked up only once.
 - **Auto-managed mkvmerge** — downloads the mkvmerge binary from MKVToolNix GitHub releases on
   first run and keeps it up to date automatically (disable with `--no-update-check`).
@@ -192,10 +193,10 @@ for this media?}
 
     %% NFO direct ID --
     B -- Yes --> C[Parse NFO XML]
-    C --> D{Has IMDb or
-TMDb ID?}
-    D -- Yes --> E[Look up IMDb/TMDb
-by ID]
+    C --> D{NFO has IMDb,
+TMDb, or TVDB ID?}
+    D -- Yes --> E[Look up by ID:
+IMDb → TMDb → TVDB]
     E --> F{API returns
 native languages?}
     F -- Yes --> G([✅ Cache & return
@@ -213,7 +214,8 @@ native languages])
 
     %% Embedded ID in filename --
     B -- No --> K{Filename contains
-imdb-tt... or tmdb-...?}
+imdb-tt..., tmdb-...,
+or tvdb-...?}
     K -- Yes --> L[Extract ID from
 filename stem]
     L --> M[Look up by ID]
@@ -244,7 +246,8 @@ directory title + year]
     U -- No --> V
 
     %% TMDb fallback --
-    V{--tmdb-api-key
+    V{--tmdb-api-key or
+--tvdb-api-key
 configured?}
     V -- No --> W([⚠️ Cannot determine
 native language])
@@ -256,7 +259,18 @@ filename title + year]
 directory title + year]
     Z --> AA{Found?}
     AA -- Yes --> G
-    AA -- No --> W
+    AA -- No --> AB{--tvdb-api-key
+configured?}
+    AB -- No --> W
+    AB -- Yes --> AC[Search TVDB by
+filename title + year]
+    AC --> AD{Found?}
+    AD -- Yes --> G
+    AD -- No --> AE[Search TVDB by
+directory title + year]
+    AE --> AF{Found?}
+    AF -- Yes --> G
+    AF -- No --> W
 ```
 
 ## Scheduler
