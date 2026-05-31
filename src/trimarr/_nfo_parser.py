@@ -34,6 +34,8 @@ class NfoMetadata:
             ``<uniqueid type="imdb">``, or *None*.
         tmdb_id: TMDb ID (e.g. ``"155"``) from ``<tmdbid>`` or
             ``<uniqueid type="tmdb">``, or *None*.
+        tvdb_id: TVDB ID (e.g. ``"7537283"``) from ``<tvdbid>`` or
+            ``<uniqueid type="tvdb">``, or *None*.
     """
 
     title: str | None
@@ -41,6 +43,7 @@ class NfoMetadata:
     year: str | None = None
     imdb_id: str | None = None
     tmdb_id: str | None = None
+    tvdb_id: str | None = None
 
 
 def discover_nfo(mkv_path: Path) -> Path | None:
@@ -113,9 +116,16 @@ def _has_nfo_content(
     original_title: str | None,
     imdb_id: str | None,
     tmdb_id: str | None,
+    tvdb_id: str | None,
 ) -> bool:
     """Return True if at least one useful metadata field is present."""
-    return title is not None or original_title is not None or imdb_id is not None or tmdb_id is not None
+    return (
+        title is not None
+        or original_title is not None
+        or imdb_id is not None
+        or tmdb_id is not None
+        or tvdb_id is not None
+    )
 
 
 def parse_nfo(path: Path) -> NfoMetadata | None:
@@ -161,7 +171,12 @@ def parse_nfo(path: Path) -> NfoMetadata | None:
     if tmdb_id is None:
         tmdb_id = _extract_uniqueid(root, "tmdb")
 
-    if not _has_nfo_content(title, original_title, imdb_id, tmdb_id):
+    # <tvdbid> takes precedence over <uniqueid type="tvdb">
+    tvdb_id = _extract_text(root, "tvdbid")
+    if tvdb_id is None:
+        tvdb_id = _extract_uniqueid(root, "tvdb")
+
+    if not _has_nfo_content(title, original_title, imdb_id, tmdb_id, tvdb_id):
         logger.debug("NFO '%s' has no usable fields (no title/IMDb/TMDb ID).", path)
         return None
 
@@ -171,4 +186,5 @@ def parse_nfo(path: Path) -> NfoMetadata | None:
         year=year,
         imdb_id=imdb_id,
         tmdb_id=tmdb_id,
+        tvdb_id=tvdb_id,
     )
