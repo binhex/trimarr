@@ -637,9 +637,7 @@ def _tvdb_login(api_key: str) -> str | None:
     POST to ``/login`` with the API key. Returns the bearer token
     string, or *None* on failure (network error, invalid key).
     """
-    import json as _json
-
-    data = _json.dumps({"apikey": api_key}).encode()
+    data = json.dumps({"apikey": api_key}).encode()
     req = urllib.request.Request(
         _TVDB_LOGIN_URL,
         data=data,
@@ -648,7 +646,7 @@ def _tvdb_login(api_key: str) -> str | None:
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            body = _json.loads(resp.read().decode())
+            body = json.loads(resp.read().decode())
     except Exception as exc:
         logger.debug("TVDB login failed: %s", exc)
         return None
@@ -663,7 +661,6 @@ def _tvdb_fetch_detail(
     token: str,
 ) -> dict | None:
     """Fetch series extended detail, retrying once on 401."""
-    import json as _json
 
     req = urllib.request.Request(
         detail_url,
@@ -672,7 +669,7 @@ def _tvdb_fetch_detail(
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return cast("dict", _json.loads(resp.read().decode()))
+            return cast("dict", json.loads(resp.read().decode()))
     except urllib.error.HTTPError as exc:
         if exc.code != 401:
             logger.debug("TVDB detail failed for id %s (HTTP %s)", tvdb_id, exc.code)
@@ -689,7 +686,7 @@ def _tvdb_fetch_detail(
         )
         try:
             with urllib.request.urlopen(req2, timeout=15) as resp:
-                return cast("dict", _json.loads(resp.read().decode()))
+                return cast("dict", json.loads(resp.read().decode()))
         except Exception as exc2:
             logger.debug("TVDB detail failed after re-auth for id %s: %s", tvdb_id, exc2)
             return None
@@ -722,12 +719,17 @@ def _lookup_tvdb_by_id(tvdb_id: str, api_key: str) -> list[str] | None:
     if body is None:
         return None
 
-    raw_lang: str | None = body.get("data", {}).get("originalLanguage")
-    if not raw_lang:
+    raw_lang = body.get("data", {}).get("originalLanguage")
+    if not isinstance(raw_lang, str) or not raw_lang:
         logger.debug("TVDB no originalLanguage for id %s.", tvdb_id)
         return None
 
-    return [normalize_language_code(raw_lang.lower())]
+    code = _ISO_639_1_TO_2.get(raw_lang.lower())
+    if code:
+        return [normalize_language_code(code)]
+    if _is_three_letter_code(raw_lang):
+        return [normalize_language_code(raw_lang.lower())]
+    return None
 
 
 _CACHE_MISS = object()

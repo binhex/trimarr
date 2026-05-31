@@ -1642,6 +1642,28 @@ class TestLookupTvdb:
         login_call = mock_urlopen.call_args_list[0]
         assert login_call[0][0].full_url == "https://api4.thetvdb.com/v4/login"
 
+    def test_two_letter_code_mapping(self, mocker) -> None:
+        """TVDB 2-letter ISO 639-1 code maps to 3-letter ISO 639-2/B."""
+        mock_login = mocker.MagicMock()
+        mock_login.read.return_value = b'{"data": {"token": "tok"}}'
+        mock_login.__enter__.return_value = mock_login
+
+        mock_detail = mocker.MagicMock()
+        mock_detail.read.return_value = b"""
+        {"data": {"originalLanguage": "en"}}
+        """
+        mock_detail.__enter__.return_value = mock_detail
+
+        mocker.patch(
+            "trimarr.native_language.urllib.request.urlopen",
+            side_effect=[mock_login, mock_detail],
+        )
+
+        from trimarr.native_language import _lookup_tvdb_by_id
+
+        result = _lookup_tvdb_by_id("12345", "fake-api-key")
+        assert result == ["eng"]
+
     def test_no_api_key(self) -> None:
         """No TVDB API key means no lookup is attempted."""
         from trimarr.native_language import _lookup_tvdb_by_id
