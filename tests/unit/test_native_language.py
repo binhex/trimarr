@@ -857,6 +857,43 @@ class TestResolveNativeLanguage:
         assert result is None
         tvdb_mock.assert_not_called()
 
+    def test_resolve_native_language_tv_show_season_dir(self, mocker) -> None:
+        """TV show in Season subdirectory resolves using show root dir."""
+        from trimarr.native_language import resolve_native_language
+
+        # Mock NFO discovery to return None (no NFO file)
+        mocker.patch(
+            "trimarr.native_language.discover_nfo",
+            return_value=None,
+        )
+
+        # Mock cache miss
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        mock_db.set_native_language_cache = mocker.MagicMock()
+
+        # Mock IMDbPie to succeed on the show root title
+        mock_client = mocker.patch("imdbpie.Imdb", autospec=True)
+        instance = mock_client.return_value
+        instance.search_for_title.return_value = [
+            {"title": "Westworld", "year": 2016, "imdb_id": "tt0475784"},
+        ]
+        instance.get_title_auxiliary.return_value = {
+            "spokenLanguages": [{"name": "English"}],
+        }
+
+        # Path: /data/Westworld/Season 3/Westworld.S03E01.mkv
+        file_path = Path("/data/Westworld/Season 3/Westworld.S03E01.mkv")
+        result = resolve_native_language(
+            file_path=file_path,
+            db=mock_db,
+            tmdb_api_key=None,
+            tvdb_api_key=None,
+        )
+        # This should resolve using "westworld" from the show root directory
+        assert result == ["eng"]
+        mock_db.set_native_language_cache.assert_called_once()
+
 
 class TestNormaliseForCompare:
     """Tests for _normalise_for_compare()."""
@@ -1089,6 +1126,39 @@ class TestHelpers:
         result = _get_directory_title(Path("/data/Movie/File.mkv"))
         assert result[0] == "movie"
         assert result[1] is None
+
+    def test_get_directory_title_skips_season_dir(self) -> None:
+        """_get_directory_title walks up past Season/Series/Specials dirs."""
+        from trimarr.native_language import _get_directory_title
+
+        # Path: /data/Westworld/Season 3/file.mkv
+        # Currently: returns ("season 3", None) — useless
+        # Expected: walks up to Westworld, returns ("westworld", None)
+        result = _get_directory_title(Path("/data/Westworld/Season 3/Westworld.S03E01.mkv"))
+        assert result[0] == "westworld"
+        # Year may still be None since Westworld has no year in name
+        assert result[1] is None
+
+    def test_get_directory_title_skips_series_dir(self) -> None:
+        """_get_directory_title walks up past Series dir (UK naming)."""
+        from trimarr.native_language import _get_directory_title
+
+        result = _get_directory_title(Path("/data/Broadchurch/Series 1/Broadchurch.S01E01.mkv"))
+        assert result[0] == "broadchurch"
+
+    def test_get_directory_title_skips_specials_dir(self) -> None:
+        """_get_directory_title walks up past Specials dir."""
+        from trimarr.native_language import _get_directory_title
+
+        result = _get_directory_title(Path("/data/Fawlty Towers/Specials/Fawlty Towers.mkv"))
+        assert result[0] == "fawlty towers"
+
+    def test_get_directory_title_uk_case_insensitive(self) -> None:
+        """_get_directory_title handles 'series' case-insensitively."""
+        from trimarr.native_language import _get_directory_title
+
+        result = _get_directory_title(Path("/data/Show/Series 2/Show.S02E01.mkv"))
+        assert result[0] == "show"
 
     def test_lookup_chain_no_api_key(self) -> None:
         """_lookup_chain without TMDb key returns only IMDbPie entries."""
