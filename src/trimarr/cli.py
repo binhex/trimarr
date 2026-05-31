@@ -316,6 +316,19 @@ Examples:
     ),
 )
 @click.option(
+    "--tvdb-api-key",
+    type=click.STRING,
+    required=False,
+    default=None,
+    metavar="<key>",
+    help=(
+        "TVDB API key used as a fallback when IMDbPie and TMDb cannot identify"
+        " a file's native language.  Useful for TV shows whose NFO files"
+        " contain only a TVDB ID.  Optional — without it, TVDB lookups are"
+        " silently skipped."
+    ),
+)
+@click.option(
     "--media-path",
     type=_PipeSeparatedPaths(),
     required=True,
@@ -505,6 +518,7 @@ def cli(
     keep_audio: bool,
     keep_native_audio: bool,
     tmdb_api_key: str | None,
+    tvdb_api_key: str | None,
     media_path: list[str],
     mkvmerge_path: str | None,
     database_path: str,
@@ -561,6 +575,7 @@ def cli(
             keep_audio=keep_audio,
             keep_native_audio=keep_native_audio,
             tmdb_api_key=tmdb_api_key,
+            tvdb_api_key=tvdb_api_key,
             media_path=media_path,
             mkvmerge_path=mkvmerge_path,
             database_path=database_path,

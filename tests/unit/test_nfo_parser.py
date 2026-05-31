@@ -172,6 +172,67 @@ class TestParseNfo:
         assert result is not None
         assert result.imdb_id == "tt1234567"
 
+    def test_parse_tvdbid_element(self, tmp_path: Path) -> None:
+        """Parse <tvdbid> from a Sonarr-style TV NFO."""
+        nfo = tmp_path / "tvshow.nfo"
+        nfo.write_text("""<?xml version="1.0"?>
+<tvshow>
+  <title>Breaking Bad</title>
+  <tvdbid>7537283</tvdbid>
+</tvshow>""")
+        result = parse_nfo(nfo)
+        assert result is not None
+        assert result.tvdb_id == "7537283"
+        assert result.title == "Breaking Bad"
+
+    def test_parse_uniqueid_tvdb_fallback(self, tmp_path: Path) -> None:
+        """Fall back to <uniqueid type='tvdb'> when <tvdbid> is absent."""
+        nfo = tmp_path / "tvshow.nfo"
+        nfo.write_text("""<?xml version="1.0"?>
+<tvshow>
+  <title>Breaking Bad</title>
+  <uniqueid type="tvdb">81189</uniqueid>
+</tvshow>""")
+        result = parse_nfo(nfo)
+        assert result is not None
+        assert result.tvdb_id == "81189"
+
+    def test_parse_tvdbid_takes_precedence(self, tmp_path: Path) -> None:
+        """<tvdbid> takes precedence over <uniqueid type='tvdb'>."""
+        nfo = tmp_path / "tvshow.nfo"
+        nfo.write_text("""<?xml version="1.0"?>
+<tvshow>
+  <title>Test</title>
+  <tvdbid>111</tvdbid>
+  <uniqueid type="tvdb">222</uniqueid>
+</tvshow>""")
+        result = parse_nfo(nfo)
+        assert result is not None
+        assert result.tvdb_id == "111"
+
+    def test_parse_tvdbid_missing(self, tmp_path: Path) -> None:
+        """NFO without any TVDB ID returns tvdb_id=None."""
+        nfo = tmp_path / "movie.nfo"
+        nfo.write_text("""<?xml version="1.0"?>
+<movie>
+  <title>Test</title>
+</movie>""")
+        result = parse_nfo(nfo)
+        assert result is not None
+        assert result.tvdb_id is None
+
+    def test_parse_tvdbid_only_no_title(self, tmp_path: Path) -> None:
+        """NFO with only a tvdbid and no title still returns a result."""
+        nfo = tmp_path / "tvshow.nfo"
+        nfo.write_text("""<?xml version="1.0"?>
+<tvshow>
+  <tvdbid>12345</tvdbid>
+</tvshow>""")
+        result = parse_nfo(nfo)
+        assert result is not None
+        assert result.tvdb_id == "12345"
+        assert result.title is None
+
 
 class TestDiscoverNfo:
     """Tests for discover_nfo()."""

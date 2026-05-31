@@ -45,6 +45,7 @@ class _ProcessingConfig:
     no_backup: bool
     strip_subtitle_regex_patterns: list[re.Pattern] | None = None
     tmdb_api_key: str | None = None
+    tvdb_api_key: str | None = None
 
 
 @dataclass
@@ -328,6 +329,7 @@ def _resolve_effective_language(
         file_path=file_path,
         db=db,
         tmdb_api_key=cfg.tmdb_api_key,
+        tvdb_api_key=cfg.tvdb_api_key,
     )
     if not native:
         return cfg.language
@@ -628,6 +630,7 @@ def run(
     skip_size_check: bool = False,
     keep_native_audio: bool = False,
     tmdb_api_key: str | None = None,
+    tvdb_api_key: str | None = None,
     pre_process: str | None = None,
     post_process: str | None = None,
     command_timeout_mins: int = 5,
@@ -677,6 +680,7 @@ def run(
         no_backup=no_backup,
         strip_subtitle_regex_patterns=strip_subtitle_regex_patterns,
         tmdb_api_key=tmdb_api_key,
+        tvdb_api_key=tvdb_api_key,
     )
 
     command_timeout_seconds: int | None = command_timeout_mins * 60 if command_timeout_mins > 0 else None

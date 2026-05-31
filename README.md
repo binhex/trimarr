@@ -18,10 +18,11 @@ automatically deduplicated.
   all tracks of that type are kept to prevent accidentally silencing a file. Additionally, if all
   language-matching audio tracks are commentary (e.g. Director's Commentary on a foreign-language
   film), audio filtering is also skipped. A warning is logged in both cases.
-- **Native language preservation** — with `--keep-native-audio`, trimarr identifies the film's
-  original spoken language(s) via IMDb (or TMDb as fallback) and preserves those audio tracks
-  even if they don't match your `--language` preference. Ideal for dubbed films (e.g., keeping
-  original Chinese audio alongside an English dub). Results are cached in the database so each
+- **Native language preservation** — with `--keep-native-audio`, trimarr identifies the file's
+  original spoken language(s) via IMDb (primary), TMDb, and TVDB (fallbacks) and preserves those
+  audio tracks even if they don't match your `--language` preference. Ideal for dubbed films
+  (e.g., keeping original Chinese audio alongside an English dub) and TV shows where Sonarr
+  NFO files carry only a TVDB ID. Results are cached in the database so each
   file is looked up only once.
 - **Auto-managed mkvmerge** — downloads the mkvmerge binary from MKVToolNix GitHub releases on
   first run and keeps it up to date automatically (disable with `--no-update-check`).
@@ -88,8 +89,9 @@ trimarr --help
 | `--delete-metadata-title` | Remove the container title metadata from each file. Mutually exclusive with `--edit-metadata-title`. | `false` | — | `flag` |
 | `--keep-subtitles` | Keep all subtitle tracks regardless of language. | `false` | — | `flag` |
 | `--keep-audio` | Keep all audio tracks regardless of language. | `false` | — | `flag` |
-| `--keep-native-audio` | Identify the film's native/original spoken language(s) via IMDb (or TMDb as fallback) and keep all audio tracks in those languages alongside your `--language` preference. Ignored when `--keep-audio` is set. First-time lookups require an internet connection; results are cached in the database. | `false` | — | `flag` |
-| `--tmdb-api-key` | TMDb API key used as fallback when IMDbPie cannot identify a film's native language. Optional — lookups that fail on IMDbPie silently fall back to standard behaviour. | — | `<key>` | `string` |
+| `--keep-native-audio` | Identify the file's native/original spoken language(s) via IMDb (primary), TMDb, and TVDB (fallbacks) and keep all audio tracks in those languages alongside your `--language` preference. Ignored when `--keep-audio` is set. First-time lookups require an internet connection; results are cached in the database. | `false` | — | `flag` |
+| `--tmdb-api-key` | TMDb API key used as fallback when IMDbPie cannot identify a file's native language. Optional — without it, TMDb lookups are silently skipped. | — | `<key>` | `string` |
+| `--tvdb-api-key` | TVDB API key used as fallback when IMDbPie and TMDb cannot identify a file's native language. Useful for TV shows whose NFO files contain only a TVDB ID. Optional — without it, TVDB lookups are silently skipped. | — | `<key>` | `string` |
 | `--no-backup` | Delete the original file after successful processing instead of renaming it to `<name>.bak`. By default a backup is always created. | `false` | — | `flag` |
 | `--no-update-check` | Skip the automatic check for a newer mkvmerge version. Has no effect when `--mkvmerge-path` is supplied (user-managed binaries are never auto-updated). | `false` | — | `flag` |
 | `--strip-lower-channels` | After language filtering, drop any audio tracks whose channel count is strictly below the highest channel count among the surviving audio tracks. For example, given English tracks at 8ch, 8ch, and 2ch, the 2ch track is removed. Tracks with an unknown channel count are always kept. Has no effect when `--keep-audio` is set. **Disabled by default** — enable only when you are confident lower-channel duplicates are not needed. | `false` | — | `flag` |
@@ -192,10 +194,10 @@ for this media?}
 
     %% NFO direct ID --
     B -- Yes --> C[Parse NFO XML]
-    C --> D{Has IMDb or
-TMDb ID?}
-    D -- Yes --> E[Look up IMDb/TMDb
-by ID]
+    C --> D{NFO has IMDb,
+TMDb, or TVDB ID?}
+    D -- Yes --> E[Look up by ID:
+IMDb → TMDb → TVDB]
     E --> F{API returns
 native languages?}
     F -- Yes --> G([✅ Cache & return
@@ -213,7 +215,8 @@ native languages])
 
     %% Embedded ID in filename --
     B -- No --> K{Filename contains
-imdb-tt... or tmdb-...?}
+imdb-tt..., tmdb-...,
+or tvdb-...?}
     K -- Yes --> L[Extract ID from
 filename stem]
     L --> M[Look up by ID]
@@ -244,7 +247,8 @@ directory title + year]
     U -- No --> V
 
     %% TMDb fallback --
-    V{--tmdb-api-key
+    V{--tmdb-api-key or
+--tvdb-api-key
 configured?}
     V -- No --> W([⚠️ Cannot determine
 native language])
@@ -256,7 +260,18 @@ filename title + year]
 directory title + year]
     Z --> AA{Found?}
     AA -- Yes --> G
-    AA -- No --> W
+    AA -- No --> AB{--tvdb-api-key
+configured?}
+    AB -- No --> W
+    AB -- Yes --> AC[Search TVDB by
+filename title + year]
+    AC --> AD{Found?}
+    AD -- Yes --> G
+    AD -- No --> AE[Search TVDB by
+directory title + year]
+    AE --> AF{Found?}
+    AF -- Yes --> G
+    AF -- No --> W
 ```
 
 ## Scheduler

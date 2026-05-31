@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from http.client import HTTPMessage
 from pathlib import Path
 
 import pytest
 
+from trimarr._nfo_parser import NfoMetadata
 from trimarr.native_language import (
     _language_name_to_iso_639_2,
     _lookup_imdbpie,
@@ -30,6 +32,7 @@ class TestParseMovieTitle:
             ("/data/Movie_Title_2023_HDR.mkv", "movie title", "2023"),
             ("/data/Das.Boot.1981.DC.1080p.BluRay.x264-CtrlHD.mkv", "das boot", "1981"),
             ("/data/2024.Movie.1080p.mkv", "movie", "2024"),
+            ("/data/Show.Name.2020.{tvdb-7537283}.mkv", "show name", "2020"),
         ],
     )
     def test_parse_movie_title(
@@ -727,6 +730,132 @@ class TestResolveNativeLanguage:
         mock_imdbpie.assert_not_called()
         mock_tmdb.assert_called_once_with("77914", "test-key")
         mock_search.assert_called_once()
+
+    def test_resolve_native_language_tvdb_from_nfo(self, mocker) -> None:
+        """resolve_native_language uses TVDB when NFO has only a tvdbid."""
+        from trimarr.native_language import resolve_native_language
+
+        # Mock NFO discovery + parsing
+        mocker.patch(
+            "trimarr.native_language.discover_nfo",
+            return_value=Path("/fake/movie.nfo"),
+        )
+        mock_nfo = NfoMetadata(
+            title="Test Show",
+            original_title=None,
+            year="2020",
+            imdb_id=None,
+            tmdb_id=None,
+            tvdb_id="7537283",
+        )
+        mocker.patch(
+            "trimarr.native_language.parse_nfo",
+            return_value=mock_nfo,
+        )
+
+        # Mock cache miss
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+
+        # Mock set_native_language_cache to a no-op
+        mock_db.set_native_language_cache = mocker.MagicMock()
+
+        # Mock TVDB lookup to succeed
+        mocker.patch(
+            "trimarr.native_language._lookup_tvdb_by_id",
+            return_value=["eng"],
+        )
+
+        file_path = Path("/data/Test Show (2020)/Test Show.mkv")
+        result = resolve_native_language(
+            file_path=file_path,
+            db=mock_db,
+            tmdb_api_key=None,
+            tvdb_api_key="fake-key",
+        )
+        assert result == ["eng"]
+        mock_db.set_native_language_cache.assert_called_once_with(file_path, ["eng"], "nfo_tvdb_id", None)
+
+    def test_resolve_native_language_tvdb_embedded(self, mocker) -> None:
+        """resolve_native_language uses TVDB from embedded {tvdb-...} ID."""
+        from trimarr.native_language import resolve_native_language
+
+        # Mock NFO discovery to return None (no NFO)
+        mocker.patch(
+            "trimarr.native_language.discover_nfo",
+            return_value=None,
+        )
+
+        # Mock cache miss
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        mock_db.set_native_language_cache = mocker.MagicMock()
+
+        # Mock TVDB lookup to succeed
+        mocker.patch(
+            "trimarr.native_language._lookup_tvdb_by_id",
+            return_value=["kor"],
+        )
+
+        file_path = Path("/data/Show.{tvdb-12345}.2020.mkv")
+        result = resolve_native_language(
+            file_path=file_path,
+            db=mock_db,
+            tmdb_api_key=None,
+            tvdb_api_key="fake-key",
+        )
+        assert result == ["kor"]
+        mock_db.set_native_language_cache.assert_called_once_with(file_path, ["kor"], "tvdb_embedded_id", None)
+
+    def test_resolve_native_language_tvdb_no_key(self, mocker) -> None:
+        """resolve_native_language skips TVDB when no API key."""
+        from trimarr.native_language import resolve_native_language
+
+        # Mock NFO with only a tvdbid
+        mocker.patch(
+            "trimarr.native_language.discover_nfo",
+            return_value=Path("/fake/movie.nfo"),
+        )
+        mock_nfo = NfoMetadata(
+            title="Test",
+            imdb_id=None,
+            tmdb_id=None,
+            tvdb_id="7537283",
+        )
+        mocker.patch(
+            "trimarr.native_language.parse_nfo",
+            return_value=mock_nfo,
+        )
+
+        # Mock cache miss
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        mock_db.set_native_language_cache = mocker.MagicMock()
+
+        # Mock TVDB lookup should NOT be called
+        tvdb_mock = mocker.patch(
+            "trimarr.native_language._lookup_tvdb_by_id",
+        )
+
+        # Also mock IMDbPie and TMDb to fail
+        mocker.patch(
+            "trimarr.native_language._lookup_imdbpie_by_id",
+            return_value=None,
+        )
+        mocker.patch(
+            "trimarr.native_language._lookup_tmdb_by_id",
+            return_value=None,
+        )
+
+        file_path = Path("/data/Test/Test.mkv")
+        result = resolve_native_language(
+            file_path=file_path,
+            db=mock_db,
+            tmdb_api_key=None,
+            tvdb_api_key=None,  # No TVDB key
+        )
+        assert result is None
+        tvdb_mock.assert_not_called()
 
 
 class TestNormaliseForCompare:
@@ -1441,6 +1570,10 @@ class TestExtractEmbeddedId:
             ("Martin (1977) {tmdb-77914} 2160p", ("tmdb", "77914")),
             ("Martin [tmdb-77914] 2160p", ("tmdb", "77914")),
             ("Martin tmdb-77914 2160p", ("tmdb", "77914")),
+            # TVDB: curly, square, bare
+            ("Show.Name.2020.{tvdb-7537283}.mkv", ("tvdb", "7537283")),
+            ("Show.Name.2020.[tvdb-7537283].mkv", ("tvdb", "7537283")),
+            ("Show.Name.2020.tvdb-7537283.mkv", ("tvdb", "7537283")),
         ],
     )
     def test_extract_embedded_id(self, stem: str, expected: tuple[str, str]) -> None:
@@ -1456,6 +1589,7 @@ class TestExtractEmbeddedId:
             "Martin [some-other-id] 2160p",
             "tmdb-abc",  # TMDb ID must be numeric
             "imdb-movie",  # IMDb ID must start with tt
+            "tvdb-abc",  # TVDB ID must be numeric
         ],
     )
     def test_extract_embedded_id_no_match(self, stem: str) -> None:
@@ -1476,3 +1610,245 @@ class TestExtractEmbeddedId:
 
         result = _extract_embedded_id(stem)
         assert result == expected
+
+
+class TestLookupTvdb:
+    """Tests for TVDB-based language lookup."""
+
+    def test_success(self, mocker) -> None:
+        """TVDB series lookup returns originalLanguage."""
+
+        mock_token = "fake-jwt-token"
+
+        mock_login = mocker.MagicMock()
+        mock_login.read.return_value = b'{"data": {"token": "' + mock_token.encode() + b'"}}'
+        mock_login.__enter__.return_value = mock_login
+
+        mock_detail = mocker.MagicMock()
+        mock_detail.read.return_value = b"""
+        {"data": {"originalLanguage": "jpn", "name": "Example Series"}}
+        """
+        mock_detail.__enter__.return_value = mock_detail
+
+        mock_urlopen = mocker.patch(
+            "trimarr.native_language.urllib.request.urlopen",
+            side_effect=[mock_login, mock_detail],
+        )
+
+        from trimarr.native_language import _lookup_tvdb_by_id
+
+        result = _lookup_tvdb_by_id("12345", "fake-api-key")
+        assert result == ["jpn"]
+        login_call = mock_urlopen.call_args_list[0]
+        assert login_call[0][0].full_url == "https://api4.thetvdb.com/v4/login"
+
+    def test_two_letter_code_mapping(self, mocker) -> None:
+        """TVDB 2-letter ISO 639-1 code maps to 3-letter ISO 639-2/B."""
+        mock_login = mocker.MagicMock()
+        mock_login.read.return_value = b'{"data": {"token": "tok"}}'
+        mock_login.__enter__.return_value = mock_login
+
+        mock_detail = mocker.MagicMock()
+        mock_detail.read.return_value = b"""
+        {"data": {"originalLanguage": "en"}}
+        """
+        mock_detail.__enter__.return_value = mock_detail
+
+        mocker.patch(
+            "trimarr.native_language.urllib.request.urlopen",
+            side_effect=[mock_login, mock_detail],
+        )
+
+        from trimarr.native_language import _lookup_tvdb_by_id
+
+        result = _lookup_tvdb_by_id("12345", "fake-api-key")
+        assert result == ["eng"]
+
+    def test_no_api_key(self) -> None:
+        """No TVDB API key means no lookup is attempted."""
+        from trimarr.native_language import _lookup_tvdb_by_id
+
+        result = _lookup_tvdb_by_id("12345", "")
+        assert result is None
+
+    def test_login_failure(self, mocker) -> None:
+        """TVDB login fails (network error)."""
+        mock_response = mocker.MagicMock()
+        mock_response.__enter__.return_value = mock_response
+        mock_response.read.side_effect = OSError("Login failed")
+
+        mocker.patch(
+            "trimarr.native_language.urllib.request.urlopen",
+            return_value=mock_response,
+        )
+
+        from trimarr.native_language import _lookup_tvdb_by_id
+
+        result = _lookup_tvdb_by_id("12345", "fake-api-key")
+        assert result is None
+
+    def test_login_returns_no_token(self, mocker) -> None:
+        """TVDB login succeeds but returns no token."""
+        mock_login = mocker.MagicMock()
+        mock_login.read.return_value = b'{"data": {}}'
+        mock_login.__enter__.return_value = mock_login
+
+        mocker.patch(
+            "trimarr.native_language.urllib.request.urlopen",
+            return_value=mock_login,
+        )
+
+        from trimarr.native_language import _lookup_tvdb_by_id
+
+        result = _lookup_tvdb_by_id("12345", "fake-api-key")
+        assert result is None
+
+    def test_detail_http_error_other(self, mocker) -> None:
+        """TVDB detail call returns a non-401 HTTP error (e.g. 404)."""
+        import urllib.error
+
+        mock_login = mocker.MagicMock()
+        mock_login.read.return_value = b'{"data": {"token": "tok"}}'
+        mock_login.__enter__.return_value = mock_login
+
+        mock_404 = mocker.MagicMock()
+        mock_404.__enter__.return_value = mock_404
+        mock_404.read.side_effect = urllib.error.HTTPError("url", 404, "Not Found", HTTPMessage(), None)
+
+        mocker.patch(
+            "trimarr.native_language.urllib.request.urlopen",
+            side_effect=[mock_login, mock_404],
+        )
+
+        from trimarr.native_language import _lookup_tvdb_by_id
+
+        result = _lookup_tvdb_by_id("12345", "fake-api-key")
+        assert result is None
+
+    def test_detail_generic_error(self, mocker) -> None:
+        """TVDB detail call raises a non-HTTP error."""
+        mock_login = mocker.MagicMock()
+        mock_login.read.return_value = b'{"data": {"token": "tok"}}'
+        mock_login.__enter__.return_value = mock_login
+
+        mock_detail = mocker.MagicMock()
+        mock_detail.__enter__.return_value = mock_detail
+        mock_detail.read.side_effect = OSError("Connection reset")
+
+        mocker.patch(
+            "trimarr.native_language.urllib.request.urlopen",
+            side_effect=[mock_login, mock_detail],
+        )
+
+        from trimarr.native_language import _lookup_tvdb_by_id
+
+        result = _lookup_tvdb_by_id("12345", "fake-api-key")
+        assert result is None
+
+    def test_reauth_failure(self, mocker) -> None:
+        """Token expired, re-auth succeeds but retried detail call fails."""
+        import urllib.error
+
+        mock_login1 = mocker.MagicMock()
+        mock_login1.read.return_value = b'{"data": {"token": "expired-token"}}'
+        mock_login1.__enter__.return_value = mock_login1
+
+        mock_401 = mocker.MagicMock()
+        mock_401.__enter__.return_value = mock_401
+        mock_401.read.side_effect = urllib.error.HTTPError("url", 401, "Unauthorized", HTTPMessage(), None)
+
+        mock_login2 = mocker.MagicMock()
+        mock_login2.read.return_value = b'{"data": {"token": "new-token"}}'
+        mock_login2.__enter__.return_value = mock_login2
+
+        mock_detail_fail = mocker.MagicMock()
+        mock_detail_fail.__enter__.return_value = mock_detail_fail
+        mock_detail_fail.read.side_effect = OSError("Connection reset")
+
+        mocker.patch(
+            "trimarr.native_language.urllib.request.urlopen",
+            side_effect=[mock_login1, mock_401, mock_login2, mock_detail_fail],
+        )
+
+        from trimarr.native_language import _lookup_tvdb_by_id
+
+        result = _lookup_tvdb_by_id("12345", "fake-api-key")
+        assert result is None
+
+    def test_no_original_language(self, mocker) -> None:
+        """Series detail has no originalLanguage field."""
+        mock_login = mocker.MagicMock()
+        mock_login.read.return_value = b'{"data": {"token": "tok"}}'
+        mock_login.__enter__.return_value = mock_login
+
+        mock_detail = mocker.MagicMock()
+        mock_detail.read.return_value = b'{"data": {"name": "No Lang"}}'
+        mock_detail.__enter__.return_value = mock_detail
+
+        mocker.patch(
+            "trimarr.native_language.urllib.request.urlopen",
+            side_effect=[mock_login, mock_detail],
+        )
+
+        from trimarr.native_language import _lookup_tvdb_by_id
+
+        result = _lookup_tvdb_by_id("12345", "fake-api-key")
+        assert result is None
+
+    def test_reauth_on_401(self, mocker) -> None:
+        """Expired token triggers re-auth, then the request succeeds."""
+        import urllib.error
+
+        mock_login1 = mocker.MagicMock()
+        mock_login1.read.return_value = b'{"data": {"token": "expired-token"}}'
+        mock_login1.__enter__.return_value = mock_login1
+
+        mock_401 = mocker.MagicMock()
+        mock_401.__enter__.return_value = mock_401
+        mock_401.read.side_effect = urllib.error.HTTPError("url", 401, "Unauthorized", HTTPMessage(), None)
+
+        mock_login2 = mocker.MagicMock()
+        mock_login2.read.return_value = b'{"data": {"token": "new-token"}}'
+        mock_login2.__enter__.return_value = mock_login2
+
+        mock_detail = mocker.MagicMock()
+        mock_detail.read.return_value = b"""
+        {"data": {"originalLanguage": "eng"}}
+        """
+        mock_detail.__enter__.return_value = mock_detail
+
+        mocker.patch(
+            "trimarr.native_language.urllib.request.urlopen",
+            side_effect=[mock_login1, mock_401, mock_login2, mock_detail],
+        )
+
+        from trimarr.native_language import _lookup_tvdb_by_id
+
+        result = _lookup_tvdb_by_id("12345", "fake-api-key")
+        assert result == ["eng"]
+
+    def test_reauth_login_fails(self, mocker) -> None:
+        """Token expired, re-login returns None, function returns None."""
+        import urllib.error
+
+        mock_login1 = mocker.MagicMock()
+        mock_login1.read.return_value = b'{"data": {"token": "expired-token"}}'
+        mock_login1.__enter__.return_value = mock_login1
+
+        mock_401 = mocker.MagicMock()
+        mock_401.__enter__.return_value = mock_401
+        mock_401.read.side_effect = urllib.error.HTTPError("url", 401, "Unauthorized", HTTPMessage(), None)
+
+        mock_login2 = mocker.MagicMock()
+        mock_login2.read.return_value = b'{"data": {}}'
+        mock_login2.__enter__.return_value = mock_login2
+
+        mocker.patch(
+            "trimarr.native_language.urllib.request.urlopen",
+            side_effect=[mock_login1, mock_401, mock_login2],
+        )
+
+        from trimarr.native_language import _lookup_tvdb_by_id
+
+        result = _lookup_tvdb_by_id("12345", "fake-api-key")
+        assert result is None
