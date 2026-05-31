@@ -133,7 +133,7 @@ def parse_nfo(path: Path) -> NfoMetadata | None:
 
     Handles both ``<movie>`` and ``<tvshow>`` root elements.  Returns
     *None* when the file cannot be parsed or contains no useful metadata
-    (no title, imdb_id, or tmdb_id).
+    (no title, imdb_id, tmdb_id, or tvdb_id).
 
     Args:
         path: Path to the ``.nfo`` XML file.
