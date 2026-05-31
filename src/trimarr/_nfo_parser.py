@@ -177,7 +177,7 @@ def parse_nfo(path: Path) -> NfoMetadata | None:
         tvdb_id = _extract_uniqueid(root, "tvdb")
 
     if not _has_nfo_content(title, original_title, imdb_id, tmdb_id, tvdb_id):
-        logger.debug("NFO '%s' has no usable fields (no title/IMDb/TMDb ID).", path)
+        logger.debug("NFO '%s' has no usable fields (no title/IMDb/TMDb/TVDB ID).", path)
         return None
 
     return NfoMetadata(

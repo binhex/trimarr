@@ -796,10 +796,11 @@ def _resolve_nfo_id_lookups(
     file_path: Path,
     db: Database | None,
     tmdb_api_key: str | None,
+    tvdb_api_key: str | None,  # NEW
 ) -> list[str] | None:
-    """Try direct IMDb/TMDb ID lookups from NFO metadata.
+    """Try direct IMDb/TMDb/TVDB ID lookups from NFO metadata.
 
-    Returns language codes if either lookup succeeds, or *None* to
+    Returns language codes if any lookup succeeds, or *None* to
     continue to the next fallback phase.
     """
     # Direct IMDb ID lookup (most reliable — no search+match)
@@ -818,6 +819,15 @@ def _resolve_nfo_id_lookups(
             _msg = "Identified native language(s) for '%s': %s (source=nfo_tmdb_id)."
             logger.info(_msg, file_path.name, codes)
             _maybe_cache_result(db, file_path, codes, "nfo_tmdb_id", None)
+            return codes
+
+    # Direct TVDB ID lookup (last resort for TV NFOs)
+    if nfo_meta.tvdb_id and tvdb_api_key:
+        codes = _lookup_tvdb_by_id(nfo_meta.tvdb_id, tvdb_api_key)
+        if codes is not None:
+            _msg = "Identified native language(s) for '%s': %s (source=nfo_tvdb_id)."
+            logger.info(_msg, file_path.name, codes)
+            _maybe_cache_result(db, file_path, codes, "nfo_tvdb_id", None)
             return codes
 
     return None
@@ -937,18 +947,40 @@ def _resolve_tmdb_embedded(
     return codes
 
 
+def _resolve_tvdb_embedded(
+    eid: str,
+    file_path: Path,
+    db: Database | None,
+    tvdb_api_key: str | None,
+) -> list[str] | None:
+    """Resolve via a TVDB-only embedded ID."""
+    if not tvdb_api_key:
+        return None
+
+    codes = _lookup_tvdb_by_id(eid, tvdb_api_key)
+    if codes is None:
+        return None
+
+    logger.info(
+        "Identified native language(s) for '%s': %s (source=tvdb_embedded_id).",
+        file_path.name,
+        codes,
+    )
+    _maybe_cache_result(db, file_path, codes, "tvdb_embedded_id", None)
+    return codes
+
+
 def _resolve_embedded_id_phase(
     file_stem: str,
     file_path: Path,
     db: Database | None,
     tmdb_api_key: str | None,
+    tvdb_api_key: str | None,  # NEW
 ) -> list[str] | None:
-    """Try to resolve native language via an embedded IMDb/TMDb ID in *file_stem*.
+    """Try to resolve native language via an embedded ID in *file_stem*.
 
-    Dispatches to ``_resolve_imdb_embedded`` or ``_resolve_tmdb_embedded``
-    depending on which ID type is found.
-
-    Returns ISO 639-2/B language codes or *None*.
+    Dispatches to the appropriate resolver depending on which ID type
+    is found. Returns ISO 639-2/B language codes or *None*.
     """
     embedded = _extract_embedded_id(file_stem)
     if embedded is None:
@@ -957,8 +989,10 @@ def _resolve_embedded_id_phase(
     source, eid = embedded
     if source == "imdb":
         codes = _resolve_imdb_embedded(eid, file_stem, file_path, db, tmdb_api_key)
-    else:
+    elif source == "tmdb":
         codes = _resolve_tmdb_embedded(eid, file_path, db, tmdb_api_key)
+    else:  # tvdb
+        codes = _resolve_tvdb_embedded(eid, file_path, db, tvdb_api_key)
 
     if codes is None:
         logger.debug(
@@ -1038,6 +1072,12 @@ def resolve_native_language(
 
     The NFO phase supports both ``<movie>`` and ``<tvshow>`` XML formats
     created by Radarr, Sonarr, Kodi, etc.
+
+    Args:
+        file_path: Path to the media file.
+        db: Optional database instance for caching.
+        tmdb_api_key: TMDb API key for TMDb-powered lookups.
+        tvdb_api_key: TVDB API key for TVDB-powered lookups.
     """
     cached_langs = _check_native_language_cache(db, file_path)
     if cached_langs is not _CACHE_MISS:
@@ -1048,14 +1088,14 @@ def resolve_native_language(
     # ------------------------------------------------------------------
     nfo_meta = _get_nfo_metadata(file_path)
     if nfo_meta is not None:
-        result = _resolve_nfo_id_lookups(nfo_meta, file_path, db, tmdb_api_key)
+        result = _resolve_nfo_id_lookups(nfo_meta, file_path, db, tmdb_api_key, tvdb_api_key)
         if result is not None:
             return result
 
     # ------------------------------------------------------------------
     # Phase 2 — Embedded ID in filename (direct ID, highly reliable)
     # ------------------------------------------------------------------
-    result = _resolve_embedded_id_phase(file_path.stem, file_path, db, tmdb_api_key)
+    result = _resolve_embedded_id_phase(file_path.stem, file_path, db, tmdb_api_key, tvdb_api_key)
     if result is not None:
         return result
 

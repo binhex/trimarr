@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from trimarr._nfo_parser import NfoMetadata
 from trimarr.native_language import (
     _language_name_to_iso_639_2,
     _lookup_imdbpie,
@@ -735,6 +736,132 @@ class TestResolveNativeLanguage:
         mock_imdbpie.assert_not_called()
         mock_tmdb.assert_called_once_with("77914", "test-key")
         mock_search.assert_called_once()
+
+    def test_resolve_native_language_tvdb_from_nfo(self, mocker) -> None:
+        """resolve_native_language uses TVDB when NFO has only a tvdbid."""
+        from trimarr.native_language import resolve_native_language
+
+        # Mock NFO discovery + parsing
+        mocker.patch(
+            "trimarr.native_language.discover_nfo",
+            return_value=Path("/fake/movie.nfo"),
+        )
+        mock_nfo = NfoMetadata(
+            title="Test Show",
+            original_title=None,
+            year="2020",
+            imdb_id=None,
+            tmdb_id=None,
+            tvdb_id="7537283",
+        )
+        mocker.patch(
+            "trimarr.native_language.parse_nfo",
+            return_value=mock_nfo,
+        )
+
+        # Mock cache miss
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+
+        # Mock set_native_language_cache to a no-op
+        mock_db.set_native_language_cache = mocker.MagicMock()
+
+        # Mock TVDB lookup to succeed
+        mocker.patch(
+            "trimarr.native_language._lookup_tvdb_by_id",
+            return_value=["eng"],
+        )
+
+        file_path = Path("/data/Test Show (2020)/Test Show.mkv")
+        result = resolve_native_language(
+            file_path=file_path,
+            db=mock_db,
+            tmdb_api_key=None,
+            tvdb_api_key="fake-key",
+        )
+        assert result == ["eng"]
+        mock_db.set_native_language_cache.assert_called_once_with(file_path, ["eng"], "nfo_tvdb_id", None)
+
+    def test_resolve_native_language_tvdb_embedded(self, mocker) -> None:
+        """resolve_native_language uses TVDB from embedded {tvdb-...} ID."""
+        from trimarr.native_language import resolve_native_language
+
+        # Mock NFO discovery to return None (no NFO)
+        mocker.patch(
+            "trimarr.native_language.discover_nfo",
+            return_value=None,
+        )
+
+        # Mock cache miss
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        mock_db.set_native_language_cache = mocker.MagicMock()
+
+        # Mock TVDB lookup to succeed
+        mocker.patch(
+            "trimarr.native_language._lookup_tvdb_by_id",
+            return_value=["kor"],
+        )
+
+        file_path = Path("/data/Show.{tvdb-12345}.2020.mkv")
+        result = resolve_native_language(
+            file_path=file_path,
+            db=mock_db,
+            tmdb_api_key=None,
+            tvdb_api_key="fake-key",
+        )
+        assert result == ["kor"]
+        mock_db.set_native_language_cache.assert_called_once_with(file_path, ["kor"], "tvdb_embedded_id", None)
+
+    def test_resolve_native_language_tvdb_no_key(self, mocker) -> None:
+        """resolve_native_language skips TVDB when no API key."""
+        from trimarr.native_language import resolve_native_language
+
+        # Mock NFO with only a tvdbid
+        mocker.patch(
+            "trimarr.native_language.discover_nfo",
+            return_value=Path("/fake/movie.nfo"),
+        )
+        mock_nfo = NfoMetadata(
+            title="Test",
+            imdb_id=None,
+            tmdb_id=None,
+            tvdb_id="7537283",
+        )
+        mocker.patch(
+            "trimarr.native_language.parse_nfo",
+            return_value=mock_nfo,
+        )
+
+        # Mock cache miss
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        mock_db.set_native_language_cache = mocker.MagicMock()
+
+        # Mock TVDB lookup should NOT be called
+        tvdb_mock = mocker.patch(
+            "trimarr.native_language._lookup_tvdb_by_id",
+        )
+
+        # Also mock IMDbPie and TMDb to fail
+        mocker.patch(
+            "trimarr.native_language._lookup_imdbpie_by_id",
+            return_value=None,
+        )
+        mocker.patch(
+            "trimarr.native_language._lookup_tmdb_by_id",
+            return_value=None,
+        )
+
+        file_path = Path("/data/Test/Test.mkv")
+        result = resolve_native_language(
+            file_path=file_path,
+            db=mock_db,
+            tmdb_api_key=None,
+            tvdb_api_key=None,  # No TVDB key
+        )
+        assert result is None
+        tvdb_mock.assert_not_called()
 
 
 class TestNormaliseForCompare:
