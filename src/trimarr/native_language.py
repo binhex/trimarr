@@ -923,6 +923,7 @@ def resolve_native_language(
     file_path: Path,
     db: Database | None,
     tmdb_api_key: str | None = None,
+    tvdb_api_key: str | None = None,
 ) -> list[str] | None:
     """Return ISO 639-2/B native language codes for *file_path*, or None.
 
