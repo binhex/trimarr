@@ -764,8 +764,8 @@ def _get_filename_title(file_path: Path) -> tuple[str, str | None]:
 
 def _get_directory_title(file_path: Path) -> tuple[str, str | None]:
     r"""Extract the show/movie title from the parent directory, walking up past
-    ``Season \d+``, ``Series \d+``, and ``Specials`` subdirectories to reach
-    the show root.
+    one or more consecutive ``Season \d+``, ``Series \d+``, or ``Specials``
+    subdirectories to reach the show root.
 
     For example, ``/data/Westworld/Season 3/file.mkv`` resolves to
     ``("westworld", None)`` instead of ``("season 3", None)``.
@@ -1065,8 +1065,9 @@ def _run_filename_directory_chain(
         title, year = title_fn(file_path)
         if not title:
             logger.debug(
-                "Skipping lookup for '%s' - could not determine title.",
+                "Skipping lookup for '%s' - could not determine title (year=%s).",
                 file_path.name,
+                year,
             )
             continue
         logger.debug(
