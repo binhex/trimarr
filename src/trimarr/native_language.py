@@ -772,10 +772,7 @@ def _get_directory_title(file_path: Path) -> tuple[str, str | None]:
     """
     parent = file_path.parent
     while parent.name and _TV_SUBDIR_RE.match(parent.name):
-        grandparent = parent.parent
-        if grandparent == parent:
-            break  # reached filesystem root
-        parent = grandparent
+        parent = parent.parent
     return parse_movie_title(parent)
 
 
