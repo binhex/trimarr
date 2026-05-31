@@ -85,6 +85,12 @@ _YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 
 _WORD_SEPARATORS = re.compile(r"[._\-+]")
 
+# TV show subdirectory names to skip when looking up the show root.
+# Matches "Season 1", "Season01", "Series 2", "Series2", "Specials",
+# "Specials 0" etc.  Case-insensitive.  Rejects "Seasons" (plural) to
+# avoid matching unrelated directories.
+_TV_SUBDIR_RE = re.compile(r"^(?:Season|Series|Specials)(?:\s*\d+)?$", re.IGNORECASE)
+
 
 def _extract_embedded_id(stem: str) -> tuple[str, str] | None:
     """Scan *stem* for an embedded IMDb, TMDb, or TVDB ID.
@@ -757,8 +763,20 @@ def _get_filename_title(file_path: Path) -> tuple[str, str | None]:
 
 
 def _get_directory_title(file_path: Path) -> tuple[str, str | None]:
-    """Extract movie title from the parent directory name via parse_movie_title."""
-    return parse_movie_title(file_path.parent)
+    r"""Extract the show/movie title from the parent directory, walking up past
+    ``Season \d+``, ``Series \d+``, and ``Specials`` subdirectories to reach
+    the show root.
+
+    For example, ``/data/Westworld/Season 3/file.mkv`` resolves to
+    ``("westworld", None)`` instead of ``("season 3", None)``.
+    """
+    parent = file_path.parent
+    while parent.name and _TV_SUBDIR_RE.match(parent.name):
+        grandparent = parent.parent
+        if grandparent == parent:
+            break  # reached filesystem root
+        parent = grandparent
+    return parse_movie_title(parent)
 
 
 def _lookup_chain(tmdb_api_key: str | None) -> list[tuple]:
@@ -1045,9 +1063,9 @@ def _run_filename_directory_chain(
     chain = _lookup_chain(tmdb_api_key)
     for lookup_fn, title_fn, source_label in chain:
         title, year = title_fn(file_path)
-        if not title or not year:
+        if not title:
             logger.debug(
-                "Skipping lookup for '%s' - could not determine title/year.",
+                "Skipping lookup for '%s' - could not determine title.",
                 file_path.name,
             )
             continue
