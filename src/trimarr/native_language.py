@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 from functools import partial
@@ -57,6 +58,13 @@ _EMBEDDED_IMDB_RE = re.compile(
 )
 _EMBEDDED_TMDB_RE = re.compile(r"""(?:\[tmdb-(\d+)\]|\{tmdb-(\d+)\}|tmdb-(\d+))""", re.VERBOSE | re.IGNORECASE)
 
+# TVDB API endpoints and constants.
+_TVDB_BASE_URL = "https://api4.thetvdb.com/v4"
+_TVDB_LOGIN_URL = f"{_TVDB_BASE_URL}/login"
+
+# Regex for filename-embedded TVDB IDs: {tvdb-12345}, [tvdb-12345], tvdb-12345
+_EMBEDDED_TVDB_RE = re.compile(r"""(?:\[tvdb-(\d+)\]|\{tvdb-(\d+)\}|tvdb-(\d+))""", re.VERBOSE | re.IGNORECASE)
+
 # Common release-group tags and container metadata to strip from filenames.
 _RELEASE_TAGS_RE = re.compile(
     r"""
@@ -68,7 +76,7 @@ _RELEASE_TAGS_RE = re.compile(
        REMUX|ENCODE|INTERNAL|READNFO|COMPLETE|
        HDR|HDR10|HDR10PLUS|SDR|DV|DoVi|DolbyVision|
        AMZN|NF|WEB|iTunes|MA|DSNP|HMAX|ATVP|
-       imdb-tt\d{7,}|tmdb-\d+)\b
+       imdb-tt\d{7,}|tmdb-\d+|tvdb-\d+)\b
     """,
     re.IGNORECASE | re.VERBOSE,
 )
@@ -621,6 +629,97 @@ def _lookup_tmdb_by_id(tmdb_id: str, api_key: str) -> list[str] | None:
         logger.debug("TMDb detail failed for id %s: %s", tmdb_id, exc)
         return None
     return _extract_tmdb_language_code(detail)
+
+
+def _tvdb_login(api_key: str) -> str | None:
+    """Authenticate with TVDB API and return a JWT token.
+
+    POST to ``/login`` with the API key. Returns the bearer token
+    string, or *None* on failure (network error, invalid key).
+    """
+    import json as _json
+
+    data = _json.dumps({"apikey": api_key}).encode()
+    req = urllib.request.Request(
+        _TVDB_LOGIN_URL,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = _json.loads(resp.read().decode())
+    except Exception as exc:
+        logger.debug("TVDB login failed: %s", exc)
+        return None
+    token: str | None = body.get("data", {}).get("token")
+    return token
+
+
+def _lookup_tvdb_by_id(tvdb_id: str, api_key: str) -> list[str] | None:
+    """Return ISO 639-2/B language codes via TVDB using a known TVDB ID.
+
+    Authenticates first (login → JWT), then fetches the series extended
+    record and extracts ``originalLanguage``. Returns a single-element
+    list with the normalised language code, or *None* on any failure.
+
+    Results are not cached separately — the caller (``resolve_native_language``)
+    handles database caching.
+    """
+    import json as _json
+
+    if not api_key:
+        return None
+
+    # Login to obtain JWT token
+    token = _tvdb_login(api_key)
+    if token is None:
+        return None
+
+    # Fetch series extended record
+    detail_url = f"{_TVDB_BASE_URL}/series/{tvdb_id}/extended"
+    req = urllib.request.Request(
+        detail_url,
+        headers={"Authorization": f"Bearer {token}"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = _json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            # Token expired — re-authenticate once
+            logger.debug("TVDB token expired, re-authenticating...")
+            token = _tvdb_login(api_key)
+            if token is None:
+                return None
+            req = urllib.request.Request(
+                detail_url,
+                headers={"Authorization": f"Bearer {token}"},
+                method="GET",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    body = _json.loads(resp.read().decode())
+            except Exception as exc2:
+                logger.debug("TVDB detail failed after re-auth for id %s: %s", tvdb_id, exc2)
+                return None
+        else:
+            logger.debug("TVDB detail failed for id %s (HTTP %s)", tvdb_id, exc.code)
+            return None
+    except Exception as exc:
+        logger.debug("TVDB detail failed for id %s: %s", tvdb_id, exc)
+        return None
+
+    raw_lang: str | None = body.get("data", {}).get("originalLanguage")
+    if not raw_lang:
+        logger.debug("TVDB no originalLanguage for id %s.", tvdb_id)
+        return None
+
+    code = normalize_language_code(raw_lang.lower())
+    if code:
+        return [code]
+    return None
 
 
 _CACHE_MISS = object()
