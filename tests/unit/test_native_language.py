@@ -30,6 +30,7 @@ class TestParseMovieTitle:
             ("/data/Movie_Title_2023_HDR.mkv", "movie title", "2023"),
             ("/data/Das.Boot.1981.DC.1080p.BluRay.x264-CtrlHD.mkv", "das boot", "1981"),
             ("/data/2024.Movie.1080p.mkv", "movie", "2024"),
+            ("/data/Show.Name.2020.{tvdb-7537283}.mkv", "show name", "2020"),
         ],
     )
     def test_parse_movie_title(
@@ -40,6 +41,13 @@ class TestParseMovieTitle:
     ) -> None:
         result = parse_movie_title(Path(path_str))
         assert result == (expected_title, expected_year)
+
+    def test_parse_movie_title_embedded_tvdb(self) -> None:
+        """Parse {tvdb-12345} from filename stem."""
+        from trimarr.native_language import _extract_embedded_id
+
+        result = _extract_embedded_id("Show.Name.2020.{tvdb-7537283}.mkv")
+        assert result == ("tvdb", "7537283")
 
     def test_no_year(self) -> None:
         result = parse_movie_title(Path("/data/SomeMovie.mkv"))
@@ -1441,6 +1449,10 @@ class TestExtractEmbeddedId:
             ("Martin (1977) {tmdb-77914} 2160p", ("tmdb", "77914")),
             ("Martin [tmdb-77914] 2160p", ("tmdb", "77914")),
             ("Martin tmdb-77914 2160p", ("tmdb", "77914")),
+            # TVDB: curly, square, bare
+            ("Show.Name.2020.{tvdb-7537283}.mkv", ("tvdb", "7537283")),
+            ("Show.Name.2020.[tvdb-7537283].mkv", ("tvdb", "7537283")),
+            ("Show.Name.2020.tvdb-7537283.mkv", ("tvdb", "7537283")),
         ],
     )
     def test_extract_embedded_id(self, stem: str, expected: tuple[str, str]) -> None:
@@ -1456,6 +1468,7 @@ class TestExtractEmbeddedId:
             "Martin [some-other-id] 2160p",
             "tmdb-abc",  # TMDb ID must be numeric
             "imdb-movie",  # IMDb ID must start with tt
+            "tvdb-abc",  # TVDB ID must be numeric
         ],
     )
     def test_extract_embedded_id_no_match(self, stem: str) -> None:

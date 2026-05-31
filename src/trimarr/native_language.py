@@ -87,14 +87,15 @@ _WORD_SEPARATORS = re.compile(r"[._\-+]")
 
 
 def _extract_embedded_id(stem: str) -> tuple[str, str] | None:
-    """Scan *stem* for an embedded IMDb or TMDb ID.
+    """Scan *stem* for an embedded IMDb, TMDb, or TVDB ID.
 
     Supports curly ``{imdb-tt...}``, square ``[imdb-tt...]``, and
-    bare ``imdb-tt...`` syntax (same for ``tmdb-...``). IMDb IDs
-    must be at least 7 characters long (``tt0000001``).
+    bare ``imdb-tt...`` syntax (same for ``tmdb-...`` and ``tvdb-...``).
+    IMDb IDs must be at least 7 characters long (``tt0000001``).
 
-    Returns ``("imdb", "tt0077914")``, ``("tmdb", "77914")``, or
-    ``None`` if no recognised ID pattern is found.
+    Returns ``("imdb", "tt0077914")``, ``("tmdb", "77914")``,
+    ``("tvdb", "7537283")``, or *None* if no recognised ID pattern
+    is found.
     """
     m = _EMBEDDED_IMDB_RE.search(stem)
     if m:
@@ -106,6 +107,10 @@ def _extract_embedded_id(stem: str) -> tuple[str, str] | None:
     if m:
         tmdb_id = m.group(1) or m.group(2) or m.group(3)
         return ("tmdb", tmdb_id)
+    m = _EMBEDDED_TVDB_RE.search(stem)
+    if m:
+        tvdb_id = m.group(1) or m.group(2) or m.group(3)
+        return ("tvdb", tvdb_id)
     return None
 
 
