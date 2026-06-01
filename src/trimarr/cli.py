@@ -291,6 +291,17 @@ Examples:
     help="If specified, all audio tracks will be kept regardless of language.",
 )
 @click.option(
+    "--keep-undefined-audio",
+    is_flag=True,
+    default=False,
+    help=(
+        'If specified, audio tracks with an undefined language code ("und")'
+        " are kept rather than dropped by the language filter.  Useful when"
+        " source files have missing or incorrect language tags."
+        " Ignored when --keep-audio is set."
+    ),
+)
+@click.option(
     "--keep-native-audio",
     is_flag=True,
     default=False,
@@ -516,6 +527,7 @@ def cli(
     delete_metadata_title: bool,
     keep_subtitles: bool,
     keep_audio: bool,
+    keep_undefined_audio: bool,
     keep_native_audio: bool,
     tmdb_api_key: str | None,
     tvdb_api_key: str | None,
@@ -573,6 +585,7 @@ def cli(
             delete_metadata_title=delete_metadata_title,
             keep_subtitles=keep_subtitles,
             keep_audio=keep_audio,
+            keep_undefined_audio=keep_undefined_audio,
             keep_native_audio=keep_native_audio,
             tmdb_api_key=tmdb_api_key,
             tvdb_api_key=tvdb_api_key,

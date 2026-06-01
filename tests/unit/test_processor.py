@@ -1259,6 +1259,79 @@ class TestNoneLanguageTrackFiltering:
         logger.warning.assert_called_once()
 
 
+class TestKeepUndefinedAudio:
+    """Verify keep_undefined_audio parameter behaviour."""
+
+    def test_should_keep_audio_language_match(self) -> None:
+        """_should_keep_audio returns True when track language matches."""
+        from trimarr.processor import _TRACK_AUDIO, MkvTrack, _should_keep_audio
+
+        track = MkvTrack(id=1, type=_TRACK_AUDIO, language="eng", name=None, default_track=False, channels=2)
+        assert _should_keep_audio(track, ["eng"], keep_audio=False, keep_undefined_audio=False) is True
+        assert _should_keep_audio(track, ["fre"], keep_audio=False, keep_undefined_audio=False) is False
+
+    def test_should_keep_audio_keep_audio_flag(self) -> None:
+        """_should_keep_audio returns True when keep_audio is set."""
+        from trimarr.processor import _TRACK_AUDIO, MkvTrack, _should_keep_audio
+
+        track = MkvTrack(id=1, type=_TRACK_AUDIO, language=None, name=None, default_track=False, channels=2)
+        assert _should_keep_audio(track, ["eng"], keep_audio=True, keep_undefined_audio=False) is True
+
+    def test_should_keep_audio_undefined(self) -> None:
+        """_should_keep_audio returns True when undefined and keep_undefined_audio is set."""
+        from trimarr.processor import _TRACK_AUDIO, MkvTrack, _should_keep_audio
+
+        track = MkvTrack(id=1, type=_TRACK_AUDIO, language=None, name=None, default_track=False, channels=2)
+        assert _should_keep_audio(track, ["eng"], keep_audio=False, keep_undefined_audio=True) is True
+        assert _should_keep_audio(track, ["eng"], keep_audio=False, keep_undefined_audio=False) is False
+
+    def test_keep_undefined_audio_keeps_none_language_track(self) -> None:
+        """Undefined audio track (language=None) is kept when keep_undefined_audio=True."""
+        from trimarr.processor import _TRACK_AUDIO, MkvTrack, _classify_track_by_language, _FilterResult
+
+        result = _FilterResult()
+        track = MkvTrack(id=1, type=_TRACK_AUDIO, language=None, name=None, default_track=False, channels=2)
+        _classify_track_by_language(
+            track, ["eng"], keep_audio=False, keep_subtitles=False, keep_undefined_audio=True, result=result
+        )
+        assert 1 in result.audio_keep
+        assert 1 not in result.audio_drop
+
+    def test_keep_undefined_audio_false_drops_none_language_track(self) -> None:
+        """Undefined audio track (language=None) is dropped when keep_undefined_audio=False (default)."""
+        from trimarr.processor import _TRACK_AUDIO, MkvTrack, _classify_track_by_language, _FilterResult
+
+        result = _FilterResult()
+        track = MkvTrack(id=1, type=_TRACK_AUDIO, language=None, name=None, default_track=False, channels=2)
+        _classify_track_by_language(
+            track, ["eng"], keep_audio=False, keep_subtitles=False, keep_undefined_audio=False, result=result
+        )
+        assert 1 in result.audio_drop
+        assert 1 not in result.audio_keep
+
+    def test_keep_undefined_audio_ignores_subtitle_tracks(self) -> None:
+        """Undefined subtitle track is still dropped — flag is audio-only."""
+        from trimarr.processor import _TRACK_SUBTITLES, MkvTrack, _classify_track_by_language, _FilterResult
+
+        result = _FilterResult()
+        track = MkvTrack(id=1, type=_TRACK_SUBTITLES, language=None, name=None, default_track=False, channels=None)
+        _classify_track_by_language(
+            track, ["eng"], keep_audio=False, keep_subtitles=False, keep_undefined_audio=True, result=result
+        )
+        assert 1 in result.sub_drop
+
+    def test_keep_undefined_audio_noop_when_keep_audio_set(self) -> None:
+        """keep_undefined_audio has no effect when keep_audio=True (all audio kept anyway)."""
+        from trimarr.processor import _TRACK_AUDIO, MkvTrack, _classify_track_by_language, _FilterResult
+
+        result = _FilterResult()
+        track = MkvTrack(id=1, type=_TRACK_AUDIO, language="und", name=None, default_track=False, channels=2)
+        _classify_track_by_language(
+            track, ["eng"], keep_audio=True, keep_subtitles=False, keep_undefined_audio=False, result=result
+        )
+        assert 1 in result.audio_keep
+
+
 # ---------------------------------------------------------------------------
 # I5: Audio safety fallback fires while subtitles still need trimming
 # ---------------------------------------------------------------------------

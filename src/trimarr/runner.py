@@ -46,6 +46,7 @@ class _ProcessingConfig:
     strip_subtitle_regex_patterns: list[re.Pattern] | None = None
     tmdb_api_key: str | None = None
     tvdb_api_key: str | None = None
+    keep_undefined_audio: bool = False
 
 
 @dataclass
@@ -139,6 +140,7 @@ def _build_profile_hash(
     strip_lower_channels: bool,
     strip_commentary: bool,
     strip_subtitle_regex_patterns: list[re.Pattern] | None = None,
+    keep_undefined_audio: bool = False,
 ) -> str:
     """Return a stable SHA-256 hex digest encoding the current processing profile.
 
@@ -172,12 +174,14 @@ def _build_profile_hash(
         "strip_commentary": strip_commentary,
         "strip_lower_channels": strip_lower_channels,
     }
-    # Conditionally include subtitle regex patterns so the hash stays
+    # Conditionally include optional features so the hash stays
     # backward-compatible with databases created before this feature existed.
     # When no patterns are configured the profile dict has exactly the same
     # keys as the pre-feature code, avoiding a full re-scan on upgrade.
     if strip_subtitle_regex_patterns:
         profile["subtitle_regex_patterns"] = sorted(p.pattern for p in strip_subtitle_regex_patterns)
+    if keep_undefined_audio:
+        profile["keep_undefined_audio"] = True
     return hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
 
 
@@ -378,6 +382,7 @@ def _process_one_file(
         strip_lower_channels=cfg.strip_lower_channels,
         strip_commentary=cfg.strip_commentary,
         strip_subtitle_regex_patterns=cfg.strip_subtitle_regex_patterns,
+        keep_undefined_audio=cfg.keep_undefined_audio,
     )
 
     # Skip unchanged files processed with the same profile
@@ -413,6 +418,7 @@ def _process_one_file(
         strip_lower_channels=cfg.strip_lower_channels,
         strip_commentary=cfg.strip_commentary,
         strip_subtitle_regex_patterns=cfg.strip_subtitle_regex_patterns,
+        keep_undefined_audio=cfg.keep_undefined_audio,
     )
 
     if cmd is None:
@@ -631,6 +637,7 @@ def run(
     keep_native_audio: bool = False,
     tmdb_api_key: str | None = None,
     tvdb_api_key: str | None = None,
+    keep_undefined_audio: bool = False,
     pre_process: str | None = None,
     post_process: str | None = None,
     command_timeout_mins: int = 5,
@@ -663,6 +670,7 @@ def run(
         strip_lower_channels=strip_lower_channels,
         strip_commentary=strip_commentary,
         strip_subtitle_regex_patterns=strip_subtitle_regex_patterns,
+        keep_undefined_audio=keep_undefined_audio,
     )
 
     cfg = _ProcessingConfig(
@@ -681,6 +689,7 @@ def run(
         strip_subtitle_regex_patterns=strip_subtitle_regex_patterns,
         tmdb_api_key=tmdb_api_key,
         tvdb_api_key=tvdb_api_key,
+        keep_undefined_audio=keep_undefined_audio,
     )
 
     command_timeout_seconds: int | None = command_timeout_mins * 60 if command_timeout_mins > 0 else None

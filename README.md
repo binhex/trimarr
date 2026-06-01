@@ -90,6 +90,7 @@ trimarr --help
 | `--keep-subtitles` | Keep all subtitle tracks regardless of language. | `false` | — | `flag` |
 | `--keep-audio` | Keep all audio tracks regardless of language. | `false` | — | `flag` |
 | `--keep-native-audio` | Identify the file's native/original spoken language(s) via IMDb (primary), TMDb, and TVDB (fallbacks) and keep all audio tracks in those languages alongside your `--language` preference. Ignored when `--keep-audio` is set. First-time lookups require an internet connection; results are cached in the database. | `false` | — | `flag` |
+| `--keep-undefined-audio` | If specified, audio tracks with an undefined language code ("und") are kept rather than dropped by the language filter. Useful when source files have missing or incorrect language tags. Ignored when `--keep-audio` is set. | `false` | — | `flag` |
 | `--tmdb-api-key` | TMDb API key used as fallback when IMDbPie cannot identify a file's native language. Optional — without it, TMDb lookups are silently skipped. | — | `<key>` | `string` |
 | `--tvdb-api-key` | TVDB API key used as fallback when IMDbPie and TMDb cannot identify a file's native language. Useful for TV shows whose NFO files contain only a TVDB ID. Optional — without it, TVDB lookups are silently skipped. | — | `<key>` | `string` |
 | `--no-backup` | Delete the original file after successful processing instead of renaming it to `<name>.bak`. By default a backup is always created. | `false` | — | `flag` |
