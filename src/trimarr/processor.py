@@ -368,6 +368,20 @@ def probe_file(mkvmerge_path: str, file_path: Path) -> list[MkvTrack]:
 # ---------------------------------------------------------------------------
 
 
+def _should_keep_audio(
+    track: MkvTrack,
+    language: list[str],
+    keep_audio: bool,
+    keep_undefined_audio: bool,
+) -> bool:
+    """Return *True* if the audio track should be kept based on language rules."""
+    if keep_audio:
+        return True
+    if track.language in language:
+        return True
+    return track.language is None and keep_undefined_audio
+
+
 def _classify_track_by_language(
     track: MkvTrack,
     language: list[str],
@@ -387,7 +401,7 @@ def _classify_track_by_language(
     Only applies to audio tracks.
     """
     if track.type == _TRACK_AUDIO:
-        if keep_audio or track.language in language or (track.language is None and keep_undefined_audio):
+        if _should_keep_audio(track, language, keep_audio, keep_undefined_audio):
             result.audio_keep.append(track.id)
         else:
             result.audio_drop.append(track.id)
