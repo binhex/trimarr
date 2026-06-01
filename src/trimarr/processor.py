@@ -373,7 +373,7 @@ def _classify_track_by_language(
     language: list[str],
     keep_audio: bool,
     keep_subtitles: bool,
-    keep_undefined_audio: bool,  # NEW
+    keep_undefined_audio: bool,
     result: _FilterResult,
 ) -> None:
     """Classify a single track as keep or drop based on language rules.
@@ -387,7 +387,7 @@ def _classify_track_by_language(
     Only applies to audio tracks.
     """
     if track.type == _TRACK_AUDIO:
-        if keep_audio or track.language in language or track.language is None and keep_undefined_audio:
+        if keep_audio or track.language in language or (track.language is None and keep_undefined_audio):
             result.audio_keep.append(track.id)
         else:
             result.audio_drop.append(track.id)
@@ -403,7 +403,7 @@ def _apply_language_filter(
     language: list[str],
     keep_audio: bool,
     keep_subtitles: bool,
-    keep_undefined_audio: bool = False,  # NEW
+    keep_undefined_audio: bool = False,
 ) -> _FilterResult:
     """Phase 1 — classify each track as keep or drop based on language.
 
@@ -897,7 +897,7 @@ def build_mkvmerge_command(
     strip_lower_channels: bool = False,
     strip_commentary: bool = False,
     strip_subtitle_regex_patterns: list[re.Pattern] | None = None,
-    keep_undefined_audio: bool = False,  # NEW
+    keep_undefined_audio: bool = False,
 ) -> list[str] | None:
     """Build the mkvmerge argv for *input_path*; return *None* if no changes are needed.
 

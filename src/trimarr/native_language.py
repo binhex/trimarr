@@ -1017,7 +1017,7 @@ def _resolve_embedded_id_phase(
     file_path: Path,
     db: Database | None,
     tmdb_api_key: str | None,
-    tvdb_api_key: str | None,  # NEW
+    tvdb_api_key: str | None,
 ) -> list[str] | None:
     """Try to resolve native language via an embedded ID in *file_stem*.
 
