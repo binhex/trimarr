@@ -373,15 +373,21 @@ def _classify_track_by_language(
     language: list[str],
     keep_audio: bool,
     keep_subtitles: bool,
+    keep_undefined_audio: bool,  # NEW
     result: _FilterResult,
 ) -> None:
     """Classify a single track as keep or drop based on language rules.
 
     Mutates *result* in place by appending the track ID to the appropriate
     keep/drop list.
+
+    When *keep_undefined_audio* is *True* and the track's language is *None*
+    (from an ``und`` MKV tag), the track is kept rather than dropped,
+    preventing accidental loss of audio whose language is simply unknown.
+    Only applies to audio tracks.
     """
     if track.type == _TRACK_AUDIO:
-        if keep_audio or track.language in language:
+        if keep_audio or track.language in language or track.language is None and keep_undefined_audio:
             result.audio_keep.append(track.id)
         else:
             result.audio_drop.append(track.id)
@@ -397,6 +403,7 @@ def _apply_language_filter(
     language: list[str],
     keep_audio: bool,
     keep_subtitles: bool,
+    keep_undefined_audio: bool = False,  # NEW
 ) -> _FilterResult:
     """Phase 1 — classify each track as keep or drop based on language.
 
@@ -412,7 +419,7 @@ def _apply_language_filter(
     language = [_ISO_639_2_T_TO_B.get(c, c) for c in language]
     result = _FilterResult()
     for track in tracks:
-        _classify_track_by_language(track, language, keep_audio, keep_subtitles, result)
+        _classify_track_by_language(track, language, keep_audio, keep_subtitles, keep_undefined_audio, result)
     # Snapshot before fallbacks modify the drop lists (used for logging only).
     result.language_audio_drop_ids = frozenset(result.audio_drop)
     result.language_sub_drop_ids = frozenset(result.sub_drop)
@@ -890,6 +897,7 @@ def build_mkvmerge_command(
     strip_lower_channels: bool = False,
     strip_commentary: bool = False,
     strip_subtitle_regex_patterns: list[re.Pattern] | None = None,
+    keep_undefined_audio: bool = False,  # NEW
 ) -> list[str] | None:
     """Build the mkvmerge argv for *input_path*; return *None* if no changes are needed.
 
@@ -897,7 +905,7 @@ def build_mkvmerge_command(
     the final command.  Returns *None* when no track or metadata changes are required
     so callers can skip mkvmerge and mark the file as already processed.
     """
-    result = _apply_language_filter(tracks, language, keep_audio, keep_subtitles)
+    result = _apply_language_filter(tracks, language, keep_audio, keep_subtitles, keep_undefined_audio)
     _apply_audio_fallbacks(result, tracks, language, logger, input_path)
     _apply_subtitle_fallback(result, language, logger, input_path)
     _apply_strip_commentary(result, tracks, keep_audio, keep_subtitles, logger, input_path, strip_commentary)
