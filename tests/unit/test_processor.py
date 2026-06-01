@@ -1262,6 +1262,29 @@ class TestNoneLanguageTrackFiltering:
 class TestKeepUndefinedAudio:
     """Verify keep_undefined_audio parameter behaviour."""
 
+    def test_should_keep_audio_language_match(self) -> None:
+        """_should_keep_audio returns True when track language matches."""
+        from trimarr.processor import _TRACK_AUDIO, MkvTrack, _should_keep_audio
+
+        track = MkvTrack(id=1, type=_TRACK_AUDIO, language="eng", name=None, default_track=False, channels=2)
+        assert _should_keep_audio(track, ["eng"], keep_audio=False, keep_undefined_audio=False) is True
+        assert _should_keep_audio(track, ["fre"], keep_audio=False, keep_undefined_audio=False) is False
+
+    def test_should_keep_audio_keep_audio_flag(self) -> None:
+        """_should_keep_audio returns True when keep_audio is set."""
+        from trimarr.processor import _TRACK_AUDIO, MkvTrack, _should_keep_audio
+
+        track = MkvTrack(id=1, type=_TRACK_AUDIO, language=None, name=None, default_track=False, channels=2)
+        assert _should_keep_audio(track, ["eng"], keep_audio=True, keep_undefined_audio=False) is True
+
+    def test_should_keep_audio_undefined(self) -> None:
+        """_should_keep_audio returns True when undefined and keep_undefined_audio is set."""
+        from trimarr.processor import _TRACK_AUDIO, MkvTrack, _should_keep_audio
+
+        track = MkvTrack(id=1, type=_TRACK_AUDIO, language=None, name=None, default_track=False, channels=2)
+        assert _should_keep_audio(track, ["eng"], keep_audio=False, keep_undefined_audio=True) is True
+        assert _should_keep_audio(track, ["eng"], keep_audio=False, keep_undefined_audio=False) is False
+
     def test_keep_undefined_audio_keeps_none_language_track(self) -> None:
         """Undefined audio track (language=None) is kept when keep_undefined_audio=True."""
         from trimarr.processor import _TRACK_AUDIO, MkvTrack, _classify_track_by_language, _FilterResult
