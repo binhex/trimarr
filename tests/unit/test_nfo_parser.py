@@ -303,19 +303,19 @@ class TestDiscoverNfo:
         result = discover_nfo(mkv)
         assert result == tvshow_nfo
 
-    def test_episode_nfo_takes_priority(self, tmp_path: Path) -> None:
-        """Episode-level NFO found before tvshow.nfo upwalk."""
+    def test_tvshow_nfo_preferred_over_stem_episode_nfo(self, tmp_path: Path) -> None:
+        """tvshow.nfo preferred over same-stem episode .nfo for TV shows."""
         series = tmp_path / "Breaking Bad"
         season = series / "Season 1"
         season.mkdir(parents=True)
         episode_nfo = season / "Breaking Bad S01E01.nfo"
-        episode_nfo.write_text("<movie><title>Episode</title></movie>")
+        episode_nfo.write_text("<episodedetails><title>Pilot</title></episodedetails>")
         tvshow_nfo = series / "tvshow.nfo"
-        tvshow_nfo.write_text("<tvshow><title>Breaking Bad</title></tvshow>")
+        tvshow_nfo.write_text("<tvshow><title>Breaking Bad</title><tvdbid>7537283</tvdbid></tvshow>")
         mkv = season / "Breaking Bad S01E01.mkv"
         mkv.write_text("dummy")
         result = discover_nfo(mkv)
-        assert result == episode_nfo
+        assert result == tvshow_nfo, f"Expected tvshow.nfo ({tvshow_nfo}) but got {result}"
 
     def test_stem_match_over_any_nfo(self, tmp_path: Path) -> None:
         """Same-stem .nfo is preferred over other .nfo files in dir."""
@@ -348,3 +348,35 @@ class TestDiscoverNfo:
         mkv.write_text("dummy")
         result = discover_nfo(mkv)
         assert result == nfo
+
+
+class TestNfoIntegration:
+    """Integration tests for discover_nfo + parse_nfo together."""
+
+    def test_episodedetails_nfo_falls_back_to_tvshow_nfo(self, tmp_path: Path) -> None:
+        """When same-stem NFO uses <episodedetails>, tvshow.nfo is used."""
+        series = tmp_path / "A Knight of the Seven Kingdoms"
+        season = series / "Season 1"
+        season.mkdir(parents=True)
+        episode_nfo = season / "S01E01.nfo"
+        episode_nfo.write_text("<episodedetails><title>The Hedge Knight</title></episodedetails>")
+        tvshow_nfo = series / "tvshow.nfo"
+        tvshow_nfo.write_text(
+            "<tvshow><title>A Knight of the Seven Kingdoms</title>"
+            "<tvdbid>433631</tvdbid><imdbid>tt27497448</imdbid>"
+            "</tvshow>"
+        )
+        mkv = season / "S01E01.mkv"
+        mkv.write_text("dummy")
+
+        # discover_nfo should find tvshow.nfo, not the episode NFO
+        nfo_path = discover_nfo(mkv)
+        assert nfo_path == tvshow_nfo, f"Expected tvshow.nfo ({tvshow_nfo}) but got {nfo_path}"
+
+        # parse_nfo should extract tvshow.nfo metadata
+        meta = parse_nfo(nfo_path)
+        assert meta is not None, "tvshow.nfo should parse successfully"
+        assert meta.title == "A Knight of the Seven Kingdoms"
+        assert meta.tvdb_id == "433631"
+        assert meta.imdb_id == "tt27497448"
+        assert meta.tmdb_id is None  # not in this tvshow.nfo
