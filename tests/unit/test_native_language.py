@@ -1922,3 +1922,33 @@ class TestLookupTvdb:
 
         result = _lookup_tvdb_by_id("12345", "fake-api-key")
         assert result is None
+
+
+class TestGetNfoMetadata:
+    """Tests for _get_nfo_metadata() — NFO discovery + fallback chain."""
+
+    def test_episodedetails_nfo_falls_back_to_tvshow_nfo(self, tmp_path: Path) -> None:
+        """When same-stem NFO has <episodedetails> root, tvshow.nfo metadata is returned."""
+        series = tmp_path / "A Knight of the Seven Kingdoms"
+        season = series / "Season 1"
+        season.mkdir(parents=True)
+        episode_nfo = season / "S01E01.nfo"
+        episode_nfo.write_text("<episodedetails><title>The Hedge Knight</title></episodedetails>")
+        tvshow_nfo = series / "tvshow.nfo"
+        tvshow_nfo.write_text(
+            "<tvshow><title>A Knight of the Seven Kingdoms</title>"
+            "<tvdbid>433631</tvdbid><imdbid>tt27497448</imdbid>"
+            "</tvshow>"
+        )
+        mkv = season / "S01E01.mkv"
+        mkv.write_text("dummy")
+
+        from trimarr.native_language import _get_nfo_metadata
+
+        meta = _get_nfo_metadata(mkv)
+        assert meta is not None, (
+            "_get_nfo_metadata should return tvshow.nfo's metadata when episode NFO has <episodedetails> root"
+        )
+        assert meta.title == "A Knight of the Seven Kingdoms"
+        assert meta.tvdb_id == "433631"
+        assert meta.imdb_id == "tt27497448"

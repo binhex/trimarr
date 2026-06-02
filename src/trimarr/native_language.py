@@ -17,7 +17,7 @@ import urllib.request
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
-from trimarr._nfo_parser import NfoMetadata, discover_nfo, parse_nfo
+from trimarr._nfo_parser import _MAX_TVSHOW_UPWALK_DEPTH, NfoMetadata, discover_nfo, parse_nfo
 from trimarr.processor import _ISO_639_1_TO_2, normalize_language_code
 
 # Lazy module-level imports — attempted once at load time, cached in module
@@ -802,13 +802,45 @@ def _describe_failure(source_label: str, tmdb_api_key: str | None) -> str:
 def _get_nfo_metadata(file_path: Path) -> NfoMetadata | None:
     """Discover and parse an .nfo file for *file_path*.
 
+    Discovery uses same-stem NFO first (standard for movies).  When
+    parsing fails (e.g. a Sonarr episode NFO with ``<episodedetails>``
+    root) a ``tvshow.nfo`` upwalk fallback is attempted to retrieve
+    series-level IMDb / TMDb / TVDB IDs.
+
     Returns structured metadata, or *None* if no suitable .nfo file
     exists or cannot be parsed.
     """
     nfo_path = discover_nfo(file_path)
-    if nfo_path is None:
+    if nfo_path is not None:
+        meta = parse_nfo(nfo_path)
+        if meta is not None:
+            return meta
+        # If discover_nfo already returned tvshow.nfo and parse failed,
+        # the fallback (below) would only re-discover and re-parse it.
+        if nfo_path.stem.lower() == "tvshow":
+            return None
+    else:
+        # No NFO found at all — fallback adds nothing, skip it.
         return None
-    return parse_nfo(nfo_path)
+
+    # Parse failed — the NFO may be a Sonarr episode NFO with
+    # <episodedetails> root.  Try tvshow.nfo upwalk for series-level IDs.
+    current = file_path.parent
+    for _ in range(_MAX_TVSHOW_UPWALK_DEPTH):
+        tvshow_candidates = sorted(current.glob("*.[nN][fF][oO]"))
+        for candidate in tvshow_candidates:
+            if candidate.stem.lower() == "tvshow":
+                meta = parse_nfo(candidate)
+                if meta is not None and (
+                    meta.imdb_id or meta.tmdb_id or meta.tvdb_id or meta.title or meta.original_title
+                ):
+                    return meta
+        parent_of = current.parent
+        if parent_of == current:
+            break
+        current = parent_of
+
+    return None
 
 
 def _lookup_and_cache(

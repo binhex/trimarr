@@ -303,15 +303,15 @@ class TestDiscoverNfo:
         result = discover_nfo(mkv)
         assert result == tvshow_nfo
 
-    def test_episode_nfo_takes_priority(self, tmp_path: Path) -> None:
-        """Episode-level NFO found before tvshow.nfo upwalk."""
+    def test_stem_match_over_tvshow_upwalk(self, tmp_path: Path) -> None:
+        """Same-stem episode .nfo found before tvshow.nfo upwalk."""
         series = tmp_path / "Breaking Bad"
         season = series / "Season 1"
         season.mkdir(parents=True)
         episode_nfo = season / "Breaking Bad S01E01.nfo"
-        episode_nfo.write_text("<movie><title>Episode</title></movie>")
+        episode_nfo.write_text("<episodedetails><title>Pilot</title></episodedetails>")
         tvshow_nfo = series / "tvshow.nfo"
-        tvshow_nfo.write_text("<tvshow><title>Breaking Bad</title></tvshow>")
+        tvshow_nfo.write_text("<tvshow><title>Breaking Bad</title><tvdbid>7537283</tvdbid></tvshow>")
         mkv = season / "Breaking Bad S01E01.mkv"
         mkv.write_text("dummy")
         result = discover_nfo(mkv)
