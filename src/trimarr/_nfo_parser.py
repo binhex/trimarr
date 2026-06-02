@@ -50,14 +50,11 @@ def discover_nfo(mkv_path: Path) -> Path | None:
     """Locate the ``.nfo`` file corresponding to *mkv_path*.
 
     Discovery order:
-    1. TV show root — walk up from the MKV's directory, checking each
+    1. Same stem — ``{mkv_stem}.nfo`` in the same directory.
+    2. Any ``.nfo`` — first alphabetical ``*.nfo`` in the same directory.
+    3. TV show root — walk up from the MKV's directory, checking each
        parent for ``tvshow.nfo`` (up to ``_MAX_TVSHOW_UPWALK_DEPTH``
-       levels).  Sonarr TV episode NFOs use ``<episodedetails>`` root
-       which is useless for series-level IDs; ``tvshow.nfo`` contains
-       the IMDb / TMDb / TVDB series identifiers needed for native
-       language lookups.
-    2. Same stem — ``{mkv_stem}.nfo`` in the same directory.
-    3. Any ``.nfo`` — first alphabetical ``*.nfo`` in the same directory.
+       levels).
 
     Returns:
         Path to the first matching ``.nfo`` file, or *None* if no suitable
@@ -65,11 +62,17 @@ def discover_nfo(mkv_path: Path) -> Path | None:
     """
     parent = mkv_path.parent
 
-    # 1. Walk up for tvshow.nfo (case-insensitive) — TV series IDs live in
-    #    tvshow.nfo, not in episode-level NFOs (which use <episodedetails>
-    #    root and contain only episode-level data).  Prioritising this avoids
-    #    failing to find series-level IMDb / TMDb / TVDB IDs for native
-    #    language lookups on Sonarr-managed TV shows.
+    # 1. Same stem
+    stem_nfo = parent / f"{mkv_path.stem}.nfo"
+    if stem_nfo.is_file():
+        return stem_nfo
+
+    # 2. Any .nfo in directory (case-insensitive glob)
+    nfo_files = sorted(parent.glob("*.[nN][fF][oO]"))
+    if nfo_files:
+        return nfo_files[0]
+
+    # 3. Walk up for tvshow.nfo (case-insensitive)
     current = parent
     for _ in range(_MAX_TVSHOW_UPWALK_DEPTH):
         tvshow_candidates = sorted(current.glob("*.[nN][fF][oO]"))
@@ -80,16 +83,6 @@ def discover_nfo(mkv_path: Path) -> Path | None:
         if parent_of == current:
             break  # reached filesystem root
         current = parent_of
-
-    # 2. Same stem (movie / episode NFO when no tvshow.nfo exists)
-    stem_nfo = parent / f"{mkv_path.stem}.nfo"
-    if stem_nfo.is_file():
-        return stem_nfo
-
-    # 3. Any .nfo in directory (case-insensitive glob)
-    nfo_files = sorted(parent.glob("*.[nN][fF][oO]"))
-    if nfo_files:
-        return nfo_files[0]
 
     return None
 

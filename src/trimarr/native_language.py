@@ -802,13 +802,36 @@ def _describe_failure(source_label: str, tmdb_api_key: str | None) -> str:
 def _get_nfo_metadata(file_path: Path) -> NfoMetadata | None:
     """Discover and parse an .nfo file for *file_path*.
 
+    Discovery uses same-stem NFO first (standard for movies).  When
+    parsing fails (e.g. a Sonarr episode NFO with ``<episodedetails>``
+    root) a ``tvshow.nfo`` upwalk fallback is attempted to retrieve
+    series-level IMDb / TMDb / TVDB IDs.
+
     Returns structured metadata, or *None* if no suitable .nfo file
     exists or cannot be parsed.
     """
     nfo_path = discover_nfo(file_path)
-    if nfo_path is None:
-        return None
-    return parse_nfo(nfo_path)
+    if nfo_path is not None:
+        meta = parse_nfo(nfo_path)
+        if meta is not None:
+            return meta
+
+    # Parse failed — the NFO may be a Sonarr episode NFO with
+    # <episodedetails> root.  Try tvshow.nfo upwalk for series-level IDs.
+    current = file_path.parent
+    for _ in range(3):
+        tvshow_candidates = sorted(current.glob("*.[nN][fF][oO]"))
+        for candidate in tvshow_candidates:
+            if candidate.stem.lower() == "tvshow":
+                meta = parse_nfo(candidate)
+                if meta is not None and (meta.imdb_id or meta.tmdb_id or meta.tvdb_id):
+                    return meta
+        parent_of = current.parent
+        if parent_of == current:
+            break
+        current = parent_of
+
+    return None
 
 
 def _lookup_and_cache(
