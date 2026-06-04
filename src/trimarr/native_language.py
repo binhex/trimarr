@@ -799,11 +799,6 @@ def _describe_failure(source_label: str, tmdb_api_key: str | None) -> str:
     return "no match from IMDbPie"
 
 
-def _meta_has_usable_id_or_title(meta: NfoMetadata) -> bool:
-    """Return True if *meta* has at least one ID or title field set."""
-    return bool(meta.imdb_id or meta.tmdb_id or meta.tvdb_id or meta.title or meta.original_title)
-
-
 def _upwalk_tvshow_nfo(file_path: Path) -> NfoMetadata | None:
     """Walk up from *file_path* looking for a ``tvshow.nfo`` with usable metadata.
 
@@ -818,7 +813,7 @@ def _upwalk_tvshow_nfo(file_path: Path) -> NfoMetadata | None:
             if candidate.stem.lower() != "tvshow":
                 continue
             meta = parse_nfo(candidate)
-            if meta is not None and _meta_has_usable_id_or_title(meta):
+            if meta is not None:
                 return meta
         parent_of = current.parent
         if parent_of == current:
