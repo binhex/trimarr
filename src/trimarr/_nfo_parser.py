@@ -164,6 +164,44 @@ def _has_nfo_content(
     )
 
 
+def _extract_nfo_metadata(root: ET.Element) -> NfoMetadata | None:
+    """Extract ``NfoMetadata`` from a parsed XML *root* element.
+
+    Returns *None* if the root is not a recognised NFO element
+    (movie/tvshow) or contains no useful metadata fields.
+    """
+    if not _is_valid_nfo_root(root):
+        return None
+
+    title = _extract_text(root, "title")
+    original_title = _extract_text(root, "originaltitle")
+    year = _extract_text(root, "year")
+
+    imdb_id = _extract_text(root, "imdbid")
+    if imdb_id is None:
+        imdb_id = _extract_uniqueid(root, "imdb")
+
+    tmdb_id = _extract_text(root, "tmdbid")
+    if tmdb_id is None:
+        tmdb_id = _extract_uniqueid(root, "tmdb")
+
+    tvdb_id = _extract_text(root, "tvdbid")
+    if tvdb_id is None:
+        tvdb_id = _extract_uniqueid(root, "tvdb")
+
+    if not _has_nfo_content(title, original_title, imdb_id, tmdb_id, tvdb_id):
+        return None
+
+    return NfoMetadata(
+        title=title,
+        original_title=original_title,
+        year=year,
+        imdb_id=imdb_id,
+        tmdb_id=tmdb_id,
+        tvdb_id=tvdb_id,
+    )
+
+
 def _parse_nfo_with_cleanup(path: Path) -> NfoMetadata | None:
     """Read *path* as raw text, strip trailing junk, and parse as NFO XML.
 
@@ -185,33 +223,7 @@ def _parse_nfo_with_cleanup(path: Path) -> NfoMetadata | None:
     except ET.ParseError:
         return None
 
-    if not _is_valid_nfo_root(root):
-        return None
-
-    title = _extract_text(root, "title")
-    original_title = _extract_text(root, "originaltitle")
-    year = _extract_text(root, "year")
-    imdb_id = _extract_text(root, "imdbid")
-    if imdb_id is None:
-        imdb_id = _extract_uniqueid(root, "imdb")
-    tmdb_id = _extract_text(root, "tmdbid")
-    if tmdb_id is None:
-        tmdb_id = _extract_uniqueid(root, "tmdb")
-    tvdb_id = _extract_text(root, "tvdbid")
-    if tvdb_id is None:
-        tvdb_id = _extract_uniqueid(root, "tvdb")
-
-    if not _has_nfo_content(title, original_title, imdb_id, tmdb_id, tvdb_id):
-        return None
-
-    return NfoMetadata(
-        title=title,
-        original_title=original_title,
-        year=year,
-        imdb_id=imdb_id,
-        tmdb_id=tmdb_id,
-        tvdb_id=tvdb_id,
-    )
+    return _extract_nfo_metadata(root)
 
 
 def parse_nfo(path: Path) -> NfoMetadata | None:
@@ -246,34 +258,8 @@ def parse_nfo(path: Path) -> NfoMetadata | None:
         )
         return None
 
-    title = _extract_text(root, "title")
-    original_title = _extract_text(root, "originaltitle")
-    year = _extract_text(root, "year")
-
-    # <imdbid> takes precedence over <uniqueid type="imdb">
-    imdb_id = _extract_text(root, "imdbid")
-    if imdb_id is None:
-        imdb_id = _extract_uniqueid(root, "imdb")
-
-    # <tmdbid> takes precedence over <uniqueid type="tmdb">
-    tmdb_id = _extract_text(root, "tmdbid")
-    if tmdb_id is None:
-        tmdb_id = _extract_uniqueid(root, "tmdb")
-
-    # <tvdbid> takes precedence over <uniqueid type="tvdb">
-    tvdb_id = _extract_text(root, "tvdbid")
-    if tvdb_id is None:
-        tvdb_id = _extract_uniqueid(root, "tvdb")
-
-    if not _has_nfo_content(title, original_title, imdb_id, tmdb_id, tvdb_id):
+    meta = _extract_nfo_metadata(root)
+    if meta is None:
         logger.debug("NFO '%s' has no usable fields (no title/IMDb/TMDb/TVDB ID).", path)
         return None
-
-    return NfoMetadata(
-        title=title,
-        original_title=original_title,
-        year=year,
-        imdb_id=imdb_id,
-        tmdb_id=tmdb_id,
-        tvdb_id=tvdb_id,
-    )
+    return meta

@@ -799,6 +799,34 @@ def _describe_failure(source_label: str, tmdb_api_key: str | None) -> str:
     return "no match from IMDbPie"
 
 
+def _meta_has_usable_id_or_title(meta: NfoMetadata) -> bool:
+    """Return True if *meta* has at least one ID or title field set."""
+    return bool(meta.imdb_id or meta.tmdb_id or meta.tvdb_id or meta.title or meta.original_title)
+
+
+def _upwalk_tvshow_nfo(file_path: Path) -> NfoMetadata | None:
+    """Walk up from *file_path* looking for a ``tvshow.nfo`` with usable metadata.
+
+    Checks each ancestor directory (up to ``_MAX_TVSHOW_UPWALK_DEPTH``
+    levels) for a ``tvshow.nfo`` file.  Returns the first parsed result
+    that contains at least one ID (imdb / tmdb / tvdb) or title field,
+    or *None* if none is found.
+    """
+    current = file_path.parent
+    for _ in range(_MAX_TVSHOW_UPWALK_DEPTH):
+        for candidate in sorted(current.glob("*.[nN][fF][oO]")):
+            if candidate.stem.lower() != "tvshow":
+                continue
+            meta = parse_nfo(candidate)
+            if meta is not None and _meta_has_usable_id_or_title(meta):
+                return meta
+        parent_of = current.parent
+        if parent_of == current:
+            break
+        current = parent_of
+    return None
+
+
 def _get_nfo_metadata(file_path: Path) -> NfoMetadata | None:
     """Discover and parse an .nfo file for *file_path*.
 
@@ -816,31 +844,15 @@ def _get_nfo_metadata(file_path: Path) -> NfoMetadata | None:
         if meta is not None:
             return meta
         # If discover_nfo already returned tvshow.nfo and parse failed,
-        # the fallback (below) would only re-discover and re-parse it.
+        # the fallback would only re-discover and re-parse it.
         if nfo_path.stem.lower() == "tvshow":
             return None
     else:
         # No NFO found at all — fallback adds nothing, skip it.
         return None
 
-    # Parse failed — the NFO may be a Sonarr episode NFO with
-    # <episodedetails> root.  Try tvshow.nfo upwalk for series-level IDs.
-    current = file_path.parent
-    for _ in range(_MAX_TVSHOW_UPWALK_DEPTH):
-        tvshow_candidates = sorted(current.glob("*.[nN][fF][oO]"))
-        for candidate in tvshow_candidates:
-            if candidate.stem.lower() == "tvshow":
-                meta = parse_nfo(candidate)
-                if meta is not None and (
-                    meta.imdb_id or meta.tmdb_id or meta.tvdb_id or meta.title or meta.original_title
-                ):
-                    return meta
-        parent_of = current.parent
-        if parent_of == current:
-            break
-        current = parent_of
-
-    return None
+    # Parse failed — try tvshow.nfo upwalk for series-level IDs.
+    return _upwalk_tvshow_nfo(file_path)
 
 
 def _lookup_and_cache(
