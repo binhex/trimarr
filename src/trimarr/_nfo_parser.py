@@ -9,6 +9,7 @@ Sonarr, Kodi, etc.).
 from __future__ import annotations
 
 import logging
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -19,6 +20,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MAX_TVSHOW_UPWALK_DEPTH = 3
+
+_KNOWN_NFO_ROOTS = ("movie", "tvshow", "episodedetails", "season")
+"""Root element names that can appear in NFO files produced by
+Kodi / Radarr / Sonarr."""
+
+_ROOT_OPEN_RE = re.compile(
+    r"^\s*<(" + "|".join(_KNOWN_NFO_ROOTS) + r")(?:\s|>)",
+    re.MULTILINE,
+)
+"""Matches the opening tag of a known NFO root element.
+Capture group 1 contains the element name (e.g. "movie")."""
 
 
 @dataclass
@@ -87,6 +99,30 @@ def discover_nfo(mkv_path: Path) -> Path | None:
     return None
 
 
+def _strip_nfo_trailing_junk(raw: str) -> str | None:
+    """Strip trailing content after the closing root tag in *raw* NFO text.
+
+    Attempts to recover parseable XML from files that have trailing content
+    (e.g. URLs) after the root closing tag — a common artifact from Kodi
+    library exports.
+
+    Returns the cleaned XML string, or *None* if no root element boundary
+    can be identified.
+    """
+    m = _ROOT_OPEN_RE.search(raw)
+    if not m:
+        return None
+
+    root_name = m.group(1)
+    closing_tag = f"</{root_name}>"
+    last = raw.rfind(closing_tag)
+    if last == -1:
+        return None
+
+    cleaned = raw[: last + len(closing_tag)].rstrip() + "\n"
+    return cleaned
+
+
 def _extract_text(parent: ET.Element, tag: str) -> str | None:
     """Return the stripped text content of *tag* inside *parent*, or None."""
     elem = parent.find(tag)
@@ -128,6 +164,68 @@ def _has_nfo_content(
     )
 
 
+def _extract_nfo_metadata(root: ET.Element) -> NfoMetadata | None:
+    """Extract ``NfoMetadata`` from a parsed XML *root* element.
+
+    Returns *None* if the root is not a recognised NFO element
+    (movie/tvshow) or contains no useful metadata fields.
+    """
+    if not _is_valid_nfo_root(root):
+        return None
+
+    title = _extract_text(root, "title")
+    original_title = _extract_text(root, "originaltitle")
+    year = _extract_text(root, "year")
+
+    imdb_id = _extract_text(root, "imdbid")
+    if imdb_id is None:
+        imdb_id = _extract_uniqueid(root, "imdb")
+
+    tmdb_id = _extract_text(root, "tmdbid")
+    if tmdb_id is None:
+        tmdb_id = _extract_uniqueid(root, "tmdb")
+
+    tvdb_id = _extract_text(root, "tvdbid")
+    if tvdb_id is None:
+        tvdb_id = _extract_uniqueid(root, "tvdb")
+
+    if not _has_nfo_content(title, original_title, imdb_id, tmdb_id, tvdb_id):
+        return None
+
+    return NfoMetadata(
+        title=title,
+        original_title=original_title,
+        year=year,
+        imdb_id=imdb_id,
+        tmdb_id=tmdb_id,
+        tvdb_id=tvdb_id,
+    )
+
+
+def _parse_nfo_with_cleanup(path: Path) -> NfoMetadata | None:
+    """Read *path* as raw text, strip trailing junk, and parse as NFO XML.
+
+    Called as a recovery path when ``ET.parse()`` fails on *path*.
+    Returns structured metadata or *None* if the file cannot be read
+    or still fails to parse after cleanup.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+
+    cleaned = _strip_nfo_trailing_junk(raw)
+    if cleaned is None:
+        return None
+
+    try:
+        root = ET.fromstring(cleaned)
+    except ET.ParseError:
+        return None
+
+    return _extract_nfo_metadata(root)
+
+
 def parse_nfo(path: Path) -> NfoMetadata | None:
     """Parse an ``.nfo`` XML file and return a structured ``NfoMetadata``.
 
@@ -146,6 +244,9 @@ def parse_nfo(path: Path) -> NfoMetadata | None:
         tree = ET.parse(path)
     except (ET.ParseError, FileNotFoundError, PermissionError, IsADirectoryError) as exc:
         logger.debug("Failed to parse NFO '%s': %s", path, exc)
+        meta = _parse_nfo_with_cleanup(path)
+        if meta is not None:
+            return meta
         return None
 
     root = tree.getroot()
@@ -157,34 +258,8 @@ def parse_nfo(path: Path) -> NfoMetadata | None:
         )
         return None
 
-    title = _extract_text(root, "title")
-    original_title = _extract_text(root, "originaltitle")
-    year = _extract_text(root, "year")
-
-    # <imdbid> takes precedence over <uniqueid type="imdb">
-    imdb_id = _extract_text(root, "imdbid")
-    if imdb_id is None:
-        imdb_id = _extract_uniqueid(root, "imdb")
-
-    # <tmdbid> takes precedence over <uniqueid type="tmdb">
-    tmdb_id = _extract_text(root, "tmdbid")
-    if tmdb_id is None:
-        tmdb_id = _extract_uniqueid(root, "tmdb")
-
-    # <tvdbid> takes precedence over <uniqueid type="tvdb">
-    tvdb_id = _extract_text(root, "tvdbid")
-    if tvdb_id is None:
-        tvdb_id = _extract_uniqueid(root, "tvdb")
-
-    if not _has_nfo_content(title, original_title, imdb_id, tmdb_id, tvdb_id):
+    meta = _extract_nfo_metadata(root)
+    if meta is None:
         logger.debug("NFO '%s' has no usable fields (no title/IMDb/TMDb/TVDB ID).", path)
         return None
-
-    return NfoMetadata(
-        title=title,
-        original_title=original_title,
-        year=year,
-        imdb_id=imdb_id,
-        tmdb_id=tmdb_id,
-        tvdb_id=tvdb_id,
-    )
+    return meta

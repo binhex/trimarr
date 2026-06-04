@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from trimarr._nfo_parser import discover_nfo, parse_nfo
+from trimarr._nfo_parser import _strip_nfo_trailing_junk, discover_nfo, parse_nfo
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -348,3 +348,133 @@ class TestDiscoverNfo:
         mkv.write_text("dummy")
         result = discover_nfo(mkv)
         assert result == nfo
+
+
+class TestNfoCleanup:
+    """Tests for _strip_nfo_trailing_junk() and parse_nfo() recovery."""
+
+    # ── _strip_nfo_trailing_junk unit tests ──────────────────────────
+
+    def test_cleanup_valid_xml_unchanged(self) -> None:
+        """Already-valid XML returns unchanged (no trailing junk to strip)."""
+        raw = "<movie>\n  <title>Test</title>\n</movie>\n"
+        result = _strip_nfo_trailing_junk(raw)
+        assert result == raw
+
+    def test_cleanup_trailing_urls_after_movie(self) -> None:
+        """Trailing URLs after </movie> are stripped."""
+        raw = (
+            "<movie>\n"
+            "  <title>Inception</title>\n"
+            "  <imdbid>tt1375666</imdbid>\n"
+            "</movie>\n"
+            "\n"
+            "https://www.themoviedb.org/movie/27205\n"
+            "https://www.imdb.com/title/tt1375666\n"
+        )
+        expected = "<movie>\n  <title>Inception</title>\n  <imdbid>tt1375666</imdbid>\n</movie>\n"
+        assert _strip_nfo_trailing_junk(raw) == expected
+
+    def test_cleanup_trailing_urls_after_tvshow(self) -> None:
+        """Trailing URLs after </tvshow> are stripped."""
+        raw = (
+            "<tvshow>\n"
+            "  <title>Breaking Bad</title>\n"
+            "  <tvdbid>81189</tvdbid>\n"
+            "</tvshow>\n"
+            "\n"
+            "https://www.thetvdb.com/series/81189\n"
+        )
+        expected = "<tvshow>\n  <title>Breaking Bad</title>\n  <tvdbid>81189</tvdbid>\n</tvshow>\n"
+        assert _strip_nfo_trailing_junk(raw) == expected
+
+    def test_cleanup_trailing_urls_after_episodedetails(self) -> None:
+        """Trailing URLs after </episodedetails> are handled."""
+        raw = "<episodedetails>\n  <title>S01E01</title>\n</episodedetails>\n\nhttps://example.com/junk\n"
+        expected = "<episodedetails>\n  <title>S01E01</title>\n</episodedetails>\n"
+        assert _strip_nfo_trailing_junk(raw) == expected
+
+    def test_cleanup_no_root_element(self) -> None:
+        """Text with no recognizable NFO root returns None."""
+        assert _strip_nfo_trailing_junk("just some random text") is None
+
+    def test_cleanup_no_closing_tag(self) -> None:
+        """Raw text with opening tag but no closing tag returns None."""
+        raw = "<movie>\n  <title>Incomplete</title>\n"
+        assert _strip_nfo_trailing_junk(raw) is None
+
+    def test_cleanup_empty_string(self) -> None:
+        """Empty string returns None."""
+        assert _strip_nfo_trailing_junk("") is None
+
+    def test_cleanup_only_trailing_content(self) -> None:
+        """Only trailing content with no XML returns None."""
+        assert _strip_nfo_trailing_junk("https://example.com/junk\n") is None
+
+    def test_cleanup_root_with_attributes(self) -> None:
+        """Root element with XML attributes is still detected."""
+        raw = '<movie xmlns="http://example.com">\n  <title>Test</title>\n</movie>\n\ntrailing\n'
+        expected = '<movie xmlns="http://example.com">\n  <title>Test</title>\n</movie>\n'
+        assert _strip_nfo_trailing_junk(raw) == expected
+
+    # ── parse_nfo integration tests ─────────────────────────────────
+
+    def test_parse_recover_movie_trailing_urls(self, tmp_path: Path) -> None:
+        """parse_nfo() recovers movie NFO with trailing URLs."""
+        nfo = tmp_path / "movie.nfo"
+        nfo.write_text(
+            '<?xml version="1.0"?>\n'
+            "<movie>\n"
+            "  <title>The Dark Knight</title>\n"
+            "  <year>2008</year>\n"
+            "  <imdbid>tt0468569</imdbid>\n"
+            "  <tmdbid>155</tmdbid>\n"
+            "</movie>\n"
+            "\n"
+            "https://www.themoviedb.org/movie/155\n"
+            "https://www.imdb.com/title/tt0468569\n"
+        )
+        result = parse_nfo(nfo)
+        assert result is not None
+        assert result.title == "The Dark Knight"
+        assert result.year == "2008"
+        assert result.imdb_id == "tt0468569"
+        assert result.tmdb_id == "155"
+
+    def test_parse_recover_tvshow_trailing_urls(self, tmp_path: Path) -> None:
+        """parse_nfo() recovers tvshow NFO with trailing URLs."""
+        nfo = tmp_path / "tvshow.nfo"
+        nfo.write_text(
+            '<?xml version="1.0"?>\n'
+            "<tvshow>\n"
+            "  <title>Breaking Bad</title>\n"
+            "  <year>2008</year>\n"
+            "  <imdbid>tt0903747</imdbid>\n"
+            "  <tmdbid>1396</tmdbid>\n"
+            "  <tvdbid>81189</tvdbid>\n"
+            "</tvshow>\n"
+            "\n"
+            "https://www.thetvdb.com/series/81189\n"
+        )
+        result = parse_nfo(nfo)
+        assert result is not None
+        assert result.title == "Breaking Bad"
+        assert result.year == "2008"
+        assert result.imdb_id == "tt0903747"
+        assert result.tmdb_id == "1396"
+        assert result.tvdb_id == "81189"
+
+    def test_parse_deep_xml_damage_still_fails(self, tmp_path: Path) -> None:
+        """Deep XML damage (unescaped &) still returns None — no false positive."""
+        nfo = tmp_path / "damaged.nfo"
+        nfo.write_text('<?xml version="1.0"?>\n<movie>\n  <title>Bad & broken</title>\n</movie>\n')
+        assert parse_nfo(nfo) is None
+
+    def test_parse_valid_nfo_fast_path_unchanged(self, tmp_path: Path) -> None:
+        """Valid NFO still parses correctly via fast path (no regression)."""
+        nfo = tmp_path / "valid.nfo"
+        nfo.write_text('<?xml version="1.0"?>\n<movie>\n  <title>Alien</title>\n</movie>\n')
+        result = parse_nfo(nfo)
+        assert result is not None
+        assert result.title == "Alien"
+        assert result.imdb_id is None
