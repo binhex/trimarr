@@ -91,6 +91,50 @@ _WORD_SEPARATORS = re.compile(r"[._\-+]")
 # avoid matching unrelated directories.
 _TV_SUBDIR_RE = re.compile(r"^(?:Season|Series|Specials)(?:\s*\d+)?$", re.IGNORECASE)
 
+# Regex for detecting TV episode filenames.
+# Matches: S01E01, S1E1, 1x01, Season.1.Episode.1, Series.1.Episode.1
+_TV_EPISODE_RE = re.compile(
+    r"""
+    (?:
+        # Pattern 1: S01E01, S1E1, S01.E01, S01E01-E02, S01E01E02 (multi-episode)
+        S\d{1,2}\.?\s?E\d{1,}(?:-?\.?\s?E\d{1,})*
+        |
+        # Pattern 2: 1x01, 01x01
+        \d{1,3}x\d{1,3}
+        |
+        # Pattern 3: Season.1.Episode.1, Season 1 Episode 1, Season01Episode01
+        # Requires an episode number suffix to avoid matching movie names like "Summer.Season.2022"
+        (?:season|series)[\s\.]?\d+[\s\.]?episode[\s\.]?\d+
+    )
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
+def _is_tv_episode_filename(stem: str) -> bool:
+    """Return True if *stem* looks like a TV episode filename.
+
+    Checks for common episode numbering patterns:
+    - ``S01E01``, ``S01E01-E02``, ``S01E01E02`` (standard episode codes)
+    - ``1x01``, ``01x01`` (alternative format)
+    - ``Season.1.Episode.1``, ``Season01Episode01`` (verbose format)
+    - Same patterns with ``Series`` in place of ``Season``
+
+    Returns False for anything that does not match (movies, standalone
+    files, directories, etc.).
+    """
+    return bool(_TV_EPISODE_RE.search(stem))
+
+
+def _get_tmdb_endpoint(stem: str, default: str = "movie") -> str:
+    """Return the TMDb endpoint type ("movie" or "tv") based on *stem*.
+
+    When the filename stem matches a TV episode pattern, returns "tv"
+    so the correct TMDb endpoint (``/tv/...``, ``/search/tv``) is used.
+    Otherwise returns *default* (``"movie"``).
+    """
+    return "tv" if _is_tv_episode_filename(stem) else default
+
 
 def _extract_embedded_id(stem: str) -> tuple[str, str] | None:
     """Scan *stem* for an embedded IMDb, TMDb, or TVDB ID.
@@ -572,9 +616,15 @@ def _extract_tmdb_language_code(detail: dict) -> list[str] | None:
     return None
 
 
-def _try_tmdb_detail(hit: dict, title: str, api_key: str) -> list[str] | None:
-    """If *hit* matches *title*, fetch TMDb detail and extract language codes."""
-    for field in ("title", "original_title"):
+def _try_tmdb_detail(hit: dict, title: str, api_key: str, media_type: str = "movie") -> list[str] | None:
+    """If *hit* matches *title*, fetch TMDb detail and extract language codes.
+
+    For TV results (``media_type="tv"``) uses ``name``/``original_name`` fields
+    and the ``/tv/{id}`` endpoint. For movies uses ``title``/``original_title``
+    and ``/movie/{id}``.
+    """
+    _title_fields = ("name", "original_name") if media_type == "tv" else ("title", "original_title")
+    for field in _title_fields:
         hit_title = (hit.get(field) or "").strip().lower()
         if _normalise_title(hit_title) != _normalise_title(title):
             continue
@@ -582,7 +632,7 @@ def _try_tmdb_detail(hit: dict, title: str, api_key: str) -> list[str] | None:
         if tmdb_id is None:
             continue
         encoded_key = urllib.parse.quote(api_key, safe="")
-        detail_url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={encoded_key}"
+        detail_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}?api_key={encoded_key}"
         try:
             with urllib.request.urlopen(detail_url, timeout=15) as resp2:
                 detail = json.loads(resp2.read().decode())
@@ -595,13 +645,21 @@ def _try_tmdb_detail(hit: dict, title: str, api_key: str) -> list[str] | None:
     return None
 
 
-def _lookup_tmdb(title: str, year: str | None, api_key: str) -> list[str] | None:
-    """Return ISO 639-2/B language codes via TMDb, or None on failure."""
+def _lookup_tmdb(title: str, year: str | None, api_key: str, media_type: str = "movie") -> list[str] | None:
+    """Return ISO 639-2/B language codes via TMDb, or None on failure.
+
+    Args:
+        title: Movie or TV show title to search for.
+        year: Optional release year to narrow the search.
+        api_key: TMDb API key.
+        media_type: ``"movie"`` or ``"tv"`` — selects the TMDb search endpoint.
+    """
     encoded_title = urllib.parse.quote(title)
     encoded_key = urllib.parse.quote(api_key, safe="")
-    search_url = f"https://api.themoviedb.org/3/search/movie?query={encoded_title}&api_key={encoded_key}"
+    search_url = f"https://api.themoviedb.org/3/search/{media_type}?query={encoded_title}&api_key={encoded_key}"
     if year:
-        search_url += f"&year={year}"
+        _year_param = "first_air_date_year" if media_type == "tv" else "year"
+        search_url += f"&{_year_param}={year}"
     try:
         with urllib.request.urlopen(search_url, timeout=15) as resp:
             data = json.loads(resp.read().decode())
@@ -613,21 +671,22 @@ def _lookup_tmdb(title: str, year: str | None, api_key: str) -> list[str] | None
         logger.debug("TMDb no results for '%s'.", title)
         return None
     for hit in results:
-        codes = _try_tmdb_detail(hit, title, api_key)
+        codes = _try_tmdb_detail(hit, title, api_key, media_type)
         if codes:
             return codes
     return None
 
 
-def _lookup_tmdb_by_id(tmdb_id: str, api_key: str) -> list[str] | None:
+def _lookup_tmdb_by_id(tmdb_id: str, api_key: str, media_type: str = "movie") -> list[str] | None:
     """Return ISO 639-2/B language codes via TMDb using a known TMDb ID.
 
-    Skips the search+match step and directly fetches the movie detail by ID.
+    Skips the search+match step and directly fetches the detail by ID.
+    Uses ``/movie/{id}`` or ``/tv/{id}`` depending on *media_type*.
     Returns *None* when the detail endpoint fails or returns no usable
     ``original_language``.
     """
     encoded_key = urllib.parse.quote(api_key, safe="")
-    detail_url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={encoded_key}"
+    detail_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}?api_key={encoded_key}"
     try:
         with urllib.request.urlopen(detail_url, timeout=15) as resp:
             detail = json.loads(resp.read().decode())
@@ -776,16 +835,25 @@ def _get_directory_title(file_path: Path) -> tuple[str, str | None]:
     return parse_movie_title(parent)
 
 
-def _lookup_chain(tmdb_api_key: str | None) -> list[tuple]:
-    """Return ordered (lookup_fn, title_fn, source_label) triples."""
+def _lookup_chain(tmdb_api_key: str | None, media_type: str = "movie") -> list[tuple]:
+    """Return ordered (lookup_fn, title_fn, source_label) triples.
+
+    Args:
+        tmdb_api_key: TMDb API key, or None to skip TMDb entries.
+        media_type: ``"movie"`` or ``"tv"`` — selects the TMDb search endpoint.
+    """
     chain: list[tuple] = [
         (_lookup_imdbpie, _get_filename_title, "imdbpie_filename"),
         (_lookup_imdbpie, _get_directory_title, "imdbpie_directory"),
     ]
     if tmdb_api_key:
         chain += [
-            (partial(_lookup_tmdb, api_key=tmdb_api_key), _get_filename_title, "tmdb_filename"),
-            (partial(_lookup_tmdb, api_key=tmdb_api_key), _get_directory_title, "tmdb_directory"),
+            (partial(_lookup_tmdb, api_key=tmdb_api_key, media_type=media_type), _get_filename_title, "tmdb_filename"),
+            (
+                partial(_lookup_tmdb, api_key=tmdb_api_key, media_type=media_type),
+                _get_directory_title,
+                "tmdb_directory",
+            ),
         ]
     return chain
 
@@ -871,6 +939,50 @@ def _lookup_and_cache(
     return codes
 
 
+def _run_nfo_id_lookup_chain(
+    tmdb_id: str | None,
+    tvdb_id: str | None,
+    tmdb_api_key: str | None,
+    tvdb_api_key: str | None,
+    tmdb_media_type: str,
+    file_path: Path,
+    db: Database | None,
+) -> list[str] | None:
+    """Run the NFO ID lookup chain for TMDb/TVDB.
+
+    For TV shows (``tmdb_media_type="tv"``), TVDB is tried first since
+    it is TV-specific and more reliable. For movies, TMDb is tried first.
+    The correct endpoint is passed to TMDb lookups via 4-tuples that
+    encode the exact call args, avoiding fragile identity checks.
+    """
+    _is_tv = tmdb_media_type == "tv"
+    # Each entry: (lookup_fn, api_key, source, call_args)
+    _chain: tuple[tuple[Any, str | None, str, tuple[Any, ...]], ...] = (
+        (
+            (_lookup_tvdb_by_id, tvdb_api_key, "nfo_tvdb_id", (tvdb_id, tvdb_api_key)),
+            (_lookup_tmdb_by_id, tmdb_api_key, "nfo_tmdb_id", (tmdb_id, tmdb_api_key, tmdb_media_type)),
+        )
+        if _is_tv
+        else (
+            (_lookup_tmdb_by_id, tmdb_api_key, "nfo_tmdb_id", (tmdb_id, tmdb_api_key, tmdb_media_type)),
+            (_lookup_tvdb_by_id, tvdb_api_key, "nfo_tvdb_id", (tvdb_id, tvdb_api_key)),
+        )
+    )
+    for lookup_fn, api_key, source, _args in _chain:
+        eid = _args[0]
+        if eid and api_key:
+            result = _lookup_and_cache(
+                lookup_fn,
+                _args,
+                file_path,
+                db,
+                source,
+            )
+            if result:
+                return result
+    return None
+
+
 def _resolve_nfo_id_lookups(
     nfo_meta: NfoMetadata,
     file_path: Path,
@@ -895,23 +1007,15 @@ def _resolve_nfo_id_lookups(
         if result:
             return result
 
-    # Direct TMDb/TVDB ID lookups (require API keys)
-    for lookup_fn, eid, api_key, source in (
-        (_lookup_tmdb_by_id, nfo_meta.tmdb_id, tmdb_api_key, "nfo_tmdb_id"),
-        (_lookup_tvdb_by_id, nfo_meta.tvdb_id, tvdb_api_key, "nfo_tvdb_id"),
-    ):
-        if eid and api_key:
-            result = _lookup_and_cache(
-                lookup_fn,
-                (eid, api_key),
-                file_path,
-                db,
-                source,
-            )
-            if result:
-                return result
-
-    return None
+    return _run_nfo_id_lookup_chain(
+        nfo_meta.tmdb_id,
+        nfo_meta.tvdb_id,
+        tmdb_api_key,
+        tvdb_api_key,
+        _get_tmdb_endpoint(file_path.stem),
+        file_path,
+        db,
+    )
 
 
 def _resolve_nfo_title_search(
@@ -943,7 +1047,8 @@ def _resolve_nfo_title_search(
         return codes
 
     if tmdb_api_key:
-        codes = _lookup_tmdb(search_title, year, tmdb_api_key)
+        _tmdb_media_type = _get_tmdb_endpoint(file_path.stem)
+        codes = _lookup_tmdb(search_title, year, tmdb_api_key, _tmdb_media_type)
         if codes is not None:
             _msg = "Identified native language(s) for '%s': %s (source=nfo_tmdb_title)."
             logger.info(_msg, file_path.name, codes)
@@ -992,7 +1097,8 @@ def _resolve_imdb_embedded(
         )
         return None
 
-    codes = _lookup_tmdb_by_id(eid2, tmdb_api_key)
+    _tmdb_media_type = _get_tmdb_endpoint(file_path.stem)
+    codes = _lookup_tmdb_by_id(eid2, tmdb_api_key, _tmdb_media_type)
     if codes is None:
         return None
 
@@ -1015,7 +1121,8 @@ def _resolve_tmdb_embedded(
     if not tmdb_api_key:
         return None
 
-    codes = _lookup_tmdb_by_id(eid, tmdb_api_key)
+    _tmdb_media_type = _get_tmdb_endpoint(file_path.stem)
+    codes = _lookup_tmdb_by_id(eid, tmdb_api_key, _tmdb_media_type)
     if codes is None:
         return None
 
@@ -1095,8 +1202,9 @@ def _run_filename_directory_chain(
     Iterates the fallback chain (IMDbPie/TMDb with filename/directory
     titles) and returns the first match or *None*.
     """
+    _tmdb_media_type = _get_tmdb_endpoint(file_path.stem)
     last_error = "no match from any source"
-    chain = _lookup_chain(tmdb_api_key)
+    chain = _lookup_chain(tmdb_api_key, _tmdb_media_type)
     for lookup_fn, title_fn, source_label in chain:
         title, year = title_fn(file_path)
         if not title:
