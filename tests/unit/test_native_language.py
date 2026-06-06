@@ -325,6 +325,27 @@ class TestLookupTmdb:
         result = _lookup_tmdb("Film", None, "fake-key")
         assert result == ["ger"]
 
+    def test_tv_media_type(self, mocker) -> None:
+        """TV media type uses /search/tv endpoint and /tv/{id} detail."""
+        mock_urlopen = mocker.patch("trimarr.native_language.urllib.request.urlopen")
+        search_response = mocker.MagicMock()
+        search_response.__enter__.return_value = search_response
+        # TV results use "name" and "original_name", not "title"/
+        search_response.read.return_value = b"""
+        {"results": [
+            {"id": 456, "name": "Test Show", "original_name": "Test Show",
+             "first_air_date": "2024-01-01"}
+        ]}
+        """
+        detail_response = mocker.MagicMock()
+        detail_response.__enter__.return_value = detail_response
+        detail_response.read.return_value = b"""
+        {"original_language": "ko"}
+        """
+        mock_urlopen.side_effect = [search_response, detail_response]
+        result = _lookup_tmdb("Test Show", "2024", "fake-key", media_type="tv")
+        assert result == ["kor"]
+
 
 class TestResolveNativeLanguage:
     def test_cache_hit(self, mocker) -> None:
@@ -595,7 +616,7 @@ class TestResolveNativeLanguage:
         result = resolve_native_language(Path("/data/Movie {tmdb-77914} 2024.mkv"), db=mock_db, tmdb_api_key="test-key")
 
         assert result == ["chi"]
-        mock_lookup.assert_called_once_with("77914", "test-key")
+        mock_lookup.assert_called_once_with("77914", "test-key", "movie")
 
     def test_integration_embedded_id_fails_fallthrough(self, mocker) -> None:
         """Embedded ID found but API fails; falls through to filename search."""
@@ -635,7 +656,7 @@ class TestResolveNativeLanguage:
         )
 
         assert result == ["chi"]
-        mock_tmdb.assert_called_once_with("77914", "test-key")
+        mock_tmdb.assert_called_once_with("77914", "test-key", "movie")
 
     def test_integration_embedded_dual_id_tmdb_no_key(self, mocker) -> None:
         """IMDb ID fails, TMDb ID present but no API key; falls through."""
@@ -728,7 +749,7 @@ class TestResolveNativeLanguage:
 
         assert result == ["spa"]
         mock_imdbpie.assert_not_called()
-        mock_tmdb.assert_called_once_with("77914", "test-key")
+        mock_tmdb.assert_called_once_with("77914", "test-key", "movie")
         mock_search.assert_called_once()
 
     def test_resolve_native_language_tvdb_from_nfo(self, mocker) -> None:
@@ -1222,6 +1243,39 @@ class TestHelpers:
         assert "tried filename and directory name" in msg
 
 
+class TestGetTmdbEndpoint:
+    """Tests for _get_tmdb_endpoint()."""
+
+    @pytest.mark.parametrize(
+        ("stem", "expected"),
+        [
+            # TV show patterns → "tv"
+            ("Show.S01E01", "tv"),
+            ("Show.1x01", "tv"),
+            ("Show.Season.1.Episode.1", "tv"),
+            ("Show.S01E01.1080p", "tv"),
+            # Movie patterns → "movie"
+            ("Some.Movie.2024", "movie"),
+            ("Das Boot (1981)", "movie"),
+            ("The.Season.2022", "movie"),
+            ("Summer.Series.1999", "movie"),
+            ("2160p", "movie"),
+            ("tvshow", "movie"),
+        ],
+    )
+    def test_get_tmdb_endpoint(self, stem: str, expected: str) -> None:
+        from trimarr.native_language import _get_tmdb_endpoint
+
+        assert _get_tmdb_endpoint(stem) == expected
+
+    def test_get_tmdb_endpoint_default_override(self) -> None:
+        """Default can be overridden for non-TV files."""
+        from trimarr.native_language import _get_tmdb_endpoint
+
+        assert _get_tmdb_endpoint("Some.Movie.2024", "custom") == "custom"
+        assert _get_tmdb_endpoint("Show.S01E01", "custom") == "tv"
+
+
 class TestLookupImdbpieById:
     """Tests for _lookup_imdbpie_by_id()."""
 
@@ -1314,6 +1368,18 @@ class TestLookupTmdbById:
         mock_urlopen.return_value = detail_response
         result = _lookup_tmdb_by_id("155", "fake-key")
         assert result == ["ger"]
+
+    def test_tv_media_type(self, mocker) -> None:
+        """TV media type uses /tv/{id} endpoint."""
+        from trimarr.native_language import _lookup_tmdb_by_id
+
+        mock_urlopen = mocker.patch("trimarr.native_language.urllib.request.urlopen")
+        detail_response = mocker.MagicMock()
+        detail_response.__enter__.return_value = detail_response
+        detail_response.read.return_value = b'{"original_language": "ko"}'
+        mock_urlopen.return_value = detail_response
+        result = _lookup_tmdb_by_id("456", "fake-key", media_type="tv")
+        assert result == ["kor"]
 
 
 class TestResolveNativeLanguageNfo:
@@ -1952,3 +2018,145 @@ class TestGetNfoMetadata:
         assert meta.title == "A Knight of the Seven Kingdoms"
         assert meta.tvdb_id == "433631"
         assert meta.imdb_id == "tt27497448"
+
+
+class TestIsTvEpisodeFilename:
+    """Tests for _is_tv_episode_filename()."""
+
+    @pytest.mark.parametrize(
+        "stem",
+        [
+            "Show.S01E01",
+            "Show.S1E1",
+            "Show.S01E01-E02",
+            "Show.S01E01E02",
+            "Show.S01.E01",
+            "Show.S01.E01-E02",
+            "Show.1x01",
+            "Show.01x01",
+            "Show.Season.1.Episode.1",
+            "Show.Season01Episode01",
+            "Show.Series.1.Episode.1",
+            "Show.S01E01.1080p",
+            "Show.Name.S01E01.h265",
+            "S01E01",
+            "Season 1 Episode 1",
+            "Show.Season.1.Episode.1.1080p",
+        ],
+    )
+    def test_detects_tv_episode(self, stem: str) -> None:
+        from trimarr.native_language import _is_tv_episode_filename
+
+        assert _is_tv_episode_filename(stem), f"Expected {stem!r} to be detected as TV episode"
+
+    @pytest.mark.parametrize(
+        "stem",
+        [
+            "Some.Movie.2024",
+            "Test (2024)",
+            "MovieName",
+            "2160p",
+            "movie_2024_1080p",
+            "Das Boot (1981)",
+            "The.Film.2022.WEBRip",
+            "The.Season.2022",
+            "Summer.Series.1999",
+            "Season.1",
+            "Series.1",
+            "tvshow",
+            "season",
+            "episode",
+        ],
+    )
+    def test_rejects_non_tv(self, stem: str) -> None:
+        from trimarr.native_language import _is_tv_episode_filename
+
+        assert not _is_tv_episode_filename(stem), f"Expected {stem!r} NOT to be detected as TV episode"
+
+
+class TestResolveNativeLanguageTvShowBug:
+    """Regression tests for issue #68 — TV show TMDb ID uses /movie endpoint."""
+
+    def test_tv_show_nfo_prefers_tvdb_over_wrong_tmdb_movie_endpoint(
+        self,
+        mocker,
+        tmp_path: Path,
+    ) -> None:
+        """TV show NFO with both tmdb_id and tvdb_id should return
+        TVDB language, NOT TMDb movie-endpoint language.
+
+        This is the exact reproduction of issue #68:
+        - Show: The WONDERfools (TMDb 259837, TVDB 439546)
+        - /movie/259837 returns 'tam' (Tamil) — wrong for TV show
+        - TVDB returns 'kor' (Korean) — correct native language
+        - Resolution must prefer TVDB result over wrong TMDb movie result
+        """
+        from trimarr.native_language import resolve_native_language
+
+        # Create a TV show file structure: episode NFO + tvshow.nfo at series root
+        series = tmp_path / "The WONDERfools"
+        season = series / "Season 1"
+        season.mkdir(parents=True)
+
+        # Episode NFO (will fail to parse as movie/tvshow — falls through)
+        episode_nfo = season / "The.WONDERfools.S01E01.nfo"
+        episode_nfo.write_text("<episodedetails><title>The WONDERfools</title></episodedetails>")
+
+        # tvshow.nfo at series root — has both tmdb_id and tvdb_id
+        tvshow_nfo = series / "tvshow.nfo"
+        tvshow_nfo.write_text(
+            "<tvshow><title>The WONDERfools</title><tmdbid>259837</tmdbid><tvdbid>439546</tvdbid></tvshow>"
+        )
+
+        mkv = season / "The.WONDERfools.S01E01.mkv"
+        mkv.write_text("dummy")
+
+        # Mock cache miss so we go through the entire resolution chain
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        mock_db.set_native_language_cache = mocker.MagicMock()
+
+        # IMDb lookup fails
+        mocker.patch(
+            "trimarr.native_language._lookup_imdbpie_by_id",
+            return_value=None,
+        )
+
+        # TMDb movie endpoint returns WRONG result for this TV show
+        # (this simulates what /movie/259837 currently returns)
+        # Use a wrapper to verify media_type="tv" is threaded correctly
+        _tmdb_call_args: list[tuple] = []
+
+        def _capture_tmdb_call(*args, **kwargs):
+            _tmdb_call_args.append(args)
+            return ["tam"]
+
+        mocker.patch(
+            "trimarr.native_language._lookup_tmdb_by_id",
+            side_effect=_capture_tmdb_call,
+        )
+
+        # TVDB returns CORRECT result
+        mocker.patch(
+            "trimarr.native_language._lookup_tvdb_by_id",
+            return_value=["kor"],
+        )
+
+        result = resolve_native_language(
+            file_path=mkv,
+            db=mock_db,
+            tmdb_api_key="fake-tmdb-key",
+            tvdb_api_key="fake-tvdb-key",
+        )
+
+        # The result MUST be Korean (from TVDB), NOT Tamil (from TMDb movie endpoint)
+        assert result == ["kor"], (
+            f"Expected ['kor'] from TVDB, got {result}. "
+            "The fix should detect this is a TV show file and try TVDB before TMDb "
+            "for NFO ID lookups, so TVDB's correct result is used."
+        )
+
+        # Verify TVDB-first ordering: TMDb was never called (TVDB succeeded first)
+        assert len(_tmdb_call_args) == 0, (
+            f"Expected 0 calls to _lookup_tmdb_by_id (TVDB should win), got {len(_tmdb_call_args)}: {_tmdb_call_args}"
+        )
