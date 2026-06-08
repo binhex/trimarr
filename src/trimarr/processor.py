@@ -14,7 +14,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -336,10 +336,11 @@ def _parse_track(raw: dict) -> MkvTrack:
     )
 
 
-def probe_file(mkvmerge_path: str, file_path: Path) -> list[MkvTrack]:
-    """Run ``mkvmerge -J`` on *file_path* and return the list of :class:`MkvTrack` objects.
+def _run_mkvmerge_probe(mkvmerge_path: str, file_path: Path) -> dict:
+    """Run ``mkvmerge -J`` and return the parsed JSON dict.
 
     Raises :exc:`RuntimeError` on non-zero exit, timeout, OS error, or JSON parse failure.
+    Shared helper used by :func:`probe_file` and :func:`probe_container_title`.
     """
     try:
         result = subprocess.run(
@@ -356,11 +357,40 @@ def probe_file(mkvmerge_path: str, file_path: Path) -> list[MkvTrack]:
     if result.returncode != 0:
         raise RuntimeError(f"mkvmerge -J failed for '{file_path}' (exit {result.returncode}): {result.stderr.strip()}")
     try:
-        info = json.loads(result.stdout)
+        return cast("dict", json.loads(result.stdout))
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"Could not parse mkvmerge JSON output for '{file_path}': {exc}") from exc
 
+
+def probe_file(mkvmerge_path: str, file_path: Path) -> list[MkvTrack]:
+    """Run ``mkvmerge -J`` on *file_path* and return the list of :class:`MkvTrack` objects.
+
+    Raises :exc:`RuntimeError` on non-zero exit, timeout, OS error, or JSON parse failure.
+    """
+    info = _run_mkvmerge_probe(mkvmerge_path, file_path)
     return [_parse_track(raw) for raw in info.get("tracks", [])]
+
+
+def probe_container_title(mkvmerge_path: str, file_path: Path) -> str:
+    """Run ``mkvmerge -J`` on *file_path* and return the container-level title.
+
+    Returns the value of ``container.properties.title`` from the mkvmerge JSON
+    output, or an empty string when the title is absent or missing.
+
+    Raises :exc:`RuntimeError` on non-zero exit, timeout, OS error, or JSON
+    parse failure (same semantics as :func:`probe_file`).
+
+    Note: each call spawns a separate ``mkvmerge -J`` process.  When a caller
+    already has the raw JSON from :func:`probe_file`, the title is available at
+    ``info["container"]["properties"]["title"]`` in that same response.
+    """
+    info = _run_mkvmerge_probe(mkvmerge_path, file_path)
+    # Defensive: handle "container": null (unlikely in practice but would
+    # crash with AttributeError if it occurs).
+    container = info.get("container")
+    if container is None:
+        return ""
+    return container.get("properties", {}).get("title", "") or ""
 
 
 # ---------------------------------------------------------------------------
@@ -748,10 +778,13 @@ def _log_commentary_drops(
 def _log_metadata_title_change(
     edit_metadata_title: bool,
     delete_metadata_title: bool,
+    needs_metadata_change: bool,
     input_path: Path,
     logger: Logger,
 ) -> None:
     """Log the metadata title operation that will be applied."""
+    if not needs_metadata_change:
+        return
     if edit_metadata_title:
         logger.info(f"  Metadata: setting title to '{input_path.stem}'")
     elif delete_metadata_title:
@@ -768,6 +801,7 @@ def _log_filter_changes(
     logger: Logger,
     needs_audio_change: bool,
     needs_sub_change: bool,
+    needs_metadata_change: bool = False,
 ) -> None:
     """Log a human-readable summary of the track changes that will be applied."""
     _log_language_drops(result.language_audio_drop_ids, _TRACK_AUDIO, tracks, language, needs_audio_change, logger)
@@ -780,7 +814,14 @@ def _log_filter_changes(
             _fmt_track(t) for t in tracks if t.type == _TRACK_SUBTITLES and t.id in result.subtitle_regex_drop_ids
         )
         logger.debug(f"  Dropping subtitle track(s) by name regex: {descs}")
-    _log_metadata_title_change(edit_metadata_title, delete_metadata_title, input_path, logger)
+    # Log metadata title change only when it is actually needed (issue #72).
+    _log_metadata_title_change(
+        edit_metadata_title,
+        delete_metadata_title,
+        needs_metadata_change,
+        input_path,
+        logger,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -912,12 +953,20 @@ def build_mkvmerge_command(
     strip_commentary: bool = False,
     strip_subtitle_regex_patterns: list[re.Pattern] | None = None,
     keep_undefined_audio: bool = False,
+    current_title: str = "",
 ) -> list[str] | None:
     """Build the mkvmerge argv for *input_path*; return *None* if no changes are needed.
 
     Runs all filtering phases (language, fallbacks, commentary, regex, channel), then assembles
     the final command.  Returns *None* when no track or metadata changes are required
     so callers can skip mkvmerge and mark the file as already processed.
+
+    *current_title* is the container-level title from ``mkvmerge -J``
+    ``container.properties.title``.  When it already matches the requested metadata
+    operation no remux is performed.  Defaults to ``""`` (empty).  With this default
+    ``edit_metadata_title`` always requests a change (empty never matches a real stem),
+    while ``delete_metadata_title`` sees the title as already empty and skips the remux.
+    Callers that probe the actual container title should pass the real value.
     """
     result = _apply_language_filter(tracks, language, keep_audio, keep_subtitles, keep_undefined_audio)
     _apply_audio_fallbacks(result, tracks, language, logger, input_path)
@@ -928,7 +977,15 @@ def build_mkvmerge_command(
 
     needs_audio_change = bool(result.audio_drop)
     needs_sub_change = bool(result.sub_drop)
-    needs_metadata_change = edit_metadata_title or delete_metadata_title
+    # Determine whether the requested metadata operation would actually change the file.
+    # Issue #72: avoid redundant remux when the container title is already in the
+    # desired state (e.g. after DB loss or config reset).
+    if edit_metadata_title:
+        needs_metadata_change = current_title != input_path.stem
+    elif delete_metadata_title:
+        needs_metadata_change = bool(current_title)
+    else:
+        needs_metadata_change = False
 
     if not needs_audio_change and not needs_sub_change and not needs_metadata_change:
         return None
@@ -943,10 +1000,12 @@ def build_mkvmerge_command(
         logger,
         needs_audio_change,
         needs_sub_change,
+        needs_metadata_change,
     )
 
     cmd: list[str] = [mkvmerge_path, "-o", str(output_path)]
-    cmd += _assemble_metadata_args(edit_metadata_title, delete_metadata_title, input_path)
+    if needs_metadata_change:
+        cmd += _assemble_metadata_args(edit_metadata_title, delete_metadata_title, input_path)
     cmd += _assemble_track_args(result, needs_audio_change, needs_sub_change)
     cmd += _compute_default_track_flags(tracks, result, needs_audio_change, needs_sub_change, logger, input_path)
     cmd.append(str(input_path))

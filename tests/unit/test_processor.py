@@ -16,6 +16,7 @@ from trimarr.processor import (
     _atomic_file_replace,
     _spinner,
     build_mkvmerge_command,
+    probe_container_title,
     probe_file,
     process_file,
 )
@@ -70,6 +71,7 @@ def _build_cmd(
     strip_lower_channels: bool = False,
     strip_commentary: bool = False,
     strip_subtitle_regex_patterns: list[re.Pattern] | None = None,
+    current_title: str = "",
 ) -> list[str] | None:
     """Thin wrapper around build_mkvmerge_command with test-friendly defaults."""
     if language is None:
@@ -88,6 +90,7 @@ def _build_cmd(
         strip_lower_channels=strip_lower_channels,
         strip_commentary=strip_commentary,
         strip_subtitle_regex_patterns=strip_subtitle_regex_patterns,
+        current_title=current_title,
     )
 
 
@@ -432,6 +435,91 @@ class TestProbeFile:
 
 
 # ---------------------------------------------------------------------------
+# probe_container_title()
+# ---------------------------------------------------------------------------
+
+
+class TestProbeContainerTitle:
+    """Tests for probe_container_title()."""
+
+    def _mkvmerge_json(self, container_props: dict | None, tracks: list[dict] | None = None) -> str:
+        container = {"properties": container_props or {}} if container_props else {}
+        data: dict = {"container": container}
+        if tracks is not None:
+            data["tracks"] = tracks
+        return json.dumps(data)
+
+    def test_returns_title_when_present(self, tmp_path: Path) -> None:
+        mkv = tmp_path / "movie.mkv"
+        mkv.touch()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout=self._mkvmerge_json({"title": "My Movie"}), stderr=""
+            )
+            result = probe_container_title(MKVMERGE, mkv)
+        assert result == "My Movie"
+
+    def test_returns_empty_when_title_absent(self, tmp_path: Path) -> None:
+        mkv = tmp_path / "movie.mkv"
+        mkv.touch()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=self._mkvmerge_json({"title": ""}), stderr="")
+            result = probe_container_title(MKVMERGE, mkv)
+        assert result == ""
+
+    def test_returns_empty_when_container_missing(self, tmp_path: Path) -> None:
+        mkv = tmp_path / "movie.mkv"
+        mkv.touch()
+        with patch("subprocess.run") as mock_run:
+            # No "container" key at all
+            mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps({"tracks": []}), stderr="")
+            result = probe_container_title(MKVMERGE, mkv)
+        assert result == ""
+
+    def test_returns_empty_when_title_null(self, tmp_path: Path) -> None:
+        mkv = tmp_path / "movie.mkv"
+        mkv.touch()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=self._mkvmerge_json({"title": None}), stderr="")
+            result = probe_container_title(MKVMERGE, mkv)
+        assert result == ""
+
+    def test_raises_on_nonzero_exit(self, tmp_path: Path) -> None:
+        mkv = tmp_path / "bad.mkv"
+        mkv.touch()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=2, stdout="", stderr="err")
+            with pytest.raises(RuntimeError, match="exit 2"):
+                probe_container_title(MKVMERGE, mkv)
+
+    def test_raises_on_invalid_json(self, tmp_path: Path) -> None:
+        mkv = tmp_path / "bad.mkv"
+        mkv.touch()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="not json", stderr="")
+            with pytest.raises(RuntimeError, match="parse"):
+                probe_container_title(MKVMERGE, mkv)
+
+    def test_raises_on_timeout(self, tmp_path: Path) -> None:
+        mkv = tmp_path / "movie.mkv"
+        mkv.touch()
+        with (
+            patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd=MKVMERGE, timeout=60)),
+            pytest.raises(RuntimeError, match="timed out"),
+        ):
+            probe_container_title(MKVMERGE, mkv)
+
+    def test_raises_on_os_error(self, tmp_path: Path) -> None:
+        mkv = tmp_path / "movie.mkv"
+        mkv.touch()
+        with (
+            patch("subprocess.run", side_effect=OSError("permission denied")),
+            pytest.raises(RuntimeError, match="Could not execute"),
+        ):
+            probe_container_title(MKVMERGE, mkv)
+
+
+# ---------------------------------------------------------------------------
 # build_mkvmerge_command()
 # ---------------------------------------------------------------------------
 
@@ -552,7 +640,7 @@ class TestBuildMkvmergeCommand:
 
     def test_delete_metadata_title_sets_empty_string(self) -> None:
         tracks = _make_tracks(audio_langs=["eng"], sub_langs=[])
-        cmd = _build_cmd(tracks, delete_metadata_title=True)
+        cmd = _build_cmd(tracks, delete_metadata_title=True, current_title="Some Title")
         assert cmd is not None
         assert "--title" in cmd
         idx = cmd.index("--title") + 1
@@ -2276,9 +2364,9 @@ class TestBuildMkvmergeCommandAudioDropNoKeep:
         assert "--subtitle-tracks" not in cmd
 
     def test_needs_metadata_change_true_via_delete_title(self) -> None:
-        """delete_metadata_title=True also sets needs_metadata_change."""
+        """delete_metadata_title=True with a non-empty current title needs a change."""
         tracks = [MkvTrack(id=0, type="video", language=None)]
-        cmd = _build_cmd(tracks, delete_metadata_title=True)
+        cmd = _build_cmd(tracks, delete_metadata_title=True, current_title="Old Movie")
         assert cmd is not None
         assert "--title" in cmd
         idx = cmd.index("--title") + 1
@@ -2288,6 +2376,53 @@ class TestBuildMkvmergeCommandAudioDropNoKeep:
 # ---------------------------------------------------------------------------
 # Branch coverage: _compute_channel_drops_per_group all-unknown channels
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Metadata title no-op when already matches (issue #72)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildMkvmergeCommandMetadataSkipNoop:
+    """When the container title already matches the requested metadata operation, no remux is needed.
+
+    Issue #72: --delete-metadata-title and --edit-metadata-title must inspect the current
+    container title via the new ``current_title`` parameter and return None when the title
+    is already in the desired state, avoiding a redundant remux after DB loss or config reset.
+    """
+
+    def test_delete_title_when_already_empty_returns_none(self) -> None:
+        """delete_metadata_title with already-empty title → no change needed."""
+        tracks = [MkvTrack(id=0, type="video", language=None)]
+        cmd = _build_cmd(tracks, delete_metadata_title=True, current_title="")
+        assert cmd is None
+
+    def test_delete_title_when_title_present_returns_command(self) -> None:
+        """delete_metadata_title with non-empty title → still needs change."""
+        tracks = [MkvTrack(id=0, type="video", language=None)]
+        inp = Path("/media/Movie.mkv")
+        cmd = _build_cmd(tracks, delete_metadata_title=True, input_path=inp, current_title="Full Title")
+        assert cmd is not None
+        assert "--title" in cmd
+        idx = cmd.index("--title") + 1
+        assert cmd[idx] == ""
+
+    def test_edit_title_when_already_matches_returns_none(self) -> None:
+        """edit_metadata_title when current title already equals stem → no change needed."""
+        inp = Path("/media/My.Movie.mkv")
+        tracks = [MkvTrack(id=0, type="video", language=None)]
+        cmd = _build_cmd(tracks, edit_metadata_title=True, input_path=inp, current_title="My.Movie")
+        assert cmd is None
+
+    def test_edit_title_when_differs_returns_command(self) -> None:
+        """edit_metadata_title when current title differs from stem → still needs change."""
+        inp = Path("/media/My.Movie.mkv")
+        tracks = [MkvTrack(id=0, type="video", language=None)]
+        cmd = _build_cmd(tracks, edit_metadata_title=True, input_path=inp, current_title="Old Title")
+        assert cmd is not None
+        assert "--title" in cmd
+        idx = cmd.index("--title") + 1
+        assert cmd[idx] == "My.Movie"
 
 
 class TestComputeChannelDropsAllUnknown:
