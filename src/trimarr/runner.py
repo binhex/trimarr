@@ -16,7 +16,13 @@ from typing import TYPE_CHECKING
 
 from trimarr.database import Database
 from trimarr.hooks import _run_hook
-from trimarr.processor import CorruptOutputError, build_mkvmerge_command, probe_file, process_file
+from trimarr.processor import (
+    CorruptOutputError,
+    build_mkvmerge_command,
+    probe_container_title,
+    probe_file,
+    process_file,
+)
 
 # Width of the separator line used in critical diagnostic messages.
 _LOG_SEPARATOR_WIDTH = 80
@@ -403,6 +409,19 @@ def _process_one_file(
         counts.failed += 1
         return
 
+    # Probe container title when metadata flags are active (issue #72).
+    if cfg.edit_metadata_title or cfg.delete_metadata_title:
+        try:
+            current_title = probe_container_title(cfg.mkvmerge_path, file_path)
+        except RuntimeError as exc:
+            reason = f"probe title failed: {str(exc).splitlines()[0].strip()}"
+            logger.error(f"Could not probe container title for '{file_path}': {exc}")
+            failures.append((file_path, reason))
+            counts.failed += 1
+            return
+    else:
+        current_title = ""
+
     # Build the mkvmerge command (returns None if nothing to do)
     cmd = build_mkvmerge_command(
         mkvmerge_path=cfg.mkvmerge_path,
@@ -419,6 +438,7 @@ def _process_one_file(
         strip_commentary=cfg.strip_commentary,
         strip_subtitle_regex_patterns=cfg.strip_subtitle_regex_patterns,
         keep_undefined_audio=cfg.keep_undefined_audio,
+        current_title=current_title,
     )
 
     if cmd is None:
