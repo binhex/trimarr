@@ -823,7 +823,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/3e/c1/368daee29d1c9b081
 
 [[package]]
 name = "trimarr"
-version = "1.2.9"
+version = "1.2.10"
 source = { editable = "." }
 dependencies = [
     { name = "click" },

@@ -994,8 +994,34 @@ def _resolve_nfo_id_lookups(
 
     Returns language codes if any lookup succeeds, or *None* to
     continue to the next fallback phase.
+
+    Lookup order depends on media type:
+    - **TV shows:** TVDB/TMDb chain first (``originalLanguage`` is more
+      appropriate for ``--keep-native-audio`` than IMDb's
+      ``spokenLanguages`` which can include every language with even
+      brief dialogue). Falls back to IMDb if the chain fails.
+    - **Movies:** IMDb first (``spokenLanguages`` from auxiliary data
+      is the most reliable indicator), then TVDB/TMDb chain as fallback.
     """
-    # Direct IMDb ID lookup (most reliable)
+    tmdb_media_type = _get_tmdb_endpoint(file_path.stem)
+    is_tv = tmdb_media_type == "tv"
+
+    if is_tv:
+        # TV show: try TVDB/TMDb chain first — originalLanguage is more
+        # appropriate for --keep-native-audio than IMDb's spokenLanguages.
+        result = _run_nfo_id_lookup_chain(
+            nfo_meta.tmdb_id,
+            nfo_meta.tvdb_id,
+            tmdb_api_key,
+            tvdb_api_key,
+            tmdb_media_type,
+            file_path,
+            db,
+        )
+        if result:
+            return result
+
+    # Direct IMDb ID lookup (primary for movies, fallback for TV)
     if nfo_meta.imdb_id:
         result = _lookup_and_cache(
             _lookup_imdbpie_by_id,
@@ -1007,15 +1033,19 @@ def _resolve_nfo_id_lookups(
         if result:
             return result
 
-    return _run_nfo_id_lookup_chain(
-        nfo_meta.tmdb_id,
-        nfo_meta.tvdb_id,
-        tmdb_api_key,
-        tvdb_api_key,
-        _get_tmdb_endpoint(file_path.stem),
-        file_path,
-        db,
-    )
+    # TMDb/TVDB chain for movies (TV already tried the chain above)
+    if not is_tv:
+        return _run_nfo_id_lookup_chain(
+            nfo_meta.tmdb_id,
+            nfo_meta.tvdb_id,
+            tmdb_api_key,
+            tvdb_api_key,
+            tmdb_media_type,
+            file_path,
+            db,
+        )
+
+    return None
 
 
 def _resolve_nfo_title_search(
