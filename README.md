@@ -19,7 +19,9 @@ automatically deduplicated.
   language-matching audio tracks are commentary (e.g. Director's Commentary on a foreign-language
   film), audio filtering is also skipped. A warning is logged in both cases.
 - **Native language preservation** — with `--keep-native-audio`, trimarr identifies the file's
-  original spoken language(s) via IMDb (primary), TMDb, and TVDB (fallbacks) and preserves those
+  original spoken language(s) via IMDb, TMDb, and TVDB — the lookup order adapts to media type:
+  for TV shows, TVDB/TMDb originalLanguage is tried first (more appropriate than IMDb's broad
+  spokenLanguages), while movies keep IMDb first — and preserves those
   audio tracks even if they don't match your `--language` preference. Ideal for dubbed films
   (e.g., keeping original Chinese audio alongside an English dub) and TV shows where Sonarr
   NFO files carry only a TVDB ID. Results are cached in the database so each
@@ -89,7 +91,7 @@ trimarr --help
 | `--delete-metadata-title` | Remove the container title metadata from each file. Mutually exclusive with `--edit-metadata-title`. | `false` | — | `flag` |
 | `--keep-subtitles` | Keep all subtitle tracks regardless of language. | `false` | — | `flag` |
 | `--keep-audio` | Keep all audio tracks regardless of language. | `false` | — | `flag` |
-| `--keep-native-audio` | Identify the file's native/original spoken language(s) via IMDb (primary), TMDb, and TVDB (fallbacks) and keep all audio tracks in those languages alongside your `--language` preference. Ignored when `--keep-audio` is set. First-time lookups require an internet connection; results are cached in the database. | `false` | — | `flag` |
+| `--keep-native-audio` | Identify the file's native/original spoken language(s) via IMDb, TMDb, and TVDB — the lookup order adapts to media type: for TV shows, TVDB/TMDb originalLanguage is tried first, while movies keep IMDb first — and keep all audio tracks in those languages alongside your `--language` preference. Ignored when `--keep-audio` is set. First-time lookups require an internet connection; results are cached in the database. | `false` | — | `flag` |
 | `--keep-undefined-audio` | If specified, audio tracks with an undefined language code ("und") are kept rather than dropped by the language filter. Useful when source files have missing or incorrect language tags. Ignored when `--keep-audio` is set. | `false` | — | `flag` |
 | `--tmdb-api-key` | TMDb API key used as fallback when IMDbPie cannot identify a file's native language. Optional — without it, TMDb lookups are silently skipped. | — | `<key>` | `string` |
 | `--tvdb-api-key` | TVDB API key used as fallback when IMDbPie and TMDb cannot identify a file's native language. Useful for TV shows whose NFO files contain only a TVDB ID. Optional — without it, TVDB lookups are silently skipped. | — | `<key>` | `string` |
@@ -176,7 +178,7 @@ flowchart TD
 > profile changes.
 
 > **Native audio preservation:** When `--keep-native-audio` is enabled, trimarr identifies the
-> film's original spoken language(s) and merges them into the effective language list *before*
+> media file's original spoken language(s) and merges them into the effective language list *before*
 > the `Filter by --language` step. This means the native language is treated identically to a
 > user-supplied language — all existing safeguards (audio fallback, commentary stripping,
 > channel stripping) apply uniformly. The lookup result is cached in the database so each
@@ -197,12 +199,26 @@ for this media?}
     B -- Yes --> C[Parse NFO XML]
     C --> D{NFO has IMDb,
 TMDb, or TVDB ID?}
-    D -- Yes --> E[Look up by ID:
-IMDb → TMDb → TVDB]
-    E --> F{API returns
-native languages?}
-    F -- Yes --> G([✅ Cache & return
+    D -- Yes --> E{TV show?}
+
+    %% TV show path: TVDB/TMDb first (originalLanguage is more appropriate)
+    E -- Yes --> E1[TVDB/TMDb chain:
+TVDB → TMDb (originalLanguage)]
+    E1 --> F1{Found?}
+    F1 -- Yes --> G([✅ Cache & return
 native languages])
+    F1 -- No --> E2[IMDb spokenLanguages]
+    E2 --> F{Found?}
+
+    %% Movie path: IMDb first (spokenLanguages is reliable for films)
+    E -- No (Movie) --> E3[IMDb spokenLanguages]
+    E3 --> F3{Found?}
+    F3 -- Yes --> G
+    F3 -- No --> E4[TVDB/TMDb chain:
+TMDb → TVDB]
+    E4 --> F{Found?}
+
+    F -- Yes --> G
     F -- No --> H
 
     %% NFO title search --

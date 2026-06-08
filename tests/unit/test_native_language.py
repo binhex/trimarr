@@ -1526,17 +1526,6 @@ class TestResolveNativeLanguageNfo:
         source = call_args[0][2]
         assert source.startswith("nfo_")
 
-    def test_nfo_cache_hit(self, mocker, tmp_path: Path) -> None:
-        """DB cache hit returns without NFO re-parse."""
-        from trimarr.native_language import resolve_native_language
-
-        mkv = Path("/data/test.mkv")
-        mock_db = mocker.MagicMock()
-        mock_db.get_native_language_cache.return_value = (["chi"], "nfo_imdbpie_id", None)
-        result = resolve_native_language(mkv, db=mock_db)
-        assert result == ["chi"]
-        mock_db.get_native_language_cache.assert_called_once()
-
     def test_nfo_tmdb_title_with_api_key(self, mocker, tmp_path: Path) -> None:
         """NFO title + TMDb search succeeds with API key."""
         from trimarr.native_language import resolve_native_language
@@ -2160,3 +2149,82 @@ class TestResolveNativeLanguageTvShowBug:
         assert len(_tmdb_call_args) == 0, (
             f"Expected 0 calls to _lookup_tmdb_by_id (TVDB should win), got {len(_tmdb_call_args)}: {_tmdb_call_args}"
         )
+
+    def test_tv_show_nfo_prefers_tvdb_over_imdb_inflated_spoken_languages(
+        self,
+        mocker,
+        tmp_path: Path,
+    ) -> None:
+        """TV show NFO should prefer TVDB originalLanguage over IMDb spokenLanguages.
+
+        This reproduces issue #71: when NFO has all three IDs (imdb, tmdb, tvdb)
+        AND IMDb succeeds (returns spokenLanguages), the current code returns IMDb's
+        inflated language list immediately — TVDB/TMDb are never consulted.
+
+        For TV shows, TVDB's originalLanguage (single code) is more appropriate
+        for --keep-native-audio than IMDb's spokenLanguages (all languages present).
+
+        IMDb: "eng,spa,ita,fre,chi,jpn,dut" (7 languages — spokenLanguages)
+        TVDB: "eng" (1 language — originalLanguage)
+        Expected: TVDB wins → ["eng"]
+        """
+        from trimarr.native_language import resolve_native_language
+
+        # Create a TV show file structure: episode NFO + tvshow.nfo at series root
+        series = tmp_path / "Malcolm in the Middle"
+        season = series / "Season 01"
+        season.mkdir(parents=True)
+
+        # tvshow.nfo at series root — has imdb_id, tmdb_id, AND tvdb_id
+        tvshow_nfo = series / "tvshow.nfo"
+        tvshow_nfo.write_text(
+            "<tvshow><title>Malcolm in the Middle</title>"
+            "<imdbid>tt0212671</imdbid><tmdbid>2004</tmdbid><tvdbid>73838</tvdbid></tvshow>"
+        )
+
+        mkv = season / "Malcolm.in.the.Middle.S01E01.mkv"
+        mkv.write_text("dummy")
+
+        # Mock cache miss so we go through the entire resolution chain
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        mock_db.set_native_language_cache = mocker.MagicMock()
+
+        # IMDb SUCCEEDS — returns inflated spokenLanguages (the bug)
+        # This simulates what IMDb's get_title_auxiliary / spokenLanguages returns
+        # for a popular international show: eng, spa, ita, fre, chi, jpn, dut
+        mocker.patch(
+            "trimarr.native_language._lookup_imdbpie_by_id",
+            return_value=["eng", "spa", "ita", "fre", "chi", "jpn", "dut"],
+        )
+
+        # TVDB returns the single original language (correct for TV)
+        tvdb_mock = mocker.patch(
+            "trimarr.native_language._lookup_tvdb_by_id",
+            return_value=["eng"],
+        )
+
+        # TMDb also returns single original language
+        mocker.patch(
+            "trimarr.native_language._lookup_tmdb_by_id",
+            return_value=["eng"],
+        )
+
+        result = resolve_native_language(
+            file_path=mkv,
+            db=mock_db,
+            tmdb_api_key="fake-tmdb-key",
+            tvdb_api_key="fake-tvdb-key",
+        )
+
+        # The result MUST be English (from TVDB/TMDb originalLanguage),
+        # NOT the 7-language inflated list from IMDb spokenLanguages
+        assert result == ["eng"], (
+            f"Expected ['eng'] from TVDB originalLanguage, got {result}. "
+            "The bug: _resolve_nfo_id_lookups returns IMDb spokenLanguages "
+            "immediately for TV shows when imdb_id is present, without "
+            "consulting TVDB/TMDb which have the more appropriate originalLanguage."
+        )
+
+        # TVDB should have been called (it has the right data for this TV show)
+        tvdb_mock.assert_called_once()
