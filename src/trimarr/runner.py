@@ -352,6 +352,47 @@ def _resolve_effective_language(
     return result
 
 
+def _probe_file_safe(
+    mkvmerge_path: str,
+    file_path: Path,
+    root: Path,
+    idx: int,
+    total: int,
+    cfg: _ProcessingConfig,
+    logger: Logger,
+    failures: list[tuple[Path, str]],
+    counts: _RunCounts,
+) -> tuple[list, str] | None:
+    """Probe MKV tracks and container title.
+
+    Returns ``(tracks, current_title)`` on success, or *None* on failure
+    (logs, records the failure, and lets the caller return early).
+    """
+    logger.info(f"  [{idx}/{total}] Checking '{file_path.relative_to(root)}'...")
+
+    try:
+        tracks = probe_file(mkvmerge_path, file_path)
+    except RuntimeError as exc:
+        reason = f"probe failed: {str(exc).splitlines()[0].strip()}"
+        logger.error(f"Could not probe '{file_path}': {exc}")
+        failures.append((file_path, reason))
+        counts.failed += 1
+        return None
+
+    current_title = ""
+    if cfg.edit_metadata_title or cfg.delete_metadata_title:
+        try:
+            current_title = probe_container_title(mkvmerge_path, file_path)
+        except RuntimeError as exc:
+            reason = f"probe title failed: {str(exc).splitlines()[0].strip()}"
+            logger.error(f"Could not probe container title for '{file_path}': {exc}")
+            failures.append((file_path, reason))
+            counts.failed += 1
+            return None
+
+    return tracks, current_title
+
+
 def _process_one_file(
     file_path: Path,
     root: Path,
@@ -397,30 +438,21 @@ def _process_one_file(
         counts.skipped += 1
         return
 
-    logger.info(f"  [{idx}/{total}] Checking '{file_path.relative_to(root)}'...")
-
-    # Probe tracks
-    try:
-        tracks = probe_file(cfg.mkvmerge_path, file_path)
-    except RuntimeError as exc:
-        reason = f"probe failed: {str(exc).splitlines()[0].strip()}"
-        logger.error(f"Could not probe '{file_path}': {exc}")
-        failures.append((file_path, reason))
-        counts.failed += 1
+    # Probe tracks and container title
+    probed = _probe_file_safe(
+        mkvmerge_path=cfg.mkvmerge_path,
+        file_path=file_path,
+        root=root,
+        idx=idx,
+        total=total,
+        cfg=cfg,
+        logger=logger,
+        failures=failures,
+        counts=counts,
+    )
+    if probed is None:
         return
-
-    # Probe container title when metadata flags are active (issue #72).
-    if cfg.edit_metadata_title or cfg.delete_metadata_title:
-        try:
-            current_title = probe_container_title(cfg.mkvmerge_path, file_path)
-        except RuntimeError as exc:
-            reason = f"probe title failed: {str(exc).splitlines()[0].strip()}"
-            logger.error(f"Could not probe container title for '{file_path}': {exc}")
-            failures.append((file_path, reason))
-            counts.failed += 1
-            return
-    else:
-        current_title = ""
+    tracks, current_title = probed
 
     # Build the mkvmerge command (returns None if nothing to do)
     cmd = build_mkvmerge_command(
