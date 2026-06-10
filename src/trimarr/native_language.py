@@ -995,33 +995,34 @@ def _resolve_nfo_id_lookups(
     Returns language codes if any lookup succeeds, or *None* to
     continue to the next fallback phase.
 
-    Lookup order depends on media type:
-    - **TV shows:** TVDB/TMDb chain first (``originalLanguage`` is more
-      appropriate for ``--keep-native-audio`` than IMDb's
-      ``spokenLanguages`` which can include every language with even
-      brief dialogue). Falls back to IMDb if the chain fails.
-    - **Movies:** IMDb first (``spokenLanguages`` from auxiliary data
-      is the most reliable indicator), then TVDB/TMDb chain as fallback.
+    Lookup order is unified for all media types:
+    - **TMDb/TVDB chain first** (``originalLanguage`` — a single production
+      language code, more appropriate for ``--keep-native-audio``).
+      The chain internally orders by media type: TMDb first for movies,
+      TVDB first for TV shows.
+    - **IMDb fallback** (``spokenLanguages`` — all languages present in the
+      title, broader but less specific). Used when the chain has no API key
+      configured or all keyed lookups fail.
     """
     tmdb_media_type = _get_tmdb_endpoint(file_path.stem)
-    is_tv = tmdb_media_type == "tv"
 
-    if is_tv:
-        # TV show: try TVDB/TMDb chain first — originalLanguage is more
-        # appropriate for --keep-native-audio than IMDb's spokenLanguages.
-        result = _run_nfo_id_lookup_chain(
-            nfo_meta.tmdb_id,
-            nfo_meta.tvdb_id,
-            tmdb_api_key,
-            tvdb_api_key,
-            tmdb_media_type,
-            file_path,
-            db,
-        )
-        if result:
-            return result
+    # Phase 1 — TMDb/TVDB chain (originalLanguage — single production
+    # language code).  The chain internally orders by media type:
+    # TMDb first for movies, TVDB first for TV shows.
+    result = _run_nfo_id_lookup_chain(
+        nfo_meta.tmdb_id,
+        nfo_meta.tvdb_id,
+        tmdb_api_key,
+        tvdb_api_key,
+        tmdb_media_type,
+        file_path,
+        db,
+    )
+    if result:
+        return result
 
-    # Direct IMDb ID lookup (primary for movies, fallback for TV)
+    # Phase 2 — IMDb ID fallback (spokenLanguages — broader but
+    # includes every language with any dialogue in the title).
     if nfo_meta.imdb_id:
         result = _lookup_and_cache(
             _lookup_imdbpie_by_id,
@@ -1032,18 +1033,6 @@ def _resolve_nfo_id_lookups(
         )
         if result:
             return result
-
-    # TMDb/TVDB chain for movies (TV already tried the chain above)
-    if not is_tv:
-        return _run_nfo_id_lookup_chain(
-            nfo_meta.tmdb_id,
-            nfo_meta.tvdb_id,
-            tmdb_api_key,
-            tvdb_api_key,
-            tmdb_media_type,
-            file_path,
-            db,
-        )
 
     return None
 

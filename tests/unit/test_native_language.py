@@ -2228,3 +2228,81 @@ class TestResolveNativeLanguageTvShowBug:
 
         # TVDB should have been called (it has the right data for this TV show)
         tvdb_mock.assert_called_once()
+
+
+class TestResolveNativeLanguageMovieBug:
+    """Regression tests for issue #76 — Movie NFO prefers TMDb over IMDb."""
+
+    def test_movie_nfo_prefers_tmdb_over_imdb_inflated_spoken_languages(
+        self,
+        mocker,
+        tmp_path: Path,
+    ) -> None:
+        """Movie NFO should prefer TMDb originalLanguage over IMDb spokenLanguages.
+
+        This reproduces issue #76: when movie NFO has both imdb_id and tmdb_id
+        AND IMDb succeeds (returns spokenLanguages), the current code returns IMDb's
+        inflated language list immediately — TMDb is never consulted.
+
+        For movies, TMDb's originalLanguage (single code) is more appropriate
+        for --keep-native-audio than IMDb's spokenLanguages (all languages present).
+
+        IMDb: "jpn,ger,ita,fre" (4 languages — spokenLanguages for The Wind Rises)
+        TMDb: "jpn" (1 language — originalLanguage)
+        Expected: TMDb wins → ["jpn"]
+        """
+        from trimarr.native_language import resolve_native_language
+
+        d = tmp_path / "The Wind Rises (2013)"
+        d.mkdir()
+        nfo = d / "The Wind Rises.nfo"
+        nfo.write_text(
+            '<?xml version="1.0"?>'
+            "<movie><title>The Wind Rises</title><year>2013</year>"
+            "<imdbid>tt2013293</imdbid><tmdbid>149870</tmdbid></movie>"
+        )
+        mkv = d / "The Wind Rises (2013).mkv"
+        mkv.write_text("dummy")
+
+        # Mock cache miss so we go through the entire resolution chain
+        mock_db = mocker.MagicMock()
+        mock_db.get_native_language_cache.return_value = None
+        mock_db.set_native_language_cache = mocker.MagicMock()
+
+        # IMDb SUCCEEDS — returns inflated spokenLanguages (the bug)
+        # This simulates what IMDb's get_title_auxiliary / spokenLanguages returns
+        # for a popular international film: jpn, ger, ita, fre
+        mocker.patch(
+            "trimarr.native_language._lookup_imdbpie_by_id",
+            return_value=["jpn", "ger", "ita", "fre"],
+        )
+
+        # TMDb returns the single original language (correct for movies)
+        tmdb_mock = mocker.patch(
+            "trimarr.native_language._lookup_tmdb_by_id",
+            return_value=["jpn"],
+        )
+
+        # TVDB returns nothing (not applicable for standard movies)
+        mocker.patch(
+            "trimarr.native_language._lookup_tvdb_by_id",
+            return_value=None,
+        )
+
+        result = resolve_native_language(
+            file_path=mkv,
+            db=mock_db,
+            tmdb_api_key="fake-tmdb-key",
+        )
+
+        # The result MUST be Japanese (from TMDb originalLanguage),
+        # NOT the 4-language inflated list from IMDb spokenLanguages
+        assert result == ["jpn"], (
+            f"Expected ['jpn'] from TMDb originalLanguage, got {result}. "
+            "The bug: _resolve_nfo_id_lookups returns IMDb spokenLanguages "
+            "immediately for movies when imdb_id is present, without consulting "
+            "TMDb which has the more appropriate originalLanguage."
+        )
+
+        # TMDb should have been called (it has the right data for this movie)
+        tmdb_mock.assert_called_once()
