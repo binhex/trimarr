@@ -27,8 +27,8 @@ class MkvTrack:
     """Represents a single track inside an MKV container.
 
     Attributes:
-        id: mkvmerge track ID (zero-based for each track type but stored as the
-            global integer ID returned by ``mkvmerge -J``).
+        id: mkvmerge track ID (the zero-based integer ID returned by
+            ``mkvmerge -J``, unique across all tracks in the file).
         type: Track type string as returned by mkvmerge, e.g. ``"audio"``,
             ``"subtitles"``, or ``"video"``.
         language: ISO 639-2 language tag, or *None* when the track carries no
@@ -324,7 +324,12 @@ def _normalize_language_code(lang: str | None) -> str | None:
 def _parse_track(raw: dict) -> MkvTrack:
     """Parse a single track entry from ``mkvmerge -J`` JSON output."""
     props = raw.get("properties", {})
-    lang_raw = props.get("language") or props.get("language_ietf")
+    # ``language`` defaults to "und" (undetermined) when the container carries
+    # only an IETF BCP-47 tag, so fall back to ``language_ietf`` for those
+    # tracks instead of treating "und" as authoritative.
+    lang_raw = props.get("language")
+    if not lang_raw or lang_raw == "und":
+        lang_raw = props.get("language_ietf") or lang_raw
     lang = _normalize_language_code(lang_raw)
     return MkvTrack(
         id=raw["id"],
@@ -339,7 +344,11 @@ def _parse_track(raw: dict) -> MkvTrack:
 def _run_mkvmerge_probe(mkvmerge_path: str, file_path: Path) -> dict:
     """Run ``mkvmerge -J`` and return the parsed JSON dict.
 
-    Raises :exc:`RuntimeError` on non-zero exit, timeout, OS error, or JSON parse failure.
+    Exit code 1 means "completed with warnings" — the JSON payload is still
+    complete, so it is accepted (matching :func:`_check_exit_code`).
+
+    Raises :exc:`RuntimeError` on exit codes above 1, timeout, OS error, or
+    JSON parse failure.
     Shared helper used by :func:`probe_file` and :func:`probe_container_title`.
     """
     try:
@@ -347,6 +356,7 @@ def _run_mkvmerge_probe(mkvmerge_path: str, file_path: Path) -> dict:
             [mkvmerge_path, "-J", str(file_path)],
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=_PROBE_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
@@ -354,7 +364,7 @@ def _run_mkvmerge_probe(mkvmerge_path: str, file_path: Path) -> dict:
     except OSError as exc:
         raise RuntimeError(f"Could not execute mkvmerge for '{file_path}': {exc}") from exc
 
-    if result.returncode != 0:
+    if result.returncode not in (0, 1):
         raise RuntimeError(f"mkvmerge -J failed for '{file_path}' (exit {result.returncode}): {result.stderr.strip()}")
     try:
         return cast("dict", json.loads(result.stdout))
@@ -365,7 +375,8 @@ def _run_mkvmerge_probe(mkvmerge_path: str, file_path: Path) -> dict:
 def probe_file(mkvmerge_path: str, file_path: Path) -> list[MkvTrack]:
     """Run ``mkvmerge -J`` on *file_path* and return the list of :class:`MkvTrack` objects.
 
-    Raises :exc:`RuntimeError` on non-zero exit, timeout, OS error, or JSON parse failure.
+    Raises :exc:`RuntimeError` on exit codes above 1, timeout, OS error, or
+    JSON parse failure.
     """
     info = _run_mkvmerge_probe(mkvmerge_path, file_path)
     return [_parse_track(raw) for raw in info.get("tracks", [])]
@@ -377,7 +388,7 @@ def probe_container_title(mkvmerge_path: str, file_path: Path) -> str:
     Returns the value of ``container.properties.title`` from the mkvmerge JSON
     output, or an empty string when the title is absent or missing.
 
-    Raises :exc:`RuntimeError` on non-zero exit, timeout, OS error, or JSON
+    Raises :exc:`RuntimeError` on exit codes above 1, timeout, OS error, or JSON
     parse failure (same semantics as :func:`probe_file`).
 
     Note: each call spawns a separate ``mkvmerge -J`` process.  When a caller
@@ -1030,7 +1041,8 @@ def _check_exit_code(
     """
     if result.returncode not in (0, 1):
         stderr = result.stderr.strip() or result.stdout.strip()
-        logger.error(f"mkvmerge failed for '{file_path}' (exit {result.returncode}).\n{stderr}")
+        logger.error(f"mkvmerge failed for '{file_path}' (exit {result.returncode}).")
+        logger.error(f"  mkvmerge stderr: {stderr}")
         first_stderr = stderr.splitlines()[0].strip() if stderr else ""
         reason = f"mkvmerge failed (exit {result.returncode})"
         if first_stderr:
@@ -1137,6 +1149,27 @@ def _cleanup_tmp_file(tmp_path: Path | None, logger: Logger) -> None:
             logger.warning(f"Could not remove temp file '{tmp_path}': {cleanup_exc}")
 
 
+def _probe_output_container(mkvmerge_path: str, tmp_path: Path, logger: Logger) -> subprocess.CompletedProcess[str]:
+    """Probe the remuxed temp file with ``mkvmerge -J``.
+
+    Exit code 1 ("completed with warnings") is accepted and logged; the caller
+    decides what any other non-zero code means.
+
+    Returns:
+        The completed probe process, for the caller to inspect.
+    """
+    probe = subprocess.run(
+        [mkvmerge_path, "-J", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=_PROBE_TIMEOUT,
+    )
+    if probe.returncode == 1:
+        logger.warning(f"mkvmerge reported warnings while validating '{tmp_path.name}' (exit 1); output accepted.")
+    return probe
+
+
 def process_file(
     mkvmerge_path: str,
     file_path: Path,
@@ -1149,7 +1182,13 @@ def process_file(
 
     Writes to a temp file, validates exit code, size, and structure, then
     renames into place.  Returns *None* on success or an error reason string.
-    Original is never touched on failure; temp file is always cleaned up.
+    The original is replaced only after every check passes; the temp file is
+    removed on every exit path except a failed structural check, where it is
+    retained for inspection.
+
+    Raises:
+        CorruptOutputError: When the remuxed output fails the ``mkvmerge -J``
+            structural check.  The temp file is deliberately left on disk.
     """
     tmp_path: Path | None = None
     try:
@@ -1167,7 +1206,9 @@ def process_file(
 
         logger.debug(f"Running: {' '.join(patched_cmd)}")
         with _spinner(f"Remuxing '{file_path.name}'..."):
-            result = subprocess.run(patched_cmd, capture_output=True, text=True, timeout=_PROCESS_TIMEOUT)
+            result = subprocess.run(
+                patched_cmd, capture_output=True, text=True, errors="replace", timeout=_PROCESS_TIMEOUT
+            )
 
         exit_error = _check_exit_code(result, file_path, logger)
         if exit_error is not None:
@@ -1183,13 +1224,8 @@ def process_file(
         # unplayable (e.g. due to disk-full mid-write on a FUSE/network share).
         # If validation fails, CorruptOutputError is raised to halt ALL further
         # processing — the temp file is preserved for operator inspection.
-        probe = subprocess.run(
-            [mkvmerge_path, "-J", str(tmp_path)],
-            capture_output=True,
-            text=True,
-            timeout=_PROBE_TIMEOUT,
-        )
-        if probe.returncode != 0:
+        probe = _probe_output_container(mkvmerge_path, tmp_path, logger)
+        if probe.returncode not in (0, 1):
             corrupt_tmp = tmp_path
             tmp_path = None  # Prevent finally-block cleanup; file kept for inspection.
             raise CorruptOutputError(
@@ -1201,7 +1237,6 @@ def process_file(
                 input_size=input_size,
                 mkvmerge_path=mkvmerge_path,
             )
-
         # Replace original atomically.
         _atomic_file_replace(tmp_path, file_path, no_backup, logger)
         tmp_path = None  # Ownership transferred; do not delete in finally block.
@@ -1209,16 +1244,13 @@ def process_file(
         return None
 
     except OSError as exc:
-        logger.error(f"File system error processing '{file_path}': {exc}")
-        logger.debug("", exc_info=True)
+        logger.opt(exception=exc).error(f"File system error processing '{file_path}': {exc}")
         return f"filesystem error: {str(exc).splitlines()[0].strip()}"
     except subprocess.TimeoutExpired as exc:
-        logger.error(f"mkvmerge timed out processing '{file_path}': {exc}")
-        logger.debug("", exc_info=True)
+        logger.opt(exception=exc).error(f"mkvmerge timed out processing '{file_path}': {exc}")
         return f"mkvmerge timeout: {str(exc).splitlines()[0].strip()}"
     except Exception as exc:
-        logger.error(f"Unexpected error processing '{file_path}': {exc}")
-        logger.debug("", exc_info=True)
+        logger.opt(exception=exc).error(f"Unexpected error processing '{file_path}': {exc}")
         return f"unexpected error: {str(exc).splitlines()[0].strip()}"
     finally:
         _cleanup_tmp_file(tmp_path, logger)

@@ -331,3 +331,28 @@ class TestRunScheduledSpecialStrings:
             run_scheduled(MagicMock(), cron_expr="@daily", run_on_start=False, logger=logger)
 
         mock_get.assert_called_once_with("@daily")
+
+
+class TestSystemExitOneIsTransient:
+    """A database-unavailable exit (code 1) must not kill the scheduler."""
+
+    def test_exit_code_one_is_logged_and_loop_continues(self) -> None:
+        calls: list[int] = []
+
+        def run_fn() -> None:
+            calls.append(1)
+            if len(calls) == 1:
+                raise SystemExit(1)
+            raise KeyboardInterrupt
+
+        logger = MagicMock()
+        with (
+            patch("trimarr.scheduler._get_next_fire", return_value=datetime(2026, 5, 20, 10, 30, 0)),
+            patch("trimarr.scheduler._sleep_until"),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            run_scheduled(run_fn, cron_expr="*/30 * * * *", run_on_start=True, logger=logger)
+
+        assert exc_info.value.code == 0
+        assert len(calls) == 2, "the scheduler must retry after exit code 1"
+        assert any("exit 1" in str(c) for c in logger.error.call_args_list)

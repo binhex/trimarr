@@ -125,13 +125,11 @@ class TestDryRunDoesNotRecordToDatabase:
         finally:
             _real_loguru_logger.remove(handler_id)
 
-    def test_dry_run_marks_processed_when_no_changes_needed(self, tmp_path: Path) -> None:
-        """When a file needs no changes, dry run must mark it processed.
+    def test_dry_run_does_not_mark_processed_when_no_changes_needed(self, tmp_path: Path) -> None:
+        """When a file needs no changes, dry run must leave the database untouched.
 
-        Marking the file as processed in dry-run mode populates the database
-        so subsequent runs can skip it instead of re-probing with mkvmerge -J.
-        This prevents the kernel page cache from ballooning (visible as Docker
-        container memory usage) when a large library is repeatedly probed.
+        Dry-run is documented as writing nothing, so the no-change shortcut that
+        records files in a real run must be suppressed.
         """
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"fake mkv")
@@ -144,7 +142,7 @@ class TestDryRunDoesNotRecordToDatabase:
         ):
             run(**_run_kwargs(tmp_path, dry_run=True, db_path=db_path))
 
-        mock_mark.assert_called_once()
+        mock_mark.assert_not_called()
 
     def test_non_dry_run_marks_processed_when_no_changes_needed(self, tmp_path: Path) -> None:
         """Control: without dry_run, a no-change file IS marked processed."""
@@ -497,7 +495,7 @@ class TestPrintSummaryDBFailure:
         # must raise so we can verify the error is swallowed gracefully.
         real_db_calls: list[int] = [0]
 
-        def database_side_effect(path: str) -> MagicMock:
+        def database_side_effect(path: str, **_kwargs: object) -> MagicMock:
             real_db_calls[0] += 1
             if real_db_calls[0] == 1:
                 # First call: main loop DB — succeed with a context-manager mock
@@ -846,7 +844,7 @@ class TestCorruptOutputError:
             run(**{**_run_kwargs(tmp_path, dry_run=False, db_path=db_path), "logger": logger})
 
         assert exc_info.value.code == 2
-        critical_msg = logger.opt.return_value.critical.call_args.args[0]
+        critical_msg = "\n".join(str(call.args[0]) for call in logger.opt.return_value.critical.call_args_list)
         assert "unavailable" in critical_msg
 
 
@@ -1235,3 +1233,141 @@ class TestPrePostHooksIntegration:
 
         assert result.exit_code == 0, result.output
         assert len(hook_log) == 2, f"Expected 2 hooks, got {len(hook_log)}"
+
+
+class TestNativeAudioRunPath:
+    """run(keep_native_audio=True) must consult resolve_native_language per file."""
+
+    def test_native_language_resolved_and_merged(self, tmp_path: Path) -> None:
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        db_path = str(tmp_path / "trimarr.db")
+
+        with (
+            patch("trimarr.native_language.resolve_native_language", return_value=["jpn"]) as mock_resolve,
+            patch("trimarr.runner.probe_file", return_value=[]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=None),
+        ):
+            kwargs = _run_kwargs(tmp_path, dry_run=True, db_path=db_path)
+            kwargs.update(
+                keep_native_audio=True,
+                tmdb_api_key="tmdb-key",
+                tvdb_api_key="tvdb-key",
+            )
+            run(**kwargs)
+
+        mock_resolve.assert_called_once()
+        assert mock_resolve.call_args.kwargs["tmdb_api_key"] == "tmdb-key"
+        assert mock_resolve.call_args.kwargs["tvdb_api_key"] == "tvdb-key"
+
+
+class TestContainerTitleProbeFailure:
+    """A failing container-title probe is recorded as a per-file failure."""
+
+    def test_title_probe_failure_is_reported(self, tmp_path: Path) -> None:
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        db_path = str(tmp_path / "trimarr.db")
+        logger = _make_logger()
+
+        with (
+            patch("trimarr.runner.probe_file", return_value=[]),
+            patch("trimarr.runner.probe_container_title", side_effect=RuntimeError("title probe boom")),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=None),
+        ):
+            kwargs = _run_kwargs(tmp_path, dry_run=True, db_path=db_path)
+            kwargs.update(edit_metadata_title=True, logger=logger)
+            run(**kwargs)
+
+        logger.error.assert_called()
+        assert any("title probe" in str(call) for call in logger.error.call_args_list)
+
+
+class TestDryRunNativeAudioCache:
+    """Dry-run must not seed metadata_cache even with --keep-native-audio."""
+
+    def test_dry_run_resolves_native_language_without_cache_writes(self, tmp_path: Path) -> None:
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        db_path = str(tmp_path / "trimarr.db")
+
+        with (
+            patch("trimarr.native_language.resolve_native_language", return_value=["jpn"]) as mock_resolve,
+            patch("trimarr.runner.probe_file", return_value=[]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=None),
+        ):
+            kwargs = _run_kwargs(tmp_path, dry_run=True, db_path=db_path)
+            kwargs.update(keep_native_audio=True, tmdb_api_key="k")
+            run(**kwargs)
+
+        mock_resolve.assert_called_once()
+        assert mock_resolve.call_args.kwargs["db"] is not None, (
+            "dry-run must still read the cache; writes are suppressed by the database handle"
+        )
+
+
+class TestDryRunCreatesNoDatabaseFile:
+    """A preview run must not leave a database file (or its directory) behind."""
+
+    def test_dry_run_with_absent_db_creates_nothing(self, tmp_path: Path) -> None:
+        media = tmp_path / "media"
+        media.mkdir()
+        (media / "movie.mkv").write_bytes(b"fake mkv")
+        db_path = tmp_path / "nested" / "trimarr.db"
+
+        with (
+            patch("trimarr.runner.probe_file", return_value=[]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=None),
+        ):
+            kwargs = _run_kwargs(media, dry_run=True, db_path=str(db_path))
+            run(**kwargs)
+
+        assert not db_path.exists()
+        assert not db_path.parent.exists()
+
+
+class TestKeepUndefinedAudioWiring:
+    """The flag must reach both the profile hash and the mkvmerge command."""
+
+    def test_flag_forwarded_to_hash_and_command(self, tmp_path: Path) -> None:
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        db_path = str(tmp_path / "trimarr.db")
+
+        with (
+            patch("trimarr.runner.probe_file", return_value=[]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=None) as mock_build,
+            patch(
+                "trimarr.runner._build_profile_hash",
+                wraps=__import__("trimarr.runner", fromlist=["x"])._build_profile_hash,
+            ) as mock_hash,
+        ):
+            kwargs = _run_kwargs(tmp_path, dry_run=True, db_path=db_path)
+            kwargs.update(keep_undefined_audio=True)
+            run(**kwargs)
+
+        assert mock_hash.call_args.kwargs["keep_undefined_audio"] is True
+        assert mock_build.call_args.kwargs["keep_undefined_audio"] is True
+
+
+class TestDryRunCacheWriteSuppression:
+    """A dry run over an existing database must open it with cache writes off."""
+
+    def test_existing_db_is_opened_with_writes_disabled(self, tmp_path: Path) -> None:
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"fake mkv")
+        db_path = tmp_path / "trimarr.db"
+        db_path.write_bytes(b"")  # exists, so the :memory: branch is not taken
+
+        with (
+            patch("trimarr.runner.Database") as mock_db_cls,
+            patch("trimarr.runner.probe_file", return_value=[]),
+            patch("trimarr.runner.build_mkvmerge_command", return_value=None),
+            patch("trimarr.runner._print_summary"),
+        ):
+            mock_db = mock_db_cls.return_value.__enter__.return_value
+            mock_db.is_processed.return_value = True
+            kwargs = _run_kwargs(tmp_path, dry_run=True, db_path=str(db_path))
+            run(**kwargs)
+
+        assert mock_db_cls.call_args.kwargs["cache_writes_enabled"] is False

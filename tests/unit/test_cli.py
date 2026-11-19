@@ -6,6 +6,7 @@ import importlib
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from trimarr.cli import cli
@@ -17,6 +18,25 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _offline_managed_binary(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep every cli() invocation offline unless it tests resolution itself.
+
+    Without this the default managed-binary path may not exist on a clean
+    checkout, so the test would download mkvmerge from GitHub (or fail) instead
+    of exercising the flag under test.  Individual tests that patch
+    ``_DEFAULT_MKVMERGE_PATH`` / ``download_mkvmerge`` override this, except
+    TestMkvmergeUpdateCheck, which exercises the real update check and supplies
+    its own downloader mocks.
+    """
+    fake = tmp_path / "mkvmerge-managed"
+    fake.write_bytes(b"\x7fELF")
+    monkeypatch.setattr("trimarr.cli._DEFAULT_MKVMERGE_PATH", str(fake))
+    if request.node.cls is not None and request.node.cls.__name__ == "TestMkvmergeUpdateCheck":
+        return
+    monkeypatch.setattr("trimarr.cli._check_for_mkvmerge_update", lambda resolved, logger: resolved)
 
 
 def _base_args(media_path: str) -> list[str]:
@@ -167,6 +187,35 @@ class TestFlagsForwardedToRun:
         assert kwargs["strip_lower_channels"] is False
         assert kwargs["keep_audio"] is False
         assert kwargs["dry_run"] is False
+
+    def test_native_audio_flag_and_api_keys_forwarded(self, tmp_path: Path) -> None:
+        mock_run = self._invoke_with_flags(
+            tmp_path,
+            ["--keep-native-audio", "--tmdb-api-key", "tmdb-key", "--tvdb-api-key", "tvdb-key"],
+        )
+        _, kwargs = mock_run.call_args
+        assert kwargs["keep_native_audio"] is True
+        assert kwargs["tmdb_api_key"] == "tmdb-key"
+        assert kwargs["tvdb_api_key"] == "tvdb-key"
+
+    def test_keep_undefined_audio_forwarded(self, tmp_path: Path) -> None:
+        mock_run = self._invoke_with_flags(tmp_path, ["--keep-undefined-audio"])
+        _, kwargs = mock_run.call_args
+        assert kwargs["keep_undefined_audio"] is True
+
+    def test_skip_size_check_forwarded(self, tmp_path: Path) -> None:
+        mock_run = self._invoke_with_flags(tmp_path, ["--skip-size-check"])
+        _, kwargs = mock_run.call_args
+        assert kwargs["skip_size_check"] is True
+
+    def test_keep_undefined_audio_with_keep_audio_warns(self, tmp_path: Path) -> None:
+        """--keep-undefined-audio is redundant with --keep-audio and must warn."""
+        runner = CliRunner()
+        with patch("trimarr.runner.run"):
+            result = runner.invoke(cli, _base_args(str(tmp_path)) + ["--keep-audio", "--keep-undefined-audio"])
+        assert result.exit_code == 0, result.output
+        assert "keep-undefined-audio" in result.output
+        assert "no effect" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -778,3 +827,29 @@ class TestResolveMkvmergePathBranches:
             result = runner.invoke(cli, _base_args(str(tmp_path)) + ["--no-update-check"])
         assert result.exit_code == 0, result.output
         mock_update.assert_not_called()
+
+
+class TestReleaseTagComparison:
+    """Version comparison must understand the real tag format with build suffixes."""
+
+    def test_parses_real_suffixed_tag(self) -> None:
+        from trimarr.cli import _parse_release_tag
+
+        assert _parse_release_tag("v58.0.0-mingw-w64-posixv1.8el9") == (58, 0, 0)
+        assert _parse_release_tag("59.0.0") == (59, 0, 0)
+
+    def test_retracted_latest_does_not_downgrade(self) -> None:
+        from trimarr.cli import _is_up_to_date
+
+        assert _is_up_to_date("v59.0.0-mingw-w64-x", "v58.0.0-mingw-w64-y") is True
+
+    def test_older_installed_is_not_up_to_date(self) -> None:
+        from trimarr.cli import _is_up_to_date
+
+        assert _is_up_to_date("v57.0.0-x", "v58.0.0-y") is False
+
+    def test_unparseable_tags_fall_back_to_equality(self) -> None:
+        from trimarr.cli import _is_up_to_date
+
+        assert _is_up_to_date("nightly", "nightly") is True
+        assert _is_up_to_date("nightly", "other") is False

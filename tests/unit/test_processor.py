@@ -107,14 +107,6 @@ def _proc_cmd(input_path: Path, output_path: Path) -> list[str]:
     return [MKVMERGE, "-o", str(output_path), str(input_path)]
 
 
-def _fake_run_success_with_probe(args: list[str], **kwargs: object) -> MagicMock:
-    """Simulate mkvmerge: write processed bytes to output, return exit 0. Also handles -J probes."""
-    if args[1] == "-J":
-        return MagicMock(returncode=0, stdout="{}", stderr="")
-    Path(args[2]).write_bytes(b"processed")
-    return MagicMock(returncode=0, stdout="", stderr="")
-
-
 # ---------------------------------------------------------------------------
 # Strip subtitle by regex
 # ---------------------------------------------------------------------------
@@ -1033,7 +1025,9 @@ class TestProcessFile:
             result = process_file(MKVMERGE, mkv, cmd, no_backup=False, logger=logger)
 
         assert result is not None
-        logger.error.assert_called_once()
+        # One call for the failure, one for mkvmerge's captured stderr.
+        assert logger.error.call_count == 2
+        assert "exit 2" in str(logger.error.call_args_list[0].args[0])
         assert not list(tmp_path.glob("*.trimarr_tmp"))  # No leftover temp files
 
     def test_no_backup_uses_atomic_replace_not_delete_first(self, tmp_path: Path) -> None:
@@ -1274,7 +1268,9 @@ class TestTruncatedOutputRejection:
     def test_rejects_output_failing_structural_validation(self, tmp_path: Path) -> None:
         """Output passing size check but rejected by mkvmerge -J must raise CorruptOutputError.
 
-        This halts ALL processing and preserves the temp file for inspection.
+        Exit code 2 is mkvmerge's hard-error code (1 means "completed with
+        warnings" and is accepted).  This halts ALL processing and preserves the
+        temp file for inspection.
         """
         mkv = tmp_path / "movie.mkv"
         mkv.write_bytes(b"A" * 10_000)
@@ -1283,7 +1279,7 @@ class TestTruncatedOutputRejection:
 
         def fake_run(args: list[str], **kwargs: object) -> MagicMock:
             if args[1] == "-J":
-                return MagicMock(returncode=1, stdout="", stderr="not a valid MKV container")
+                return MagicMock(returncode=2, stdout="", stderr="not a valid MKV container")
             Path(args[2]).write_bytes(b"B" * min_ok)
             return MagicMock(returncode=0, stdout="", stderr="")
 
@@ -1291,7 +1287,7 @@ class TestTruncatedOutputRejection:
             process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
 
         exc = exc_info.value
-        assert exc.probe_returncode == 1
+        assert exc.probe_returncode == 2
         assert "not a valid MKV container" in exc.probe_output
         assert exc.output_size == min_ok
         assert exc.input_size == 10_000
@@ -1299,6 +1295,30 @@ class TestTruncatedOutputRejection:
         assert mkv.read_bytes() == b"A" * 10_000
         # Temp file must be PRESERVED on disk for operator inspection
         assert exc.tmp_path.exists()
+
+    def test_probe_warning_exit_code_is_accepted(self, tmp_path: Path) -> None:
+        """mkvmerge -J exit 1 (warnings) must not be treated as corruption.
+
+        ``mkvmerge`` returns 1 when it completed with warnings; the JSON payload
+        is still complete and :func:`_check_exit_code` already accepts it.
+        """
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"A" * 10_000)
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
+        min_ok = max(1, 10_000 // 2)
+        logger = _proc_logger()
+
+        def fake_run(args: list[str], **kwargs: object) -> MagicMock:
+            if args[1] == "-J":
+                return MagicMock(returncode=1, stdout='{"container": {}}', stderr="warning: something")
+            Path(args[2]).write_bytes(b"B" * min_ok)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            result = process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=logger)
+
+        assert result is None
+        logger.warning.assert_called()
 
 
 # ---------------------------------------------------------------------------
@@ -2339,7 +2359,7 @@ class TestProcessFileEmptyStderr:
         assert result is not None
         assert "exit 2" in result
         assert not result.endswith(": ")  # no trailing colon when stderr empty
-        logger.error.assert_called_once()
+        assert "exit 2" in str(logger.error.call_args_list[0].args[0])
 
 
 # ---------------------------------------------------------------------------
@@ -2446,3 +2466,87 @@ class TestComputeChannelDropsAllUnknown:
         ]
         cmd = _build_cmd(tracks, strip_lower_channels=True)
         assert cmd is None
+
+
+class TestParseTrackLanguage:
+    """_parse_track() language resolution, incl. IETF tags behind an 'und' tag."""
+
+    @staticmethod
+    def _audio_raw(language: str | None, language_ietf: str | None) -> dict:
+        props: dict = {"default_track": False, "audio_channels": 2}
+        if language is not None:
+            props["language"] = language
+        if language_ietf is not None:
+            props["language_ietf"] = language_ietf
+        return {"id": 1, "type": "audio", "properties": props}
+
+    def test_plain_language_used(self) -> None:
+        from trimarr.processor import _parse_track
+
+        assert _parse_track(self._audio_raw("fre", None)).language == "fre"
+
+    def test_ietf_used_when_language_und(self) -> None:
+        """mkvmerge emits language='und' for IETF-tagged tracks; the tag must win."""
+        from trimarr.processor import _parse_track
+
+        track = _parse_track(self._audio_raw("und", "en-US"))
+        assert track.language == "eng"
+
+    def test_ietf_used_when_language_absent(self) -> None:
+        from trimarr.processor import _parse_track
+
+        assert _parse_track(self._audio_raw(None, "fr")).language == "fre"
+
+    def test_language_wins_over_ietf_when_specific(self) -> None:
+        from trimarr.processor import _parse_track
+
+        track = _parse_track(self._audio_raw("ger", "en"))
+        assert track.language == "ger"
+
+
+class TestProbeWarningExitCodeAccepted:
+    """mkvmerge -J exit 1 (warnings) must not be treated as a probe failure."""
+
+    _JSON = '{"container": {"properties": {}}, "tracks": []}'
+
+    def test_probe_file_accepts_warning_exit(self, tmp_path: Path) -> None:
+        mkv = tmp_path / "movie.mkv"
+        mkv.touch()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout=self._JSON, stderr="warning: x")
+            assert probe_file(MKVMERGE, mkv) == []
+
+    def test_probe_container_title_accepts_warning_exit(self, tmp_path: Path) -> None:
+        mkv = tmp_path / "movie.mkv"
+        mkv.touch()
+        payload = '{"container": {"properties": {"title": "Movie"}}}'
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout=payload, stderr="warning: x")
+            assert probe_container_title(MKVMERGE, mkv) == "Movie"
+
+
+class TestSubprocessCaptureEncoding:
+    """No mkvmerge capture may raise on undecodable bytes."""
+
+    def test_all_captures_use_replacement_decoding(self, tmp_path: Path) -> None:
+        import subprocess as sp
+
+        mkv = tmp_path / "movie.mkv"
+        mkv.write_bytes(b"A" * 10_000)
+        cmd = _proc_cmd(mkv, tmp_path / "out.mkv")
+        seen: list[dict] = []
+
+        def fake_run(args: list[str], **kwargs: object) -> MagicMock:
+            seen.append(kwargs)
+            if args[1] == "-J":
+                return MagicMock(returncode=0, stdout="{}", stderr="")
+            Path(args[2]).write_bytes(b"B" * 6000)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            probe_file(MKVMERGE, mkv)
+            process_file(MKVMERGE, mkv, cmd, no_backup=True, logger=_proc_logger())
+
+        assert seen, "no subprocess capture observed"
+        assert all(kwargs.get("errors") == "replace" for kwargs in seen), seen
+        assert sp  # keep the import meaningful for readers

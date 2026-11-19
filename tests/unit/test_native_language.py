@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from http.client import HTTPMessage
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -15,6 +16,19 @@ from trimarr.native_language import (
     parse_movie_title,
     resolve_native_language,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+
+@pytest.fixture(autouse=True)
+def _clear_tvdb_token_cache() -> Iterator[None]:
+    """Stop the process-wide TVDB JWT cache leaking between tests."""
+    from trimarr import native_language
+
+    native_language._TVDB_TOKEN_CACHE.clear()
+    yield
+    native_language._TVDB_TOKEN_CACHE.clear()
 
 
 class TestParseMovieTitle:
@@ -100,17 +114,13 @@ class TestLanguageNameToCode:
         assert result == "aaa"
 
     def test_pycountry_import_error(self, mocker) -> None:
-        """When pycountry is not available, uses fallback dict."""
-        import builtins
+        """When pycountry is not available, the fallback dict is used.
 
-        real_import = builtins.__import__
-
-        def _block_pycountry(name, *args, **kwargs):
-            if name == "pycountry":
-                raise ImportError("No module named pycountry")
-            return real_import(name, *args, **kwargs)
-
-        mocker.patch("builtins.__import__", side_effect=_block_pycountry)
+        Patches the module flag rather than ``builtins.__import__``: the import
+        already happened at module load, so blocking ``__import__`` changed
+        nothing and the test silently exercised the real pycountry path.
+        """
+        mocker.patch("trimarr.native_language._HAS_PYCOUNTRY", False)
         assert _language_name_to_iso_639_2("English") == "eng"
         assert _language_name_to_iso_639_2("Unknown") is None
 
@@ -151,17 +161,13 @@ class TestLookupImdbpie:
         assert result is None
 
     def test_import_error(self, mocker) -> None:
-        """When imdbpie is not installed, returns None."""
-        import builtins
+        """When imdbpie is not installed, returns None.
 
-        real_import = builtins.__import__
-
-        def _block_imdbpie(name, *args, **kwargs):
-            if name == "imdbpie":
-                raise ImportError("No module named imdbpie")
-            return real_import(name, *args, **kwargs)
-
-        mocker.patch("builtins.__import__", side_effect=_block_imdbpie)
+        Patches the module flag rather than ``builtins.__import__``: the import
+        already happened at module load, so blocking ``__import__`` left the
+        real client in place and made this test hit the live IMDb API.
+        """
+        mocker.patch("trimarr.native_language._HAS_IMDBPIE", False)
         result = _lookup_imdbpie("Test", None)
         assert result is None
 
@@ -865,6 +871,12 @@ class TestResolveNativeLanguage:
         )
         mocker.patch(
             "trimarr.native_language._lookup_tmdb_by_id",
+            return_value=None,
+        )
+        # The filename/directory chain also queries IMDbPie, which needs no key;
+        # mock it so the test stays offline.
+        mocker.patch(
+            "trimarr.native_language._lookup_imdbpie",
             return_value=None,
         )
 
@@ -2055,6 +2067,8 @@ class TestIsTvEpisodeFilename:
             "tvshow",
             "season",
             "episode",
+            "Movie.1920x1080",
+            "Movie.3840x2160.HDR",
         ],
     )
     def test_rejects_non_tv(self, stem: str) -> None:
@@ -2306,3 +2320,336 @@ class TestResolveNativeLanguageMovieBug:
 
         # TMDb should have been called (it has the right data for this movie)
         tmdb_mock.assert_called_once()
+
+
+class TestApiResponseShapeGuards:
+    """A non-object JSON body must degrade to None, never raise AttributeError.
+
+    A single unusual 2xx response previously escaped the per-file guards and
+    aborted the whole scan.
+    """
+
+    @staticmethod
+    def _response(mocker, payload: bytes) -> object:
+        resp = mocker.MagicMock()
+        resp.read.return_value = payload
+        resp.__enter__.return_value = resp
+        return resp
+
+    def test_tmdb_detail_non_object_returns_none(self, mocker) -> None:
+        from trimarr.native_language import _lookup_tmdb_by_id
+
+        mocker.patch(
+            "trimarr.native_language.urllib.request.urlopen",
+            return_value=self._response(mocker, b"null"),
+        )
+
+        assert _lookup_tmdb_by_id("123", "key") is None
+
+    def test_tvdb_login_non_object_returns_none(self, mocker) -> None:
+        from trimarr.native_language import _lookup_tvdb_by_id
+
+        mocker.patch(
+            "trimarr.native_language.urllib.request.urlopen",
+            return_value=self._response(mocker, b"[]"),
+        )
+
+        assert _lookup_tvdb_by_id("123", "key") is None
+
+    def test_tvdb_detail_null_data_returns_none(self, mocker) -> None:
+        from trimarr.native_language import _lookup_tvdb_by_id
+
+        mocker.patch(
+            "trimarr.native_language.urllib.request.urlopen",
+            side_effect=[
+                self._response(mocker, b'{"data": {"token": "tok"}}'),
+                self._response(mocker, b'{"data": null}'),
+            ],
+        )
+
+        assert _lookup_tvdb_by_id("123", "key") is None
+
+    def test_tvdb_token_reused_across_lookups(self, mocker) -> None:
+        """A library run must not log in once per file."""
+        from trimarr import native_language
+
+        mock_urlopen = mocker.patch(
+            "trimarr.native_language.urllib.request.urlopen",
+            side_effect=[
+                self._response(mocker, b'{"data": {"token": "tok"}}'),
+                self._response(mocker, b'{"data": {"originalLanguage": "jpn"}}'),
+                self._response(mocker, b'{"data": {"originalLanguage": "jpn"}}'),
+            ],
+        )
+
+        assert native_language._lookup_tvdb_by_id("1", "key") == ["jpn"]
+        assert native_language._lookup_tvdb_by_id("2", "key") == ["jpn"]
+        assert mock_urlopen.call_count == 3, "login should happen once, not per lookup"
+        assert native_language._TVDB_TOKEN_CACHE["key"] == "tok"
+
+
+class TestEmbeddedIdTvdbFallback:
+    """Spec §6: an embedded TVDB ID is a fallback after IMDb/TMDb embedded IDs."""
+
+    def test_imdb_embedded_falls_back_to_tvdb(self, mocker) -> None:
+        from trimarr.native_language import _resolve_embedded_id_phase
+
+        mocker.patch("trimarr.native_language._lookup_imdbpie_by_id", return_value=None)
+        tvdb_mock = mocker.patch("trimarr.native_language._lookup_tvdb_by_id", return_value=["jpn"])
+        mock_db = mocker.MagicMock()
+
+        codes = _resolve_embedded_id_phase(
+            "Show {imdb-tt1234567} {tvdb-7537283}",
+            Path("/data/Show.mkv"),
+            mock_db,
+            None,
+            "tvdb-key",
+        )
+
+        assert codes == ["jpn"]
+        tvdb_mock.assert_called_once_with("7537283", "tvdb-key")
+
+    def test_tmdb_embedded_falls_back_to_tvdb(self, mocker) -> None:
+        from trimarr.native_language import _resolve_embedded_id_phase
+
+        mocker.patch("trimarr.native_language._lookup_tmdb_by_id", return_value=None)
+        tvdb_mock = mocker.patch("trimarr.native_language._lookup_tvdb_by_id", return_value=["ger"])
+        mock_db = mocker.MagicMock()
+
+        codes = _resolve_embedded_id_phase(
+            "Movie {tmdb-27205} {tvdb-7537283}",
+            Path("/data/Movie.mkv"),
+            mock_db,
+            "tmdb-key",
+            "tvdb-key",
+        )
+
+        assert codes == ["ger"]
+        tvdb_mock.assert_called_once_with("7537283", "tvdb-key")
+
+    def test_no_tvdb_key_means_no_fallback(self, mocker) -> None:
+        from trimarr.native_language import _resolve_embedded_id_phase
+
+        mocker.patch("trimarr.native_language._lookup_imdbpie_by_id", return_value=None)
+        tvdb_mock = mocker.patch("trimarr.native_language._lookup_tvdb_by_id")
+
+        codes = _resolve_embedded_id_phase(
+            "Show {imdb-tt1234567} {tvdb-7537283}",
+            Path("/data/Show.mkv"),
+            mocker.MagicMock(),
+            None,
+            None,
+        )
+
+        assert codes is None
+        tvdb_mock.assert_not_called()
+
+
+class TestTmdbResultElementGuard:
+    """A malformed element inside a 2xx TMDb results array must not abort the run."""
+
+    def test_null_result_element_is_skipped(self, mocker) -> None:
+        from trimarr.native_language import _lookup_tmdb
+
+        resp = mocker.MagicMock()
+        resp.read.return_value = b'{"results": [null]}'
+        resp.__enter__.return_value = resp
+        mocker.patch("trimarr.native_language.urllib.request.urlopen", return_value=resp)
+
+        assert _lookup_tmdb("Some Movie", "2020", "key") is None
+
+    def test_null_imdb_hit_is_skipped(self) -> None:
+        from trimarr.native_language import _find_matching_imdb_id
+
+        assert _find_matching_imdb_id([None, "junk"], "Some Movie", "2020") is None
+
+
+class TestEmbeddedFallbackEarlyReturns:
+    """The embedded-ID fallbacks stay cheap when they have nothing to do."""
+
+    def test_tmdb_fallback_skipped_without_key(self, mocker) -> None:
+        from trimarr.native_language import _resolve_embedded_tmdb_fallback
+
+        assert _resolve_embedded_tmdb_fallback("Movie {tmdb-27205}", Path("/d/M.mkv"), mocker.MagicMock(), None) is None
+
+    def test_tmdb_fallback_skipped_without_embedded_id(self, mocker) -> None:
+        from trimarr.native_language import _resolve_embedded_tmdb_fallback
+
+        assert _resolve_embedded_tmdb_fallback("Movie 2020", Path("/d/M.mkv"), mocker.MagicMock(), "key") is None
+
+    def test_tvdb_fallback_skipped_without_key(self, mocker) -> None:
+        from trimarr.native_language import _resolve_embedded_tvdb_fallback
+
+        assert _resolve_embedded_tvdb_fallback("Movie {tvdb-1234}", Path("/d/M.mkv"), mocker.MagicMock(), None) is None
+
+    def test_tvdb_fallback_skipped_without_embedded_id(self, mocker) -> None:
+        from trimarr.native_language import _resolve_embedded_tvdb_fallback
+
+        assert _resolve_embedded_tvdb_fallback("Movie 2020", Path("/d/M.mkv"), mocker.MagicMock(), "key") is None
+
+
+class TestUpwalkTvshowNfo:
+    """_upwalk_tvshow_nfo keeps climbing past an unusable tvshow.nfo."""
+
+    def test_climbs_past_unusable_tvshow_nfo(self, tmp_path: Path) -> None:
+        from trimarr.native_language import _upwalk_tvshow_nfo
+
+        show_root = tmp_path / "Show"
+        season = show_root / "Season 1"
+        season.mkdir(parents=True)
+        # Closest tvshow.nfo carries no usable fields.
+        (show_root / "tvshow.nfo").write_text("<tvshow><title></title></tvshow>", encoding="utf-8")
+        # The parent folder holds a usable one.
+        (tmp_path / "tvshow.nfo").write_text("<tvshow><imdbid>tt1234567</imdbid></tvshow>", encoding="utf-8")
+        episode = season / "Show.S01E01.mkv"
+        episode.touch()
+
+        meta = _upwalk_tvshow_nfo(episode)
+
+        assert meta is not None
+        assert meta.imdb_id == "tt1234567"
+
+    def test_returns_none_when_no_tvshow_nfo(self, tmp_path: Path) -> None:
+        from trimarr.native_language import _upwalk_tvshow_nfo
+
+        leaf = tmp_path / "a"
+        leaf.mkdir()
+        episode = leaf / "Show.S01E01.mkv"
+        episode.touch()
+
+        assert _upwalk_tvshow_nfo(episode) is None
+
+
+class TestTvdbLanguageExtraction:
+    """_extract_tvdb_language handles malformed bodies and 3-letter codes."""
+
+    def test_non_dict_body_returns_none(self) -> None:
+        from trimarr.native_language import _extract_tvdb_language
+
+        assert _extract_tvdb_language(None) is None
+        assert _extract_tvdb_language(["jpn"]) is None
+        assert _extract_tvdb_language({"data": "jpn"}) is None
+
+    def test_three_letter_code_normalised(self) -> None:
+        from trimarr.native_language import _extract_tvdb_language
+
+        assert _extract_tvdb_language({"data": {"originalLanguage": "jpn"}}) == ["jpn"]
+
+    def test_unknown_language_returns_none(self) -> None:
+        from trimarr.native_language import _extract_tvdb_language
+
+        assert _extract_tvdb_language({"data": {"originalLanguage": "klingon-language"}}) is None
+
+
+class TestTvdbAndTmdbUrlBuilding:
+    """The extracted URL builder keeps the documented query parameters."""
+
+    def test_movie_search_url_uses_year_param(self) -> None:
+        from trimarr.native_language import _build_tmdb_search_url
+
+        url = _build_tmdb_search_url("Some Movie", "2020", "key", "movie")
+        assert "/search/movie" in url
+        assert "&year=2020" in url
+
+    def test_tv_search_url_uses_first_air_date_year(self) -> None:
+        from trimarr.native_language import _build_tmdb_search_url
+
+        url = _build_tmdb_search_url("Some Show", "2020", "key", "tv")
+        assert "/search/tv" in url
+        assert "&first_air_date_year=2020" in url
+
+    def test_url_without_year_has_no_year_param(self) -> None:
+        from trimarr.native_language import _build_tmdb_search_url
+
+        url = _build_tmdb_search_url("Some Movie", None, "key", "movie")
+        assert "year=" not in url
+
+
+class TestResponseAndIdHardening:
+    """Round-5 hardening: non-string fields, non-list containers, bad IDs."""
+
+    def test_non_string_original_language_is_ignored(self) -> None:
+        from trimarr.native_language import _extract_tmdb_language_code
+
+        assert _extract_tmdb_language_code({"original_language": 12}) is None
+        assert _extract_tmdb_language_code({"original_language": ["en"]}) is None
+
+    def test_non_list_imdb_hits_are_ignored(self, mocker) -> None:
+        from trimarr.native_language import _lookup_imdbpie
+
+        client = mocker.patch("imdbpie.Imdb", autospec=True)
+        client.return_value.search_for_title.return_value = {"not": "a list"}
+        assert _lookup_imdbpie("Some Movie", "2020") is None
+
+    def test_non_list_spoken_languages_are_ignored(self, mocker) -> None:
+        from trimarr.native_language import _lookup_imdbpie_by_id
+
+        client = mocker.patch("imdbpie.Imdb", autospec=True)
+        client.return_value.get_title_auxiliary.return_value = {"spokenLanguages": "en"}
+        assert _lookup_imdbpie_by_id("tt0082096") is None
+
+    def test_non_numeric_ids_are_rejected_before_url_build(self, mocker) -> None:
+        from trimarr.native_language import _lookup_tmdb_by_id, _lookup_tvdb_by_id
+
+        fetch = mocker.patch("trimarr.native_language._fetch_json")
+        assert _lookup_tmdb_by_id("../etc/passwd", "key") is None
+        assert _lookup_tvdb_by_id("1234/../x", "key") is None
+        fetch.assert_not_called()
+
+    def test_missing_imdbpie_warns_once(self, mocker) -> None:
+        """A missing optional dependency must not warn once per lookup."""
+        from trimarr import native_language
+
+        mocker.patch("trimarr.native_language._HAS_IMDBPIE", False)
+        mocker.patch("trimarr.native_language._IMDBPIE_WARNING_LOGGED", False)
+        warn = mocker.patch("trimarr.native_language.logger.warning")
+
+        native_language._lookup_imdbpie("A", None)
+        native_language._lookup_imdbpie("B", None)
+        native_language._lookup_imdbpie_by_id("tt1234567")
+
+        assert warn.call_count == 1
+
+
+class TestNfoMediaType:
+    """A <tvshow> NFO must force TV endpoints even without an episode marker."""
+
+    def test_tvshow_nfo_forces_tv_media_type(self) -> None:
+        from trimarr.native_language import _nfo_media_type
+
+        meta = NfoMetadata(title="Show", tmdb_id="259837", is_tvshow=True)
+        assert _nfo_media_type(meta, Path("/data/Show - 05.mkv")) == "tv"
+
+    def test_movie_nfo_is_authoritative_even_with_episode_marker(self) -> None:
+        """A <movie> NFO must not be queried in the TV namespace.
+
+        TMDb keeps separate ID namespaces for movies and TV, so a movie's ID sent
+        to /tv/{id} resolves to an unrelated show — the mirror image of #68.
+        """
+        from trimarr.native_language import _nfo_media_type
+
+        meta = NfoMetadata(title="Movie", is_tvshow=False)
+        assert _nfo_media_type(meta, Path("/data/Movie.2020.mkv")) == "movie"
+        assert _nfo_media_type(meta, Path("/data/Movie.1x01.mkv")) == "movie"
+
+
+class TestTvshowNfoTitleSearch:
+    """Phase 3 title search must use TMDb's TV namespace for a <tvshow> NFO."""
+
+    def test_tvshow_nfo_title_search_uses_tv_endpoint(self, mocker) -> None:
+        from trimarr.native_language import _resolve_nfo_title_search
+
+        # IMDbPie finds nothing, TMDb search succeeds.
+        mocker.patch("trimarr.native_language._lookup_imdbpie", return_value=None)
+        urlopen = mocker.patch("trimarr.native_language.urllib.request.urlopen")
+        search = mocker.MagicMock()
+        search.__enter__.return_value = search
+        search.read.return_value = b'{"results": []}'
+        urlopen.return_value = search
+
+        meta = NfoMetadata(title="Show - 05", is_tvshow=True)
+        _resolve_nfo_title_search(meta, Path("/data/Show - 05.mkv"), mocker.MagicMock(), "key")
+
+        requested = urlopen.call_args[0][0]
+        url = requested.full_url if hasattr(requested, "full_url") else str(requested)
+        assert "/search/tv" in url, f"expected TV namespace, got {url}"

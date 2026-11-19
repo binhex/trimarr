@@ -616,24 +616,19 @@ class TestExtractFromZipSecurity:
         assert result.name == "mkvmerge"
         assert result.read_bytes() == b"fake binary\x7fELF"
 
-    def test_path_traversal_entry_does_not_escape_tmp_dir(self, tmp_path: Path) -> None:
-        """A zip entry like ../../mkvmerge must NOT be written outside tmp_dir."""
-        # Craft an entry that traverses upward
-        data = self._make_zip("../../mkvmerge")
+    def test_path_traversal_entry_is_refused(self, tmp_path: Path) -> None:
+        """A zip entry like ../../mkvmerge must be refused, not extracted."""
         archive = tmp_path / "malicious.zip"
-        archive.write_bytes(data)
+        archive.write_bytes(self._make_zip("../../mkvmerge"))
         dest = tmp_path / "extract"
         dest.mkdir()
-        # Extraction must either refuse or resolve inside dest — never outside
-        try:
-            result = _extract_from_zip(archive, "mkvmerge", dest)
-            # If it succeeds the extracted file must be inside dest
-            assert dest in result.parents, f"Extracted to unsafe path: {result}"
-        except (RuntimeError, Exception):
-            pass  # Refusing is also acceptable
-        # The dangerous path outside dest must not exist
-        escape_path = tmp_path / "mkvmerge"
-        assert not escape_path.exists(), "Zip Slip: file written outside extraction directory!"
+
+        with pytest.raises(RuntimeError, match="would escape"):
+            _extract_from_zip(archive, "mkvmerge", dest)
+
+        # Nothing may be written outside the extraction directory.
+        assert not (tmp_path / "mkvmerge").exists()
+        assert not (tmp_path.parent / "mkvmerge").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -685,3 +680,26 @@ class TestGetPlatformAssetAliases:
             asset, binary = _get_platform_asset()
         assert asset == "mkvtoolnix-x86_64-win.zip"
         assert binary == "mkvmerge.exe"
+
+
+class TestDownloadTruncationGuard:
+    """The Content-Length truncation check must actually fire."""
+
+    def test_stream_shorter_than_content_length_raises(self, tmp_path: Path) -> None:
+        archive_bytes = _make_tar_xz("mkvmerge", _ELF_CONTENT)
+        response = _streaming_response(archive_bytes)
+        response.headers = {"Content-Length": str(len(archive_bytes) + 4096)}
+
+        with (
+            patch("trimarr.downloader.platform.system", return_value="Linux"),
+            patch("trimarr.downloader.platform.machine", return_value="x86_64"),
+            patch(
+                "trimarr.downloader._get_latest_release_info",
+                return_value=("https://github.com/fake/asset.tar.xz", "v58.0.0"),
+            ),
+            patch("trimarr.downloader.requests.get", return_value=response),
+            pytest.raises(RuntimeError, match="Truncated download"),
+        ):
+            download_mkvmerge(dest_dir=tmp_path)
+
+        assert not (tmp_path / "mkvmerge").exists()

@@ -9,6 +9,8 @@ from trimarr._nfo_parser import _strip_nfo_trailing_junk, discover_nfo, parse_nf
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import pytest
+
 
 class TestParseNfo:
     """Tests for parse_nfo()."""
@@ -478,3 +480,176 @@ class TestNfoCleanup:
         assert result is not None
         assert result.title == "Alien"
         assert result.imdb_id is None
+
+
+class TestNfoOwnership:
+    """An arbitrary .nfo must not be attributed to an unrelated media file."""
+
+    def test_ambiguous_directory_does_not_borrow_unrelated_nfo(self, tmp_path: Path) -> None:
+        """Two MKVs and one unmatched NFO: no NFO is returned for the other file."""
+        (tmp_path / "movie.mkv").touch()
+        (tmp_path / "extra.mkv").touch()
+        (tmp_path / "Some Other Film.nfo").write_text("<movie><title>Other</title></movie>", encoding="utf-8")
+
+        assert discover_nfo(tmp_path / "extra.mkv") is None
+
+    def test_single_media_file_directory_uses_sole_nfo(self, tmp_path: Path) -> None:
+        """One MKV and one differently-named NFO: ownership is unambiguous."""
+        mkv = tmp_path / "Movie.2020.1080p.mkv"
+        mkv.touch()
+        nfo = tmp_path / "Movie.nfo"
+        nfo.write_text("<movie><title>Movie</title></movie>", encoding="utf-8")
+
+        assert discover_nfo(mkv) == nfo
+
+    def test_same_stem_wins_even_in_ambiguous_directory(self, tmp_path: Path) -> None:
+        """A same-stem NFO is always preferred."""
+        (tmp_path / "movie.mkv").touch()
+        (tmp_path / "extra.mkv").touch()
+        nfo = tmp_path / "extra.nfo"
+        nfo.write_text("<movie><title>Extra</title></movie>", encoding="utf-8")
+
+        assert discover_nfo(tmp_path / "extra.mkv") == nfo
+
+
+class TestNfoHardening:
+    """Guards against oversized NFOs and XML entity-expansion payloads."""
+
+    def test_doctype_declaration_is_rejected(self, tmp_path: Path) -> None:
+        """An NFO declaring a DTD is not parsed (billion-laughs guard)."""
+        nfo = tmp_path / "evil.nfo"
+        nfo.write_text(
+            '<?xml version="1.0"?>\n'
+            "<!DOCTYPE movie [\n"
+            '  <!ENTITY lol "lol">\n'
+            "]>\n"
+            "<movie><title>&lol;</title></movie>\n",
+            encoding="utf-8",
+        )
+
+        assert parse_nfo(nfo) is None
+
+    def test_oversized_nfo_is_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Files above the size bound are rejected before parsing."""
+        from trimarr import _nfo_parser
+
+        monkeypatch.setattr(_nfo_parser, "_MAX_NFO_BYTES", 32)
+        nfo = tmp_path / "huge.nfo"
+        nfo.write_text("<movie><title>" + "A" * 100 + "</title></movie>", encoding="utf-8")
+
+        assert parse_nfo(nfo) is None
+
+    def test_unreadable_path_returns_none(self, tmp_path: Path) -> None:
+        """A directory passed as an NFO path returns None instead of raising."""
+        assert parse_nfo(tmp_path) is None
+
+    def test_missing_file_returns_none(self, tmp_path: Path) -> None:
+        assert parse_nfo(tmp_path / "absent.nfo") is None
+
+
+class TestNfoReadBounds:
+    """The size guard must reject before reading and reject non-ASCII encodings."""
+
+    def test_oversized_file_is_not_read(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from pathlib import Path as RuntimePath
+
+        from trimarr import _nfo_parser
+
+        monkeypatch.setattr(_nfo_parser, "_MAX_NFO_BYTES", 64)
+        nfo = tmp_path / "huge.nfo"
+        nfo.write_text("<movie><title>" + "A" * 200 + "</title></movie>", encoding="utf-8")
+
+        def _boom(_self: Path) -> bytes:
+            raise AssertionError("parse_nfo must not read an oversized file")
+
+        monkeypatch.setattr(RuntimePath, "read_bytes", _boom)
+
+        assert parse_nfo(nfo) is None
+
+    def test_utf16_encoded_nfo_is_rejected(self, tmp_path: Path) -> None:
+        """A UTF-16 BOM would hide a DTD from the raw-byte scan, so it is refused."""
+        nfo = tmp_path / "utf16.nfo"
+        nfo.write_bytes("<movie><title>Alien</title></movie>".encode("utf-16"))
+
+        assert parse_nfo(nfo) is None
+
+
+class TestEditionFolderOwnership:
+    """A sole .nfo matching the folder name is trusted even with several MKVs."""
+
+    def test_sole_nfo_matching_folder_name_is_used(self, tmp_path: Path) -> None:
+        folder = tmp_path / "Movie (2020)"
+        folder.mkdir()
+        (folder / "Movie (2020).mkv").touch()
+        (folder / "Movie (2020) - Director's Cut.mkv").touch()
+        nfo = folder / "Movie (2020).nfo"
+        nfo.write_text("<movie><title>Movie</title></movie>", encoding="utf-8")
+
+        assert discover_nfo(folder / "Movie (2020) - Director's Cut.mkv") == nfo
+
+
+class TestConventionalStems:
+    """Kodi/Radarr conventional NFO names own a multi-file folder."""
+
+    def test_movie_nfo_trusted_beside_multiple_mkvs(self, tmp_path: Path) -> None:
+        folder = tmp_path / "Movie (2020)"
+        folder.mkdir()
+        (folder / "Movie (2020).mkv").touch()
+        (folder / "Movie (2020) - Director's Cut.mkv").touch()
+        nfo = folder / "movie.nfo"
+        nfo.write_text("<movie><title>Movie</title></movie>", encoding="utf-8")
+
+        assert discover_nfo(folder / "Movie (2020) - Director's Cut.mkv") == nfo
+
+
+class TestBomlessUtf16:
+    """UTF-16 without a BOM must not smuggle a DTD past the raw-byte scan."""
+
+    def test_bomless_utf16_is_rejected(self, tmp_path: Path) -> None:
+        nfo = tmp_path / "utf16-nobom.nfo"
+        payload = '<?xml version="1.0" encoding="utf-16"?><movie><title>Alien</title></movie>'
+        nfo.write_bytes(payload.encode("utf-16-le"))
+
+        assert parse_nfo(nfo) is None
+
+
+class TestInlineXmlDeclaration:
+    """Recovery must find the root when the declaration shares its line."""
+
+    def test_trailing_junk_with_inline_declaration_is_recovered(self, tmp_path: Path) -> None:
+        nfo = tmp_path / "inline.nfo"
+        nfo.write_text(
+            '<?xml version="1.0"?><movie><imdbid>tt1375666</imdbid></movie>\nhttps://www.imdb.com/title/tt1375666\n',
+            encoding="utf-8",
+        )
+
+        meta = parse_nfo(nfo)
+
+        assert meta is not None
+        assert meta.imdb_id == "tt1375666"
+
+
+class TestTvshowFlag:
+    """parse_nfo must record whether the root element was <tvshow>."""
+
+    def test_tvshow_nfo_sets_is_tvshow(self, tmp_path: Path) -> None:
+        nfo = tmp_path / "tvshow.nfo"
+        nfo.write_text("<tvshow><title>Show</title></tvshow>", encoding="utf-8")
+        meta = parse_nfo(nfo)
+        assert meta is not None
+        assert meta.is_tvshow is True
+
+    def test_movie_nfo_clears_is_tvshow(self, tmp_path: Path) -> None:
+        nfo = tmp_path / "movie.nfo"
+        nfo.write_text("<movie><title>Film</title></movie>", encoding="utf-8")
+        meta = parse_nfo(nfo)
+        assert meta is not None
+        assert meta.is_tvshow is False
+
+    def test_fifo_nfo_is_rejected(self, tmp_path: Path) -> None:
+        import os
+
+        fifo = tmp_path / "movie.nfo"
+        os.mkfifo(fifo)
+
+        assert parse_nfo(fifo) is None

@@ -102,3 +102,130 @@ class TestCreateLogger:
         finally:
             sys.stdout = old_stdout
         assert capture.getvalue() == "test output"
+
+
+class TestStdlibLoggingInterception:
+    """Stdlib ``logging`` records must reach the configured loguru sinks."""
+
+    def test_stdlib_record_reaches_loguru_sink(self) -> None:
+        import io
+        import logging as std_logging
+
+        from trimarr.logger import create_logger
+
+        logger = create_logger(log_format="{message}", log_level="DEBUG")
+        capture = io.StringIO()
+        sink_id = logger.add(capture, format="{message}", level="DEBUG")
+        try:
+            std_logging.getLogger("trimarr._nfo_parser").info("intercepted-record %s", "ok")
+        finally:
+            logger.remove(sink_id)
+            logger.remove()
+
+        assert "intercepted-record ok" in capture.getvalue()
+
+    def test_stdlib_warning_reaches_loguru_sink(self) -> None:
+        import io
+        import logging as std_logging
+
+        from trimarr.logger import create_logger
+
+        logger = create_logger(log_format="{message}", log_level="DEBUG")
+        capture = io.StringIO()
+        sink_id = logger.add(capture, format="{message}", level="DEBUG")
+        try:
+            std_logging.getLogger("trimarr.native_language").warning("imdbpie unavailable")
+        finally:
+            logger.remove(sink_id)
+            logger.remove()
+
+        assert "imdbpie unavailable" in capture.getvalue()
+
+
+class TestThirdPartyLoggingIsolation:
+    """Only trimarr's own stdlib loggers are bridged into loguru."""
+
+    def test_third_party_info_does_not_reach_sink(self) -> None:
+        import io
+        import logging as std_logging
+
+        from trimarr.logger import create_logger
+
+        logger = create_logger(log_format="{message}", log_level="DEBUG")
+        capture = io.StringIO()
+        sink_id = logger.add(capture, format="{message}", level="DEBUG")
+        try:
+            std_logging.getLogger("imdbpie").info("called search_for_title noise")
+        finally:
+            logger.remove(sink_id)
+            logger.remove()
+
+        assert capture.getvalue() == ""
+
+
+class TestRecordSanitisation:
+    """Every log record is sanitised centrally, so no call site can forge lines."""
+
+    def test_message_control_characters_are_neutralised(self) -> None:
+        import io
+
+        from trimarr.logger import create_logger
+
+        logger = create_logger(log_format="{message}", log_level="DEBUG")
+        capture = io.StringIO()
+        sink_id = logger.add(capture, format="{message}", level="DEBUG")
+        try:
+            logger.info("Processed: evil.mkv\n2026-01-01 | SUCCESS | forged entry")
+            logger.warning("esc\x1b[31mred")
+        finally:
+            logger.remove(sink_id)
+            logger.remove()
+
+        output = capture.getvalue()
+        assert "forged entry" in output
+        assert "\n2026-01-01 | SUCCESS" not in output, "a newline must not create a new record"
+        assert "\x1b" not in output
+
+    def test_stdlib_bridge_records_are_sanitised_too(self) -> None:
+        import io
+        import logging as std_logging
+
+        from trimarr.logger import create_logger
+
+        logger = create_logger(log_format="{message}", log_level="DEBUG")
+        capture = io.StringIO()
+        sink_id = logger.add(capture, format="{message}", level="DEBUG")
+        try:
+            std_logging.getLogger("trimarr.native_language").info("name\nforged")
+        finally:
+            logger.remove(sink_id)
+            logger.remove()
+
+        assert "\nforged" not in capture.getvalue()
+
+
+class TestExceptionFolding:
+    """Tracebacks are folded into the sanitised message, never rendered raw."""
+
+    def test_traceback_is_folded_and_sanitised(self) -> None:
+        import io
+
+        from trimarr.logger import create_logger
+
+        logger = create_logger(log_format="{message}", log_level="DEBUG")
+        capture = io.StringIO()
+        sink_id = logger.add(capture, format="{message}", level="DEBUG")
+        try:
+            try:
+                raise RuntimeError("boom\nFORGED | ERROR | injected")
+            except RuntimeError as exc:
+                logger.opt(exception=exc).error("processing failed")
+        finally:
+            logger.remove(sink_id)
+            logger.remove()
+
+        output = capture.getvalue()
+        assert "processing failed" in output
+        assert "RuntimeError" in output
+        assert "boom" in output
+        assert "\nFORGED" not in output, "the traceback must be sanitised into the record"

@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from trimarr.database import Database
 from trimarr.hooks import _run_hook
+from trimarr.logger import sanitize_for_log
 from trimarr.processor import (
     CorruptOutputError,
     build_mkvmerge_command,
@@ -134,7 +135,7 @@ def _print_failure_report(failures: list[tuple[Path, str]], logger: Logger) -> N
         return
     logger.warning(f"Failed files ({len(failures)}):")
     for file_path, reason in failures:
-        logger.warning(f"  {file_path}: {reason}")
+        logger.warning(f"  {sanitize_for_log(str(file_path))}: {sanitize_for_log(reason)}")
 
 
 def _build_profile_hash(
@@ -162,6 +163,7 @@ def _build_profile_hash(
         strip_lower_channels: Drop audio tracks below the max channel count.
         strip_commentary: Drop tracks whose name contains "commentary".
         strip_subtitle_regex_patterns: Drop subtitle tracks whose name matches any of these regexes.
+        keep_undefined_audio: Keep audio tracks whose language is unknown (hashed only when *True*).
 
     Returns:
         64-character lowercase hex string.
@@ -236,14 +238,16 @@ def _print_summary(
             with Database(database_path) as db_summary:
                 all_time_saved = db_summary.total_bytes_saved()
             logger.info(f"Space saved (all sessions): {_fmt_bytes(all_time_saved)}.")
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, OSError) as exc:
+            # The database may be unreachable for the same reason the run failed;
+            # the summary is best-effort and must not raise out of run().
             logger.warning(f"Could not retrieve all-time savings from database: {exc}")
 
 
 def _discover_mkv_files(media_path: list[str], logger: Logger) -> list[tuple[Path, Path]]:
     """Scan *media_path* roots for .mkv files. Returns deduplicated (mkv_file, root) pairs.
 
-    Uses ``glob("**/*.mkv")`` instead of ``sorted(rglob("*"))`` with a suffix filter.
+    Uses ``glob("**/*.[Mm][Kk][Vv]")`` instead of ``sorted(rglob("*"))`` with a suffix filter.
     The glob pattern is evaluated at the ``os.scandir`` selector level, so
     non-MKV entries (thumbnails, subtitles, metadata) are never wrapped in
     Python :class:`~pathlib.Path` objects.  This avoids the pymalloc arena
@@ -286,20 +290,26 @@ def _handle_corrupt_output(
     except OSError:
         free_str = "unavailable"
     sep = "=" * _LOG_SEPARATOR_WIDTH
-    logger.opt(colors=False).critical(
-        f"\n{sep}\n"
+    # Sanitise the untrusted fields BEFORE composing the multi-line report: a
+    # newline inside a filename or probe log must not become an extra line.
+    safe_file = sanitize_for_log(str(exc.file_path))
+    safe_tmp = sanitize_for_log(str(exc.tmp_path))
+    safe_probe = sanitize_for_log(exc.probe_output or "(none)")
+    safe_mkvmerge = sanitize_for_log(exc.mkvmerge_path)
+    report = (
+        f"{sep}\n"
         "TRIMARR ABORTED — CORRUPT OUTPUT DETECTED\n"
         f"{sep}\n"
         "mkvmerge produced a structurally invalid MKV that failed the integrity check.\n"
         "All processing has been halted immediately to prevent further data loss.\n\n"
-        f"  Source file  : {exc.file_path}\n"
+        f"  Source file  : {safe_file}\n"
         f"  Source size  : {exc.input_size:,} bytes ({_fmt_bytes(exc.input_size)})\n"
-        f"  Output file  : {exc.tmp_path}  <-- RETAINED for inspection\n"
+        f"  Output file  : {safe_tmp}  <-- RETAINED for inspection\n"
         f"  Output size  : {exc.output_size:,} bytes ({_fmt_bytes(exc.output_size)}, {ratio_pct:.1f}% of source)\n"
         f"  Free space   : {free_str}\n"
-        f"  mkvmerge     : {exc.mkvmerge_path}\n"
+        f"  mkvmerge     : {safe_mkvmerge}\n"
         f"  Probe exit   : {exc.probe_returncode}\n"
-        f"  Probe output : {exc.probe_output or '(none)'}\n\n"
+        f"  Probe output : {safe_probe}\n\n"
         f"  Progress before halt: "
         f"{counts.processed} processed, {counts.skipped} skipped, "
         f"{counts.failed} failed, {counts.no_change} unchanged.\n\n"
@@ -310,17 +320,22 @@ def _handle_corrupt_output(
         "  * mkvmerge bug or unsupported container variant\n\n"
         "The ORIGINAL source file has NOT been modified.\n"
         "The corrupt temp file has been retained at the path shown above.\n"
-        f'  Inspect with: {exc.mkvmerge_path} -J "{exc.tmp_path}"\n'
+        f'  Inspect with: {safe_mkvmerge} -J "{safe_tmp}"\n'
         "Delete the temp file and resolve the root cause before re-running trimarr.\n"
         f"{sep}"
     )
+    # One record per line: the central log sanitiser flattens newlines, so a
+    # multi-line message would otherwise render as a single '?'-joined line.
+    for line in report.splitlines():
+        if line:
+            logger.opt(colors=False).critical(sanitize_for_log(line))
     sys.exit(2)
 
 
 def _resolve_effective_language(
     file_path: Path,
     cfg: _ProcessingConfig,
-    db: Database,
+    db: Database | None,
     logger: Logger,
 ) -> list[str]:
     """Return the effective language list for *file_path*.
@@ -374,7 +389,7 @@ def _probe_file_safe(
         tracks = probe_file(mkvmerge_path, file_path)
     except RuntimeError as exc:
         reason = f"probe failed: {str(exc).splitlines()[0].strip()}"
-        logger.error(f"Could not probe '{file_path}': {exc}")
+        logger.error(f"Could not probe '{sanitize_for_log(str(file_path))}': {exc}")
         failures.append((file_path, reason))
         counts.failed += 1
         return None
@@ -385,7 +400,7 @@ def _probe_file_safe(
             current_title = probe_container_title(mkvmerge_path, file_path)
         except RuntimeError as exc:
             reason = f"probe title failed: {str(exc).splitlines()[0].strip()}"
-            logger.error(f"Could not probe container title for '{file_path}': {exc}")
+            logger.error(f"Could not probe container title for '{sanitize_for_log(str(file_path))}': {exc}")
             failures.append((file_path, reason))
             counts.failed += 1
             return None
@@ -403,6 +418,7 @@ def _process_one_file(
     counts: _RunCounts,
     failures: list[tuple[Path, str]],
     logger: Logger,
+    confirmed_processed: frozenset[Path] = frozenset(),
 ) -> None:
     """Process a single MKV file and update the shared run counters.
 
@@ -410,8 +426,13 @@ def _process_one_file(
     and actual processing.  Mutates *counts* and *failures*
     in place.  Raises :exc:`CorruptOutputError` without catching it so the outer
     loop can halt all processing immediately.
+
+    *confirmed_processed* holds paths :func:`_dir_has_work` already verified as
+    processed against the same profile hash, so they are not fingerprinted again.
     """
-    # Compute effective language for this file
+    # Compute effective language for this file.  Dry-run keeps the cache handle
+    # (so already-resolved files are not re-queried) but the database is opened
+    # with cache writes disabled, so nothing is stored.
     effective_language = _resolve_effective_language(
         file_path=file_path,
         cfg=cfg,
@@ -433,8 +454,12 @@ def _process_one_file(
     )
 
     # Skip unchanged files processed with the same profile
+    if file_path in confirmed_processed:
+        logger.debug(f"Already processed (unchanged): {sanitize_for_log(str(file_path))}")
+        counts.skipped += 1
+        return
     if db.is_processed(file_path, profile_hash=profile_hash):
-        logger.debug(f"Already processed (unchanged): {file_path}")
+        logger.debug(f"Already processed (unchanged): {sanitize_for_log(str(file_path))}")
         counts.skipped += 1
         return
 
@@ -474,14 +499,15 @@ def _process_one_file(
     )
 
     if cmd is None:
-        # Record the file as processed even in dry-run mode so that
-        # subsequent runs skip it instead of re-probing it.  A file
-        # that needs no changes is already "correct" — storing its
-        # fingerprint just avoids redundant mkvmerge -J calls that
-        # inflate the kernel page cache (visible as Docker container
-        # memory).  If the file later changes its fingerprint will
-        # differ and it will be re-probed automatically.
-        logger.info(f"No changes needed for '{file_path.name}' — marking as processed.")
+        # A file that needs no changes is already "correct".  In a real run it
+        # is recorded so subsequent runs skip the mkvmerge -J probe (which
+        # inflates the kernel page cache, visible as Docker container memory).
+        # Dry-run writes nothing: the README and --help both promise that.
+        if cfg.dry_run:
+            logger.info(f"No changes needed for '{sanitize_for_log(file_path.name)}'.")
+            counts.no_change += 1
+            return
+        logger.info(f"No changes needed for '{sanitize_for_log(file_path.name)}' — marking as processed.")
         db.mark_processed(file_path, profile_hash=profile_hash, bytes_saved=0)
         counts.no_change += 1
         return
@@ -501,7 +527,7 @@ def _process_one_file(
         return
 
     # Process the file
-    logger.info(f"  [{idx}/{total}] Remuxing '{file_path.name}'...")
+    logger.info(f"  [{idx}/{total}] Remuxing '{sanitize_for_log(file_path.name)}'...")
 
     size_before = file_path.stat().st_size
     error = process_file(
@@ -516,7 +542,7 @@ def _process_one_file(
         bytes_saved = max(0, size_before - file_path.stat().st_size)
         counts.bytes_saved += bytes_saved
         db.mark_processed(file_path, profile_hash=profile_hash, bytes_saved=bytes_saved)
-        logger.success(f"Processed: {file_path.name}")
+        logger.success(f"Processed: {sanitize_for_log(file_path.name)}")
         counts.processed += 1
     else:
         failures.append((file_path, error))
@@ -533,12 +559,16 @@ def _process_one_file_guarded(
     counts: _RunCounts,
     failures: list[tuple[Path, str]],
     logger: Logger,
+    confirmed_processed: frozenset[Path] = frozenset(),
 ) -> None:
     """Wrap :func:`_process_one_file` with per-file OSError and sqlite3.Error guards.
 
     OSError and sqlite3.Error are caught, logged, and counted as failures so
     that a single bad file never aborts the entire batch.  :exc:`CorruptOutputError`
     is intentionally not caught here — it propagates to halt all processing.
+
+    *confirmed_processed* carries the paths ``_dir_has_work`` already verified
+    against the same profile hash, so they are not fingerprinted a second time.
     """
     try:
         _process_one_file(
@@ -551,15 +581,16 @@ def _process_one_file_guarded(
             counts=counts,
             failures=failures,
             logger=logger,
+            confirmed_processed=confirmed_processed,
         )
     except OSError as exc:
         reason = f"filesystem error: {str(exc).splitlines()[0].strip()}"
-        logger.error(f"File system error processing '{file_path}': {exc}")
+        logger.error(f"File system error processing '{sanitize_for_log(str(file_path))}': {exc}")
         failures.append((file_path, reason))
         counts.failed += 1
     except sqlite3.Error as exc:
         reason = f"database error: {str(exc).splitlines()[0].strip()}"
-        logger.error(f"Database error processing '{file_path}': {exc}")
+        logger.error(f"Database error processing '{sanitize_for_log(str(file_path))}': {exc}")
         failures.append((file_path, reason))
         counts.failed += 1
 
@@ -570,13 +601,17 @@ def _dir_has_work(
     profile_hash: str,
     cfg: _ProcessingConfig,
     logger: Logger,
-) -> bool:
+) -> tuple[bool, frozenset[Path]]:
     """Check if any file in *files_in_dir* needs processing (not already processed).
 
-    Returns True at the first file that is not yet processed, or if a
-    filesystem or database error occurs (the error is logged and work is
-    assumed so that pre hooks fire).  Returns False only when every file in
-    *files_in_dir* is confirmed already processed and no errors occurred.
+    Returns ``(has_work, confirmed_processed)``.  ``has_work`` is True at the
+    first file that is not yet processed, or if a filesystem or database error
+    occurs (the error is logged and work is assumed so that pre hooks fire).
+    It is False only when every file in *files_in_dir* is confirmed already
+    processed and no errors occurred.
+
+    ``confirmed_processed`` lists the files this check already verified against
+    *profile_hash*, so the per-file pass need not fingerprint them again.
     """
     # When keep_native_audio is active, conservatively fire hooks.
     # The *profile_hash* passed to this function is the global pre-native-language
@@ -584,19 +619,110 @@ def _dir_has_work(
     # the per-file effective language merged by ``_process_one_file``.
     # Rather than probing every file just to decide hooks, always assume work.
     if cfg.keep_native_audio and not cfg.keep_audio:
-        return True
+        return True, frozenset()
 
+    confirmed: set[Path] = set()
     for fp, _ in files_in_dir:
         try:
             if not db.is_processed(fp, profile_hash=profile_hash):
-                return True
+                return True, frozenset(confirmed)
+            confirmed.add(fp)
         except OSError as exc:
-            logger.error(f"File system error processing '{fp}': {exc}")
-            return True
+            logger.error(f"File system error processing '{sanitize_for_log(str(fp))}': {exc}")
+            return True, frozenset()
         except sqlite3.Error as exc:
-            logger.error(f"Database error processing '{fp}': {exc}")
-            return True
-    return False
+            logger.error(f"Database error processing '{sanitize_for_log(str(fp))}': {exc}")
+            return True, frozenset()
+    return False, frozenset(confirmed)
+
+
+def _process_all_groups(
+    db: Database,
+    dir_groups: OrderedDict[Path, list[tuple[Path, Path]]],
+    profile_hash: str,
+    cfg: _ProcessingConfig,
+    total: int,
+    pre_process: str | None,
+    post_process: str | None,
+    command_timeout_seconds: int | None,
+    counts: _RunCounts,
+    failures: list[tuple[Path, str]],
+    logger: Logger,
+) -> None:
+    """Run the per-directory hook/file loop over *dir_groups*.
+
+    Mutates *counts* and *failures* in place.  Kept separate from
+    :func:`_process_directory_groups` so the database-error handling and the
+    loop body stay individually simple.
+    """
+    global_idx = 0
+    for dir_path, files_in_dir in dir_groups.items():
+        dir_has_work, confirmed_processed = _dir_has_work(files_in_dir, db, profile_hash, cfg, logger)
+        leaf = dir_path.name
+
+        _run_dir_hook(
+            cmd_template=pre_process,
+            dir_has_work=dir_has_work,
+            dry_run=cfg.dry_run,
+            leaf=leaf,
+            dir_path=str(dir_path),
+            logger=logger,
+            timeout_seconds=command_timeout_seconds,
+        )
+
+        if pre_process and dir_has_work and not cfg.dry_run:
+            # A pre-process hook can rewrite or delete files, so the
+            # confirmation set gathered before it may be stale.  Drop it and
+            # let the per-file pass re-check those files.  (In dry-run the hook
+            # does not run, so the set stays valid.)
+            confirmed_processed = frozenset()
+
+        try:
+            for file_path, root in files_in_dir:
+                global_idx += 1
+                _process_one_file_guarded(
+                    file_path=file_path,
+                    root=root,
+                    idx=global_idx,
+                    total=total,
+                    db=db,
+                    cfg=cfg,
+                    counts=counts,
+                    failures=failures,
+                    logger=logger,
+                    confirmed_processed=confirmed_processed,
+                )
+        finally:
+            # The post hook must run even when a file raises (Ctrl+C,
+            # CorruptOutputError): it is the paired undo of the pre hook, so
+            # skipping it can leave a directory unlocked or half-prepared.
+            _run_dir_hook(
+                cmd_template=post_process,
+                dir_has_work=dir_has_work,
+                dry_run=cfg.dry_run,
+                leaf=leaf,
+                dir_path=str(dir_path),
+                logger=logger,
+                timeout_seconds=command_timeout_seconds,
+            )
+
+
+def _open_run_database(database_path: str, dry_run: bool) -> Database:
+    """Open the tracking database, keeping a preview run from creating one.
+
+    A dry run must not write anything, including the SQLite file, its WAL
+    sidecars and the parent directory.  When the database does not exist yet, a
+    dry run uses an in-memory database instead, so the preview still reports
+    "nothing processed" without leaving a file behind.
+
+    An existing database is still opened (read-only for cache purposes) because
+    the preview has to know which files are already done.  Opening runs the
+    schema migration and enables WAL, so a dry run over a *legacy* database
+    upgrades its schema — the smallest write that keeps the preview accurate.
+    """
+    if dry_run and not Path(database_path).exists():
+        return Database(":memory:", cache_writes_enabled=False)
+    return Database(database_path, cache_writes_enabled=not dry_run)
 
 
 def _process_directory_groups(
@@ -609,65 +735,52 @@ def _process_directory_groups(
     post_process: str | None,
     command_timeout_seconds: int | None,
     logger: Logger,
-) -> tuple[_RunCounts, bool, list[tuple[Path, str]]]:
+) -> tuple[_RunCounts, bool, list[tuple[Path, str]], bool]:
     """Process files grouped by directory, firing pre/post hooks around each group.
 
-    Returns (counts, interrupted, failures).
+    Returns (counts, interrupted, failures, database_unavailable).  The last
+    element is True when the tracking database could not be opened at all, so
+    the caller can exit non-zero instead of reporting a successful run.
     """
     counts = _RunCounts()
     failures: list[tuple[Path, str]] = []
     interrupted = False
+    database_unavailable = False
 
     try:
-        with Database(database_path) as db:
-            global_idx = 0
-
-            for dir_path, files_in_dir in dir_groups.items():
-                dir_has_work = _dir_has_work(files_in_dir, db, profile_hash, cfg, logger)
-
-                leaf = dir_path.name
-
-                _run_dir_hook(
-                    cmd_template=pre_process,
-                    dir_has_work=dir_has_work,
-                    dry_run=cfg.dry_run,
-                    leaf=leaf,
-                    dir_path=str(dir_path),
-                    logger=logger,
-                    timeout_seconds=command_timeout_seconds,
-                )
-
-                for file_path, root in files_in_dir:
-                    global_idx += 1
-                    _process_one_file_guarded(
-                        file_path=file_path,
-                        root=root,
-                        idx=global_idx,
-                        total=total,
-                        db=db,
-                        cfg=cfg,
-                        counts=counts,
-                        failures=failures,
-                        logger=logger,
-                    )
-
-                _run_dir_hook(
-                    cmd_template=post_process,
-                    dir_has_work=dir_has_work,
-                    dry_run=cfg.dry_run,
-                    leaf=leaf,
-                    dir_path=str(dir_path),
-                    logger=logger,
-                    timeout_seconds=command_timeout_seconds,
-                )
+        with _open_run_database(database_path, cfg.dry_run) as db:
+            _process_all_groups(
+                db=db,
+                dir_groups=dir_groups,
+                profile_hash=profile_hash,
+                cfg=cfg,
+                total=total,
+                pre_process=pre_process,
+                post_process=post_process,
+                command_timeout_seconds=command_timeout_seconds,
+                counts=counts,
+                failures=failures,
+                logger=logger,
+            )
 
     except CorruptOutputError as exc:
         _handle_corrupt_output(exc, counts, logger)
     except KeyboardInterrupt:
         interrupted = True
         logger.warning("Interrupted — showing partial results.")
+    except (sqlite3.Error, OSError) as exc:
+        # Opening (or migrating) the tracking database failed.  Every other
+        # database error path is survivable per file; this one is not, so it is
+        # reported as a run-level failure.  Without the tracking database no
+        # file can be skipped or recorded, so the run is also marked as failed
+        # for anything watching the exit code.
+        reason = f"database unavailable: {str(exc).splitlines()[0].strip()}"
+        logger.error(f"Cannot open tracking database '{database_path}': {exc}")
+        failures.append((Path(database_path), reason))
+        counts.failed += 1
+        database_unavailable = True
 
-    return counts, interrupted, failures
+    return counts, interrupted, failures, database_unavailable
 
 
 def run(
@@ -698,7 +811,8 @@ def run(
 
     Already-processed files (same fingerprint and profile) are skipped silently.
     On dry-run the planned command is logged; nothing on disk is modified.
-    Raises :exc:`SystemExit` (code 130) on :exc:`KeyboardInterrupt`.
+    Raises :exc:`SystemExit` with code 130 on :exc:`KeyboardInterrupt`, and with
+    code 1 when the tracking database could not be opened.
     """
     if isinstance(media_path, (str, os.PathLike)):
         media_path = [str(media_path)]
@@ -752,7 +866,7 @@ def run(
     for file_path, root in unique_files:
         dir_groups.setdefault(file_path.parent, []).append((file_path, root))
 
-    counts, interrupted, failures = _process_directory_groups(
+    counts, interrupted, failures, database_unavailable = _process_directory_groups(
         dir_groups=dir_groups,
         database_path=database_path,
         profile_hash=profile_hash,
@@ -769,3 +883,8 @@ def run(
 
     if interrupted:
         sys.exit(130)
+
+    if database_unavailable:
+        # Nothing could be recorded or skipped, so the run did not do its job.
+        # Exit non-zero so cron/CI/health checks can see the failure.
+        sys.exit(1)

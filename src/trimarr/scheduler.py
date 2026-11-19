@@ -136,7 +136,7 @@ def _scheduler_wait_for_next_fire(
 ) -> None:
     """Compute the next cron fire, log it, and sleep until it arrives.
 
-    If *elapsed* (the duration of the last run) is shorter than the interval
+    If *elapsed* (the duration of the last run) is longer than the interval
     to the next fire, a warning is logged so the operator knows one or more
     firings were skipped.
     """
@@ -189,10 +189,16 @@ def run_scheduled(
                 # Exit code 130 means the run was interrupted by Ctrl+C (runner.py converts
                 # KeyboardInterrupt to sys.exit(130)).  Re-raise as KeyboardInterrupt so the
                 # scheduler's outer handler can log "Scheduler stopped." and exit cleanly.
+                # Exit code 1 means the run could not use its tracking database (locked,
+                # unwritable mount, ...).  That is usually transient, so keep the daemon
+                # alive and retry on the next tick instead of dying until a restart.
                 # Any other exit code (e.g. 2 for CorruptOutputError) propagates as-is.
                 if exc.code == 130:
                     raise KeyboardInterrupt from exc
-                raise
+                if exc.code == 1:
+                    logger.error("Scheduler: run failed (exit 1) — see the run output above; will retry next tick.")
+                else:
+                    raise
             except Exception as exc:
                 logger.error(f"Scheduler: run failed: {exc}")
 

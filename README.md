@@ -5,8 +5,10 @@ Removes (trims) unwanted audio and subtitles from matroska container format vide
 ## Features
 
 - **Recursive scan** — finds all `.mkv` files under one or more specified directory trees. Pass a pipe-separated list
-to `--media-path` to process multiple roots in a single run; duplicate files (from overlapping paths or symlinks) are
-automatically deduplicated.
+to `--media-path` to process multiple roots in a single run; duplicate files (from overlapping roots or from file
+symlinks inside a scanned root) are automatically deduplicated. Symlinked *directories* are not descended into — add
+the real path to `--media-path` instead (or pass the symlink itself as a root). Point trimarr at real files, not
+symlinked `.mkv` files: a remux replaces the *link* with a regular file and leaves its target untouched.
 - **Smart skip** — tracks processed files in SQLite using a fingerprint (size + mtime + partial
   hash); only reprocesses a file if its content has changed.
 - **Commentary track safety** — if the default audio or subtitle track is a commentary track,
@@ -25,18 +27,25 @@ automatically deduplicated.
   audio tracks even if they don't match your `--language` preference. Ideal for dubbed films
   (e.g., keeping original Chinese audio alongside an English dub) and TV shows where Sonarr
   NFO files carry only a TVDB ID. Results are cached in the database so each
-  file is looked up only once.
+  file is looked up only once; a *failed* lookup is retried after 7 days so a
+  transient outage or a missing API key does not disable the feature forever.
 - **Auto-managed mkvmerge** — downloads the mkvmerge binary from MKVToolNix GitHub releases on
-  first run and keeps it up to date automatically (disable with `--no-update-check`).
+  first run and keeps it up to date automatically (disable with `--no-update-check`). The download is
+  validated by magic bytes and size, but not by a published checksum; if you require a
+  verifiable binary, install MKVToolNix yourself and point `--mkvmerge-path` at it.
 - **Space savings summary** — reports bytes reclaimed at the end of each run and a cumulative
   all-time total across all sessions.
 - **Graceful interrupt** — Ctrl+C shows a partial summary before exiting with code 130.
+- **Distinct exit codes** — `0` success; `1` a fatal run-level error (tracking database unavailable, or the
+  managed mkvmerge download failed); `2` a corrupt remux halted processing **or** a CLI usage error;
+  `130` interrupted.
 - **Safe file replacement** — output is written to a temp file first, then atomically renamed over
   the original so a failed remux never corrupts the source.
 - **Corrupt output safeguard** — before replacing the original, trimarr probes the output with
   `mkvmerge -J` to confirm it is a structurally valid MKV and rejects any output smaller than 50 %
-  of the source. If either check fails, all processing halts immediately, the temp file is preserved
-  for inspection, and the original file is left untouched. The size guard can be bypassed with
+  of the source. A failed structural check halts all processing immediately and preserves the temp
+  file for inspection. An undersized output fails only that file: the original is left untouched and
+  the temp copy is removed. The size guard can be bypassed with
   `--skip-size-check` when legitimate remuxes are expected to produce significantly smaller output
   (e.g. files with very large audio or subtitle payloads).
 - **BCP-47 / ISO 639-1 language tag support** — files using IETF `language_ietf` tags (e.g. `en`,
@@ -86,26 +95,26 @@ trimarr --help
 | `--mkvmerge-path` | Path to the mkvmerge executable. When omitted, trimarr manages its own binary and auto-updates it. | Linux: `~/.local/share/trimarr/bin/mkvmerge`<br>Windows: `%LOCALAPPDATA%\trimarr\bin\mkvmerge.exe` | `/usr/bin/mkvmerge` | `path` |
 | `--database-path` | Path to the SQLite database file used for tracking processed files. | Linux: `~/.local/share/trimarr/db/trimarr.db`<br>Windows: `%LOCALAPPDATA%\trimarr\db\trimarr.db` | `/var/lib/trimarr/trimarr.db` | `path` |
 | `--log-path` | Path to the log file for tracking application events. | Linux: `~/.local/share/trimarr/logs/trimarr.log`<br>Windows: `%LOCALAPPDATA%\trimarr\logs\trimarr.log` | `/var/log/trimarr.log` | `path` |
-| `--log-level` | Logging level for console output. Choices: `DEBUG`, `INFO`, `SUCCESS`, `WARNING`, `ERROR`. | `INFO` | `DEBUG` | `choice` |
+| `--log-level` | Logging level for the console and file sinks. Choices: `DEBUG`, `INFO`, `SUCCESS`, `WARNING`, `ERROR`. | `INFO` | `DEBUG` | `choice` |
 | `--edit-metadata-title` | Update the container title metadata of each file to match its filename stem. Mutually exclusive with `--delete-metadata-title`. | `false` | — | `flag` |
 | `--delete-metadata-title` | Remove the container title metadata from each file. Mutually exclusive with `--edit-metadata-title`. | `false` | — | `flag` |
 | `--keep-subtitles` | Keep all subtitle tracks regardless of language. | `false` | — | `flag` |
 | `--keep-audio` | Keep all audio tracks regardless of language. | `false` | — | `flag` |
 | `--keep-native-audio` | Identify the file's native/original spoken language(s) via IMDb, TMDb, and TVDB — the lookup prioritises the **originalLanguage** from TMDb/TVDB (a single production language code) over IMDb's broader spokenLanguages (all languages with any dialogue). The chain internally orders by media type: TMDb first for movies, TVDB first for TV shows. Keeps all audio tracks in those languages alongside your `--language` preference. Ignored when `--keep-audio` is set. First-time lookups require an internet connection; results are cached in the database. | `false` | — | `flag` |
 | `--keep-undefined-audio` | If specified, audio tracks with an undefined language code ("und") are kept rather than dropped by the language filter. Useful when source files have missing or incorrect language tags. Ignored when `--keep-audio` is set. | `false` | — | `flag` |
-| `--tmdb-api-key` | TMDb API key used as fallback when IMDbPie cannot identify a file's native language. Optional — without it, TMDb lookups are silently skipped. | — | `<key>` | `string` |
-| `--tvdb-api-key` | TVDB API key used as fallback when IMDbPie and TMDb cannot identify a file's native language. Useful for TV shows whose NFO files contain only a TVDB ID. Optional — without it, TVDB lookups are silently skipped. | — | `<key>` | `string` |
+| `--tmdb-api-key` | TMDb API key. For NFO ID lookups TMDb `originalLanguage` is tried first for movies (TVDB first for TV shows); an IMDb ID embedded in the filename is still resolved before an embedded TMDb ID, and IMDb `spokenLanguages` is the fallback after a TMDb miss. Optional — without it, TMDb lookups are silently skipped. | — | `<key>` | `string` |
+| `--tvdb-api-key` | TVDB API key. For TV shows TVDB `originalLanguage` is tried before TMDb in NFO ID lookups; for movies it is the fallback after TMDb. Needed for TV shows whose NFO files carry only a TVDB ID. Optional — without it, TVDB lookups are silently skipped. | — | `<key>` | `string` |
 | `--no-backup` | Delete the original file after successful processing instead of renaming it to `<name>.bak`. By default a backup is always created. | `false` | — | `flag` |
 | `--no-update-check` | Skip the automatic check for a newer mkvmerge version. Has no effect when `--mkvmerge-path` is supplied (user-managed binaries are never auto-updated). | `false` | — | `flag` |
-| `--strip-lower-channels` | After language filtering, drop any audio tracks whose channel count is strictly below the highest channel count among the surviving audio tracks. For example, given English tracks at 8ch, 8ch, and 2ch, the 2ch track is removed. Tracks with an unknown channel count are always kept. Has no effect when `--keep-audio` is set. **Disabled by default** — enable only when you are confident lower-channel duplicates are not needed. | `false` | — | `flag` |
-| `--strip-commentary` | If specified, audio and subtitle tracks whose name contains "commentary" (case-insensitive) will be removed after language filtering. **Audio final gate:** if stripping would leave zero audio tracks, all audio is retained and a warning is logged — a silent file is never acceptable. Subtitles have no such gate and are stripped unconditionally. Has no effect on audio when `--keep-audio` is set, or on subtitles when `--keep-subtitles` is set. **Disabled by default.** | `false` | — | `flag` |
-| `--strip-subtitle-regex` | One or more Python regex patterns. Any subtitle track whose name matches any pattern is removed after language filtering, regardless of language. Runs after `--strip-commentary`. Specify multiple times for multiple patterns (e.g. `--strip-subtitle-regex '(?i)songs.*signs' --strip-subtitle-regex '(?i)signs.*songs'`). Has no effect when `--keep-subtitles` is set. **Disabled by default.** | `()` | `'(?i)songs.*signs'` | `string (repeatable)` |
-| `--dry-run` | Log planned changes without modifying any files. Processed files are not recorded to the database in this mode. | `false` | — | `flag` |
+| `--strip-lower-channels` | After language filtering, drop any audio track whose channel count is strictly below the highest channel count among the surviving audio tracks **of the same language**. Commentary tracks are exempt from this filter (they are neither counted nor dropped) — use `--strip-commentary` to remove them. For example, with `--language eng,fre` and English tracks at 8ch, 8ch, and 2ch, the 2ch English track is removed while a 2ch French track is kept. Tracks with an unknown channel count are always kept. Has no effect when `--keep-audio` is set. **Disabled by default** — enable only when you are confident lower-channel duplicates are not needed. | `false` | — | `flag` |
+| `--strip-commentary` | If specified, audio and subtitle tracks whose name contains "commentary" (case-insensitive) will be removed after language filtering. **Audio final gate:** if stripping would leave zero audio tracks, all audio is retained and a warning is logged — a silent file is never acceptable. Subtitles have no such gate and are stripped whenever the subtitle language fallback has not fired (if no subtitle matches `--language`, all subtitles are kept and commentary stripping is skipped). Has no effect on audio when `--keep-audio` is set, or on subtitles when `--keep-subtitles` is set. **Disabled by default.** | `false` | — | `flag` |
+| `--strip-subtitle-regex` | One or more Python regex patterns. Any subtitle track whose name matches any pattern is removed after language filtering, regardless of language. Runs after `--strip-commentary`. Not applied when the subtitle language fallback triggers (no subtitle matches `--language`, so all subtitles are kept). Specify multiple times for multiple patterns (e.g. `--strip-subtitle-regex '(?i)songs.*signs' --strip-subtitle-regex '(?i)signs.*songs'`). Has no effect when `--keep-subtitles` is set. **Disabled by default.** | `()` | `'(?i)songs.*signs'` | `string (repeatable)` |
+| `--dry-run` | Log planned changes without modifying any media file, and without writing processed-file or cache rows. An existing tracking database may still be opened and upgraded (and none is created). | `false` | — | `flag` |
 | `--schedule` | Run on a cron schedule (instead of once). Standard 5-field POSIX cron expression: minute hour day month weekday. Also accepts `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`. Examples: `'0 2 * * *'` (daily at 2am), `'*/30 * * * *'` (every 30 min), `'@daily'` (once per day). When omitted, trimarr runs once and exits. | — | — | `string` |
 | `--run-on-start` | When used with `--schedule`, execute an immediate run before the first scheduled cron fire. Without `--schedule` this flag is an error. | `false` | — | `flag` |
 | `--skip-size-check` | Bypass the output size guard that rejects mkvmerge results smaller than 50 % of the source file. Use when legitimate remuxes are expected to produce significantly smaller output (e.g. files with very large audio or subtitle payloads). The structural validity check (`mkvmerge -J`) is never bypassed. | `false` | — | `flag` |
-| `--pre-process` | Shell command to run **before** processing files in each directory. The placeholders `{leaf}` (directory basename) and `{dir}` (full directory path) are substituted. Only fires for directories where at least one file needs processing. Failures are logged as warnings and do not abort the run. May be used independently of `--schedule`. | — | `'no_ransom.sh --unlock yes {leaf}'` | `string` |
-| `--post-process` | Shell command to run **after** processing files in each directory. Same placeholder behaviour as `--pre-process`. Fires even if some files in the directory failed. | — | `'no_ransom.sh --unlock no {leaf}'` | `string` |
+| `--pre-process` | Command to run **before** processing files in each directory. Executed directly, **without a shell** — the template is split POSIX-style, so pipes, redirection, globbing and `$VAR` are literal arguments. The placeholders `{leaf}` (directory basename) and `{dir}` (full directory path) are substituted. Fires once per directory that has work, except with `--keep-native-audio`, where it fires for every directory (the per-file profile cannot be known without probing). Failures are logged as warnings and do not abort the run. May be used independently of `--schedule`. | — | `'no_ransom.sh --unlock yes {leaf}'` | `string` |
+| `--post-process` | Command to run **after** processing files in each directory. Same placeholder and no-shell behaviour as `--pre-process`. Fires even if some files in the directory failed. | — | `'no_ransom.sh --unlock no {leaf}'` | `string` |
 | `--command-timeout-mins` | Maximum time in minutes each pre/post process command is allowed to run before being killed. Set to `0` to disable the timeout entirely. | `5` | `10` | `int` |
 
 ✱ Required.
@@ -139,9 +148,9 @@ flowchart TD
     SC4 --> L
     L{--strip-lower-channels?}
     L -- No --> I
-    L -- Yes --> M{All surviving tracks\nsame channel count?}
+    L -- Yes --> M{Every language group\nhas one channel count?}
     M -- Yes --> I
-    M -- No --> N[Drop tracks below\nmax channel count]
+    M -- No --> N[Drop tracks below the\nper-language max channel count]
     N --> I
     I{Commentary track\nholds default flag?}
     I -- No --> J([✅ Apply changes])
@@ -186,12 +195,16 @@ flowchart TD
 
 ### Native language resolution flow
 
-When `--keep-native-audio` is enabled, trimarr walks the following chain to identify the
-movie or TV show and look up its original spoken language(s). The chain is unified for all
-media types: TMDb/TVDB originalLanguage is tried first (the chain internally orders by
-media type — TMDb first for movies, TVDB first for TV shows), then IMDb spokenLanguages
-as fallback. Each level is attempted in order; the first successful result is cached in the
-database and returned.
+When `--keep-native-audio` is enabled, trimarr walks the following four-phase chain to identify
+the movie or TV show and look up its original spoken language(s): (1) IDs found in the NFO file,
+(2) an ID embedded in the filename, (3) a title search using the clean NFO title, then (4) parsing
+the filename and directory name. **Phase 1 (NFO IDs)** tries TMDb/TVDB `originalLanguage` first —
+ordered by media type, TMDb first for movies and TVDB first for TV shows — then IMDb
+`spokenLanguages` as a fallback. **Phase 2 (embedded IDs)** is different on purpose: an embedded
+IMDb ID is resolved before an embedded TMDb/TVDB ID, because that ID is the one the release was
+named after. Each level is attempted in order; the first successful result is cached in the
+database and returned (a failed lookup is re-attempted after 7 days). Title searches go through
+IMDbPie and TMDb only — TVDB is queried by ID.
 
 ```mermaid
 flowchart TD
@@ -204,6 +217,8 @@ for this media?}
 TMDb, or TVDB ID?}
     D -- Yes --> E[TMDb/TVDB chain:
 originalLanguage]
+    D -- No --> I[Phase 2: embedded ID
+in filename]
     E --> F{Found?}
     F -- Yes --> G([✅ Cache & return
 native languages])
@@ -211,76 +226,64 @@ native languages])
 fallback]
     E2 --> F2{Found?}
     F2 -- Yes --> G
-    F2 -- No --> H
+    F2 -- No --> I
 
-    %% NFO title search --
-    D -- No --> H[Use NFO title + year
-for API search]
-    H --> I{Search
-succeeds?}
-    I -- Yes --> J([✅ Cache & return
-native languages])
-    I -- No --> K
-
-    %% Embedded ID in filename --
-    B -- No --> K{Filename contains
+    %% Phase 2 — embedded ID in filename --
+    B -- No --> I[Phase 2: embedded ID
+in filename]
+    I --> J{Filename contains
 imdb-tt..., tmdb-...,
 or tvdb-...?}
-    K -- Yes --> L[Extract ID from
-filename stem]
-    L --> M[Look up by ID]
-    M --> N{API returns
+    J -- Yes --> L[Extract ID and
+look up by ID]
+    L --> M{API returns
 native languages?}
-    N -- Yes --> G
-    N -- No --> O
+    M -- Yes --> G
+    M -- No --> N[Phase 3: NFO title search]
+    J -- No --> N
 
-    %% Filename parsing --
-    K -- No --> O[Parse filename stem
+    %% Phase 3 — NFO title search --
+    N --> O{NFO present with
+a usable title?}
+    O -- Yes --> P[Search IMDbPie by
+NFO title + year]
+    P --> Q{Found?}
+    Q -- Yes --> G
+    Q -- No --> R{--tmdb-api-key
+configured?}
+    R -- Yes --> S[Search TMDb by
+NFO title + year]
+    S --> T{Found?}
+    T -- Yes --> G
+    T -- No --> U[Phase 4: filename/directory]
+    R -- No --> U
+    O -- No --> U
+
+    %% Phase 4 — filename/directory chain --
+    U --> V[Parse filename stem:
 strip scene tags,
 extract year]
-    O --> P{Year found?}
-    P -- Yes --> Q[Search IMDbPie by
+    V --> W[Search IMDbPie by
 filename title + year]
-    P -- No --> R
-    Q --> S{Found?}
-    S -- Yes --> G
-    S -- No --> R
-
-    %% Directory name --
-    R[Parse parent
-directory name]
-    R --> T[Search IMDbPie by
+    W --> X{Found?}
+    X -- Yes --> G
+    X -- No --> Y[Search IMDbPie by
 directory title + year]
-    T --> U{Found?}
-    U -- Yes --> G
-    U -- No --> V
-
-    %% TMDb fallback --
-    V{--tmdb-api-key or
---tvdb-api-key
+    Y --> Z{Found?}
+    Z -- Yes --> G
+    Z -- No --> AA{--tmdb-api-key
 configured?}
-    V -- No --> W([⚠️ Cannot determine
+    AA -- No --> AB([⚠️ Cannot determine
 native language])
-    V -- Yes --> X[Search TMDb by
-filename title + year]
-    X --> Y{Found?}
-    Y -- Yes --> G
-    Y -- No --> Z[Search TMDb by
-directory title + year]
-    Z --> AA{Found?}
-    AA -- Yes --> G
-    AA -- No --> AB{--tvdb-api-key
-configured?}
-    AB -- No --> W
-    AB -- Yes --> AC[Search TVDB by
+    AA -- Yes --> AC[Search TMDb by
 filename title + year]
     AC --> AD{Found?}
     AD -- Yes --> G
-    AD -- No --> AE[Search TVDB by
+    AD -- No --> AE[Search TMDb by
 directory title + year]
     AE --> AF{Found?}
     AF -- Yes --> G
-    AF -- No --> W
+    AF -- No --> AB
 ```
 
 ## Scheduler
@@ -325,7 +328,7 @@ Special keyword shortcuts (via croniter):
 
 ### Pre/Post process hooks
 
-Use `--pre-process` and `--post-process` to run shell commands before and after trimarr
+Use `--pre-process` and `--post-process` to run a command before and after trimarr
 processes files in a directory. This is useful for external operations such as unlocking
 files before processing and re-locking them afterwards.
 
@@ -333,16 +336,22 @@ The hooks fire **once per directory** that has files needing processing, not per
 `{leaf}` and `{dir}` placeholders in the command template are replaced with the directory
 basename and full path respectively.
 
+Hook commands are **not** run through a shell: the template is split POSIX-style and executed
+directly, so `|`, `>`, `&&`, `$VARS` and globs are passed as literal arguments. Wrap such logic
+in a script and call that instead. On Windows the template is split non-POSIX, so quotes stay part of
+the token. Hooks are skipped entirely during `--dry-run`, and with `--keep-native-audio` (without
+`--keep-audio`) they fire for every directory (the per-file profile cannot be known without probing).
+
 ```bash
 # Run a script before and after processing each directory
-trimarr --language eng --media-path /mnt/media \\
-  --pre-process 'no_ransom.sh --unlock yes {leaf}' \\
-  --post-process 'no_ransom.sh --unlock no {leaf}' \\
+trimarr --language eng --media-path /mnt/media \
+  --pre-process 'no_ransom.sh --unlock yes {leaf}' \
+  --post-process 'no_ransom.sh --unlock no {leaf}' \
   --schedule "0 2 * * *"
 
 # Only pre-process (no post-process), with a 10-minute timeout
-trimarr --language eng --media-path /mnt/media \\
-  --pre-process 'prepare_dir.sh {dir}' \\
+trimarr --language eng --media-path /mnt/media \
+  --pre-process 'prepare_dir.sh {dir}' \
   --command-timeout-mins 10
 ```
 
@@ -359,6 +368,10 @@ The scheduler stays running and recomputes the next fire time from the cron expr
 each run. If a run takes longer than the gap to the next scheduled fire, the missed fire
 is skipped automatically and a warning is logged. This approach naturally handles overruns
 without drift accumulation.
+
+A run that cannot reach its tracking database (locked file, read-only mount) logs the error and
+retries at the next scheduled fire rather than stopping the scheduler. A corrupt-output halt
+(exit code 2) still stops it, and Ctrl+C exits cleanly with code 0.
 
 ### Stopping the scheduler
 

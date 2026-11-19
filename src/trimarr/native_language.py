@@ -1,8 +1,8 @@
 """Native/original language detection for MKV files.
 
-Uses IMDbPie (primary) and TMDb (fallback) to identify the spoken
-language(s) of a film from its file path.  Results are cached in
-the metadata_cache SQLite table to avoid redundant API calls.
+Uses IMDbPie, TMDb and TVDB to identify the native/original language(s)
+of a media file from its path.  Results are cached in the metadata_cache
+SQLite table to avoid redundant API calls.
 """
 
 from __future__ import annotations
@@ -17,13 +17,14 @@ import urllib.request
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
-from trimarr._nfo_parser import _MAX_TVSHOW_UPWALK_DEPTH, NfoMetadata, discover_nfo, parse_nfo
+from trimarr._nfo_parser import NfoMetadata, discover_nfo, find_tvshow_nfo, parse_nfo
 from trimarr.processor import _ISO_639_1_TO_2, normalize_language_code
 
 # Lazy module-level imports — attempted once at load time, cached in module
 # globals so every function call does not re-attempt the import.
 _imdbpie: Any
 _HAS_IMDBPIE: bool
+_IMDBPIE_WARNING_LOGGED = False
 try:
     import imdbpie as _imdbpie_lib
 
@@ -45,6 +46,7 @@ except ImportError:
     _pycountry = None
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from trimarr.database import Database
@@ -53,6 +55,9 @@ logger = logging.getLogger(__name__)
 
 # Regex patterns for filename-embedded IMDb/TMDb IDs.
 # Matches {imdb-tt123}, [imdb-tt123], imdb-tt123 and same for tmdb-{id}.
+_IMDB_ID_RE = re.compile(r"^tt\d{7,}$")
+"""A bare IMDb title ID, e.g. ``tt0082096``."""
+
 _EMBEDDED_IMDB_RE = re.compile(
     r"""(?:\[imdb-(tt\d{7,})\]|\{imdb-(tt\d{7,})\}|imdb-(tt\d{7,}))""", re.VERBOSE | re.IGNORECASE
 )
@@ -61,6 +66,13 @@ _EMBEDDED_TMDB_RE = re.compile(r"""(?:\[tmdb-(\d+)\]|\{tmdb-(\d+)\}|tmdb-(\d+))"
 # TVDB API endpoints and constants.
 _TVDB_BASE_URL = "https://api4.thetvdb.com/v4"
 _TVDB_LOGIN_URL = f"{_TVDB_BASE_URL}/login"
+
+_TVDB_TOKEN_CACHE: dict[str, str] = {}
+"""JWT per API key, reused for every lookup in the process.
+
+Without it a TV library issues one login per file, doubling API traffic and
+risking rate limiting.  Entries are replaced when the server answers 401.
+"""
 
 # Regex for filename-embedded TVDB IDs: {tvdb-12345}, [tvdb-12345], tvdb-12345
 _EMBEDDED_TVDB_RE = re.compile(r"""(?:\[tvdb-(\d+)\]|\{tvdb-(\d+)\}|tvdb-(\d+))""", re.VERBOSE | re.IGNORECASE)
@@ -99,8 +111,9 @@ _TV_EPISODE_RE = re.compile(
         # Pattern 1: S01E01, S1E1, S01.E01, S01E01-E02, S01E01E02 (multi-episode)
         S\d{1,2}\.?\s?E\d{1,}(?:-?\.?\s?E\d{1,})*
         |
-        # Pattern 2: 1x01, 01x01
-        \d{1,3}x\d{1,3}
+        # Pattern 2: 1x01, 01x01 (1-2 digit fields, not part of a longer
+        # digit run, so resolutions such as 1920x1080 are not matched)
+        (?<!\d)\d{1,2}x\d{1,2}(?!\d)
         |
         # Pattern 3: Season.1.Episode.1, Season 1 Episode 1, Season01Episode01
         # Requires an episode number suffix to avoid matching movie names like "Summer.Season.2022"
@@ -347,14 +360,23 @@ def _years_equal(expected: str | None, actual: object) -> bool:
 
 
 def _find_matching_imdb_id(
-    hits: list[dict],
+    hits: Sequence[Any],
     title: str,
     year: str | None,
 ) -> str | None:
-    """Find and return the IMDb ID of the first hit matching *title* and *year*."""
+    """Find and return the IMDb ID of the first hit matching *title* and *year*.
+
+    *hits* is whatever the API returned: entries that are not JSON objects are
+    skipped rather than raising.
+    """
     norm_title = _normalise_for_compare(title)
     for hit in hits:
-        hit_title = (hit.get("title") or "").strip()
+        if not isinstance(hit, dict):
+            continue
+        title_value = hit.get("title")
+        if not isinstance(title_value, str):
+            continue
+        hit_title = title_value.strip()
         if _normalise_for_compare(hit_title) != norm_title:
             continue
         if not _years_equal(year, hit.get("year")):
@@ -377,8 +399,8 @@ def _search_and_match_imdb(
     except Exception as exc:
         logger.debug("IMDbPie search failed for '%s': %s", search_term, exc)
         return None
-    if not hits:
-        logger.debug("IMDbPie returned no hits for '%s'.", search_term)
+    if not isinstance(hits, (list, tuple)) or not hits:
+        logger.debug("IMDbPie returned no usable hits for '%s'.", search_term)
         return None
     matched_id = _find_matching_imdb_id(hits, title, year)
     if not matched_id:
@@ -394,16 +416,28 @@ def _fetch_imdb_spoken_languages(client: Any, matched_id: str) -> list[str] | No
     except Exception as exc:
         logger.debug("IMDbPie aux data failed for '%s': %s", matched_id, exc)
         return None
-    spoken = aux.get("spokenLanguages") if aux else None
-    if not spoken:
+    spoken = aux.get("spokenLanguages") if isinstance(aux, dict) else None
+    if not isinstance(spoken, (list, tuple)) or not spoken:
         return None
     return _extract_imdb_spoken_codes(spoken)
+
+
+def _warn_missing_imdbpie() -> None:
+    """Warn once per process that the optional imdbpie dependency is missing.
+
+    The lookups run per file across several fallback phases, so warning at every
+    call would flood the log on a large library.
+    """
+    global _IMDBPIE_WARNING_LOGGED
+    if not _IMDBPIE_WARNING_LOGGED:
+        _IMDBPIE_WARNING_LOGGED = True
+        logger.warning("imdbpie not installed — IMDb lookups are disabled for this run.")
 
 
 def _lookup_imdbpie(title: str, year: str | None) -> list[str] | None:
     """Return ISO 639-2/B language codes via IMDbPie, or None on failure."""
     if not _HAS_IMDBPIE:
-        logger.warning("imdbpie not installed — cannot perform IMDb lookup.")
+        _warn_missing_imdbpie()
         return None
     try:
         client = _imdbpie.Imdb()
@@ -427,7 +461,10 @@ def _lookup_imdbpie_by_id(imdb_id: str) -> list[str] | None:
     or no spoken language data is returned.
     """
     if not _HAS_IMDBPIE:
-        logger.warning("imdbpie not installed - cannot perform IMDb ID lookup.")
+        _warn_missing_imdbpie()
+        return None
+    if not _IMDB_ID_RE.match(imdb_id):
+        logger.debug("Ignoring malformed IMDb ID: %r", imdb_id)
         return None
     try:
         client = _imdbpie.Imdb()
@@ -447,12 +484,14 @@ def _extract_spoken_code_from_string(entry: str, codes: list[str]) -> None:
 def _extract_spoken_code_from_dict(entry: dict, codes: list[str]) -> None:
     """Handle a dict entry with name/description."""
     lang_name = entry.get("name") or entry.get("description") or ""
+    if not isinstance(lang_name, str):
+        return
     code = _language_name_to_iso_639_2(lang_name)
     if code and code not in codes:
         codes.append(code)
 
 
-def _extract_imdb_spoken_codes(spoken: list) -> list[str] | None:
+def _extract_imdb_spoken_codes(spoken: Sequence[Any]) -> list[str] | None:
     """Convert IMDb spoken language entries to ISO 639-2/B codes.
 
     IMDbPie returns ``spokenLanguages`` as a list of ISO 639-1 codes
@@ -606,7 +645,7 @@ def _extract_tmdb_language_code(detail: dict) -> list[str] | None:
     the detail response has no usable ``original_language`` field.
     """
     raw_lang = detail.get("original_language")
-    if not raw_lang:
+    if not isinstance(raw_lang, str) or not raw_lang:
         return None
     code = _ISO_639_1_TO_2.get(raw_lang.lower())
     if code:
@@ -614,6 +653,69 @@ def _extract_tmdb_language_code(detail: dict) -> list[str] | None:
     if _is_three_letter_code(raw_lang):
         return [normalize_language_code(raw_lang.lower())]
     return None
+
+
+_HTTP_TIMEOUT_SECONDS = 15
+"""Timeout applied to every TMDb/TVDB request."""
+
+
+def _fetch_json(
+    url: str,
+    *,
+    label: str,
+    data: bytes | None = None,
+    headers: dict[str, str] | None = None,
+) -> Any:
+    """Fetch *url* and return its decoded JSON body, or *None* on failure.
+
+    *label* identifies the request in debug logs.  Network errors, non-2xx
+    statuses and undecodable bodies all degrade to *None* so a single bad
+    response can never abort a run.
+
+    Args:
+        url: Absolute request URL.
+        label: Human-readable description used in the debug log message.
+        data: Request body; its presence switches the method to POST.
+        headers: Extra request headers (e.g. a bearer token).
+
+    Returns:
+        The decoded JSON value (any type), or *None* when the request failed.
+    """
+    method = "POST" if data is not None else "GET"
+    request = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
+            return json.loads(response.read().decode())
+    except Exception as exc:
+        logger.debug("%s failed: %s", label, exc)
+        return None
+
+
+def _is_numeric_id(value: object) -> bool:
+    """Return True when *value* is a positive numeric ID safe for a URL path.
+
+    TMDb returns ``id`` as a JSON number, while NFO files carry it as text, so
+    both ``int`` and digit-only ``str`` are accepted.  Anything else (bool,
+    float, path-like text) is rejected before it reaches a URL.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value > 0
+    return isinstance(value, str) and value.isdigit()
+
+
+def _tmdb_detail_codes(tmdb_id: Any, api_key: str, media_type: str) -> list[str] | None:
+    """Return language codes from the TMDb detail endpoint for *tmdb_id*."""
+    if not _is_numeric_id(tmdb_id):
+        logger.debug("Ignoring non-numeric TMDb ID: %r", tmdb_id)
+        return None
+    encoded_key = urllib.parse.quote(api_key, safe="")
+    detail_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}?api_key={encoded_key}"
+    detail = _fetch_json(detail_url, label=f"TMDb detail for id {tmdb_id}")
+    if not isinstance(detail, dict):
+        return None
+    return _extract_tmdb_language_code(detail)
 
 
 def _try_tmdb_detail(hit: dict, title: str, api_key: str, media_type: str = "movie") -> list[str] | None:
@@ -625,21 +727,37 @@ def _try_tmdb_detail(hit: dict, title: str, api_key: str, media_type: str = "mov
     """
     _title_fields = ("name", "original_name") if media_type == "tv" else ("title", "original_title")
     for field in _title_fields:
-        hit_title = (hit.get(field) or "").strip().lower()
-        if _normalise_title(hit_title) != _normalise_title(title):
+        field_value = hit.get(field)
+        if not isinstance(field_value, str):
+            continue
+        if _normalise_title(field_value.strip().lower()) != _normalise_title(title):
             continue
         tmdb_id = hit.get("id")
         if tmdb_id is None:
             continue
-        encoded_key = urllib.parse.quote(api_key, safe="")
-        detail_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}?api_key={encoded_key}"
-        try:
-            with urllib.request.urlopen(detail_url, timeout=15) as resp2:
-                detail = json.loads(resp2.read().decode())
-        except Exception as exc:
-            logger.debug("TMDb detail failed for id %s: %s", tmdb_id, exc)
+        codes = _tmdb_detail_codes(tmdb_id, api_key, media_type)
+        if codes:
+            return codes
+    return None
+
+
+def _build_tmdb_search_url(title: str, year: str | None, api_key: str, media_type: str) -> str:
+    """Return the TMDb search URL for *title*, optionally narrowed by *year*."""
+    encoded_title = urllib.parse.quote(title)
+    encoded_key = urllib.parse.quote(api_key, safe="")
+    search_url = f"https://api.themoviedb.org/3/search/{media_type}?query={encoded_title}&api_key={encoded_key}"
+    if not year:
+        return search_url
+    year_param = "first_air_date_year" if media_type == "tv" else "year"
+    return f"{search_url}&{year_param}={year}"
+
+
+def _first_tmdb_match(results: list[Any], title: str, api_key: str, media_type: str) -> list[str] | None:
+    """Return language codes from the first matching TMDb search result."""
+    for hit in results:
+        if not isinstance(hit, dict):
             continue
-        codes = _extract_tmdb_language_code(detail)
+        codes = _try_tmdb_detail(hit, title, api_key, media_type)
         if codes:
             return codes
     return None
@@ -654,27 +772,17 @@ def _lookup_tmdb(title: str, year: str | None, api_key: str, media_type: str = "
         api_key: TMDb API key.
         media_type: ``"movie"`` or ``"tv"`` — selects the TMDb search endpoint.
     """
-    encoded_title = urllib.parse.quote(title)
-    encoded_key = urllib.parse.quote(api_key, safe="")
-    search_url = f"https://api.themoviedb.org/3/search/{media_type}?query={encoded_title}&api_key={encoded_key}"
-    if year:
-        _year_param = "first_air_date_year" if media_type == "tv" else "year"
-        search_url += f"&{_year_param}={year}"
-    try:
-        with urllib.request.urlopen(search_url, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
-    except Exception as exc:
-        logger.debug("TMDb search failed for '%s': %s", title, exc)
+    if not api_key:
+        # Every caller gates on a truthy key; guard here so a blank key never
+        # turns into an unauthenticated request to the live API.
         return None
+    search_url = _build_tmdb_search_url(title, year, api_key, media_type)
+    data = _fetch_json(search_url, label=f"TMDb search for '{title}'")
     results = data.get("results") if isinstance(data, dict) else None
     if not results:
         logger.debug("TMDb no results for '%s'.", title)
         return None
-    for hit in results:
-        codes = _try_tmdb_detail(hit, title, api_key, media_type)
-        if codes:
-            return codes
-    return None
+    return _first_tmdb_match(results, title, api_key, media_type)
 
 
 def _lookup_tmdb_by_id(tmdb_id: str, api_key: str, media_type: str = "movie") -> list[str] | None:
@@ -685,15 +793,7 @@ def _lookup_tmdb_by_id(tmdb_id: str, api_key: str, media_type: str = "movie") ->
     Returns *None* when the detail endpoint fails or returns no usable
     ``original_language``.
     """
-    encoded_key = urllib.parse.quote(api_key, safe="")
-    detail_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}?api_key={encoded_key}"
-    try:
-        with urllib.request.urlopen(detail_url, timeout=15) as resp:
-            detail = json.loads(resp.read().decode())
-    except Exception as exc:
-        logger.debug("TMDb detail failed for id %s: %s", tmdb_id, exc)
-        return None
-    return _extract_tmdb_language_code(detail)
+    return _tmdb_detail_codes(tmdb_id, api_key, media_type)
 
 
 def _tvdb_login(api_key: str) -> str | None:
@@ -702,20 +802,25 @@ def _tvdb_login(api_key: str) -> str | None:
     POST to ``/login`` with the API key. Returns the bearer token
     string, or *None* on failure (network error, invalid key).
     """
-    data = json.dumps({"apikey": api_key}).encode()
-    req = urllib.request.Request(
+    body = _fetch_json(
         _TVDB_LOGIN_URL,
-        data=data,
+        label="TVDB login",
+        data=json.dumps({"apikey": api_key}).encode(),
         headers={"Content-Type": "application/json"},
-        method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            body = json.loads(resp.read().decode())
-    except Exception as exc:
-        logger.debug("TVDB login failed: %s", exc)
-        return None
-    token: str | None = body.get("data", {}).get("token")
+    data_block = body.get("data") if isinstance(body, dict) else None
+    token = data_block.get("token") if isinstance(data_block, dict) else None
+    return token if isinstance(token, str) and token else None
+
+
+def _tvdb_token(api_key: str) -> str | None:
+    """Return a cached TVDB JWT for *api_key*, authenticating on a miss."""
+    cached = _TVDB_TOKEN_CACHE.get(api_key)
+    if cached is not None:
+        return cached
+    token = _tvdb_login(api_key)
+    if token is not None:
+        _TVDB_TOKEN_CACHE[api_key] = token
     return token
 
 
@@ -733,7 +838,7 @@ def _tvdb_fetch_detail(
         method="GET",
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_SECONDS) as resp:
             return cast("dict", json.loads(resp.read().decode()))
     except urllib.error.HTTPError as exc:
         if exc.code != 401:
@@ -744,13 +849,14 @@ def _tvdb_fetch_detail(
         new_token = _tvdb_login(api_key)
         if new_token is None:
             return None
+        _TVDB_TOKEN_CACHE[api_key] = new_token
         req2 = urllib.request.Request(
             detail_url,
             headers={"Authorization": f"Bearer {new_token}"},
             method="GET",
         )
         try:
-            with urllib.request.urlopen(req2, timeout=15) as resp:
+            with urllib.request.urlopen(req2, timeout=_HTTP_TIMEOUT_SECONDS) as resp:
                 return cast("dict", json.loads(resp.read().decode()))
         except Exception as exc2:
             logger.debug("TVDB detail failed after re-auth for id %s: %s", tvdb_id, exc2)
@@ -763,32 +869,39 @@ def _tvdb_fetch_detail(
 def _lookup_tvdb_by_id(tvdb_id: str, api_key: str) -> list[str] | None:
     """Return ISO 639-2/B language codes via TVDB using a known TVDB ID.
 
-    Authenticates first (login → JWT), then fetches the series extended
-    record and extracts ``originalLanguage``. Returns a single-element
-    list with the normalised language code, or *None* on any failure.
+    Obtains a JWT token (cached per API key, logging in only on a miss),
+    then fetches the series extended record and extracts
+    ``originalLanguage``. Returns a single-element list with the normalised
+    language code, or *None* on any failure.
 
     Results are not cached separately — the caller (``resolve_native_language``)
     handles database caching.
     """
     if not api_key:
         return None
+    if not _is_numeric_id(tvdb_id):
+        logger.debug("Ignoring non-numeric TVDB ID: %r", tvdb_id)
+        return None
 
-    # Login to obtain JWT token
-    token = _tvdb_login(api_key)
+    # Login to obtain JWT token (reused across lookups for this key)
+    token = _tvdb_token(api_key)
     if token is None:
         return None
 
-    # Fetch series extended record
     detail_url = f"{_TVDB_BASE_URL}/series/{tvdb_id}/extended"
     body = _tvdb_fetch_detail(tvdb_id, api_key, detail_url, token)
-    if body is None:
-        return None
-
-    raw_lang = body.get("data", {}).get("originalLanguage")
-    if not isinstance(raw_lang, str) or not raw_lang:
+    codes = _extract_tvdb_language(body)
+    if codes is None:
         logger.debug("TVDB no originalLanguage for id %s.", tvdb_id)
-        return None
+    return codes
 
+
+def _extract_tvdb_language(body: Any) -> list[str] | None:
+    """Return the normalised ``originalLanguage`` from a TVDB detail body."""
+    data_block = body.get("data") if isinstance(body, dict) else None
+    raw_lang = data_block.get("originalLanguage") if isinstance(data_block, dict) else None
+    if not isinstance(raw_lang, str) or not raw_lang:
+        return None
     code = _ISO_639_1_TO_2.get(raw_lang.lower())
     if code:
         return [normalize_language_code(code)]
@@ -870,24 +983,25 @@ def _describe_failure(source_label: str, tmdb_api_key: str | None) -> str:
 def _upwalk_tvshow_nfo(file_path: Path) -> NfoMetadata | None:
     """Walk up from *file_path* looking for a ``tvshow.nfo`` with usable metadata.
 
-    Checks each ancestor directory (up to ``_MAX_TVSHOW_UPWALK_DEPTH``
-    levels) for a ``tvshow.nfo`` file.  Returns the first parsed result
-    that contains at least one ID (imdb / tmdb / tvdb) or title field,
-    or *None* if none is found.
+    Delegates discovery to :func:`find_tvshow_nfo` so the depth limit and
+    case-insensitive glob live in one place.  Returns the first parsed
+    result that contains at least one ID (imdb / tmdb / tvdb) or title
+    field, or *None* if none is found.
     """
     current = file_path.parent
-    for _ in range(_MAX_TVSHOW_UPWALK_DEPTH):
-        for candidate in sorted(current.glob("*.[nN][fF][oO]")):
-            if candidate.stem.lower() != "tvshow":
-                continue
-            meta = parse_nfo(candidate)
-            if meta is not None:
-                return meta
-        parent_of = current.parent
-        if parent_of == current:
-            break
+    while True:
+        nfo_path = find_tvshow_nfo(current)
+        if nfo_path is None:
+            return None
+        meta = parse_nfo(nfo_path)
+        if meta is not None:
+            return meta
+        # Closest tvshow.nfo exists but has no usable metadata — continue
+        # the search above it.
+        parent_of = nfo_path.parent.parent
+        if parent_of == nfo_path.parent:
+            return None
         current = parent_of
-    return None
 
 
 def _get_nfo_metadata(file_path: Path) -> NfoMetadata | None:
@@ -895,26 +1009,25 @@ def _get_nfo_metadata(file_path: Path) -> NfoMetadata | None:
 
     Discovery uses same-stem NFO first (standard for movies).  When
     parsing fails (e.g. a Sonarr episode NFO with ``<episodedetails>``
-    root) a ``tvshow.nfo`` upwalk fallback is attempted to retrieve
-    series-level IMDb / TMDb / TVDB IDs.
+    root, or an NFO whose own ``tvshow.nfo`` has no usable fields) a
+    ``tvshow.nfo`` upwalk is attempted to retrieve series-level IMDb /
+    TMDb / TVDB IDs.
 
     Returns structured metadata, or *None* if no suitable .nfo file
     exists or cannot be parsed.
     """
     nfo_path = discover_nfo(file_path)
-    if nfo_path is not None:
-        meta = parse_nfo(nfo_path)
-        if meta is not None:
-            return meta
-        # If discover_nfo already returned tvshow.nfo and parse failed,
-        # the fallback would only re-discover and re-parse it.
-        if nfo_path.stem.lower() == "tvshow":
-            return None
-    else:
-        # No NFO found at all — fallback adds nothing, skip it.
+    if nfo_path is None:
+        # No NFO found at all — the tvshow upwalk would repeat the same search.
         return None
+    meta = parse_nfo(nfo_path)
+    if meta is not None:
+        return meta
 
-    # Parse failed — try tvshow.nfo upwalk for series-level IDs.
+    # Parse failed (or produced nothing usable) — climb for a tvshow.nfo that
+    # does carry series-level IDs.  When discovery already returned a tvshow.nfo
+    # this re-parses that one file once before ascending past it, which is the
+    # price of keeping a single discovery rule.
     return _upwalk_tvshow_nfo(file_path)
 
 
@@ -983,6 +1096,17 @@ def _run_nfo_id_lookup_chain(
     return None
 
 
+def _nfo_media_type(nfo_meta: NfoMetadata, file_path: Path) -> str:
+    """Return the TMDb media type, preferring the NFO root over the filename.
+
+    The NFO root is authoritative in both directions: TMDb uses separate ID
+    namespaces for movies and TV, so a ``<tvshow>`` NFO must never be queried as
+    ``/movie/{id}`` (issue #68) and a ``<movie>`` NFO must never be queried as
+    ``/tv/{id}`` just because the filename happens to contain ``SxxExx``.
+    """
+    return "tv" if nfo_meta.is_tvshow else "movie"
+
+
 def _resolve_nfo_id_lookups(
     nfo_meta: NfoMetadata,
     file_path: Path,
@@ -1004,7 +1128,7 @@ def _resolve_nfo_id_lookups(
       title, broader but less specific). Used when the chain has no API key
       configured or all keyed lookups fail.
     """
-    tmdb_media_type = _get_tmdb_endpoint(file_path.stem)
+    tmdb_media_type = _nfo_media_type(nfo_meta, file_path)
 
     # Phase 1 — TMDb/TVDB chain (originalLanguage — single production
     # language code).  The chain internally orders by media type:
@@ -1045,8 +1169,8 @@ def _resolve_nfo_title_search(
 ) -> list[str] | None:
     """Search IMDbPie/TMDb using the clean title from NFO metadata.
 
-    Falls back from IMDbPie to TMDb when no API key is configured for
-    the first attempt.  Returns language codes or *None*.
+    Falls back from IMDbPie to TMDb when IMDbPie finds no match and a
+    TMDb API key is configured.  Returns language codes or *None*.
     """
     search_title = nfo_meta.original_title or nfo_meta.title
     if not search_title:
@@ -1066,7 +1190,7 @@ def _resolve_nfo_title_search(
         return codes
 
     if tmdb_api_key:
-        _tmdb_media_type = _get_tmdb_endpoint(file_path.stem)
+        _tmdb_media_type = _nfo_media_type(nfo_meta, file_path)
         codes = _lookup_tmdb(search_title, year, tmdb_api_key, _tmdb_media_type)
         if codes is not None:
             _msg = "Identified native language(s) for '%s': %s (source=nfo_tmdb_title)."
@@ -1083,8 +1207,9 @@ def _resolve_imdb_embedded(
     file_path: Path,
     db: Database | None,
     tmdb_api_key: str | None,
+    tvdb_api_key: str | None = None,
 ) -> list[str] | None:
-    """Resolve via IMDb ID, falling back to an embedded TMDb ID on failure."""
+    """Resolve via IMDb ID, falling back to embedded TMDb then TVDB IDs."""
     codes = _lookup_imdbpie_by_id(eid)
     if codes is not None:
         logger.info(
@@ -1095,63 +1220,91 @@ def _resolve_imdb_embedded(
         _maybe_cache_result(db, file_path, codes, "imdbpie_embedded_id", None)
         return codes
 
-    # IMDb failed — try TMDb dual-ID fallback
-    tmdb_m = _EMBEDDED_TMDB_RE.search(file_stem)
-    if not tmdb_m:
+    # IMDb failed — try the embedded TMDb ID, then the embedded TVDB ID.
+    codes = _resolve_embedded_tmdb_fallback(file_stem, file_path, db, tmdb_api_key)
+    if codes is not None:
+        return codes
+
+    codes = _resolve_embedded_tvdb_fallback(file_stem, file_path, db, tvdb_api_key)
+    if codes is None:
         logger.debug(
             "No native language found for '%s' via embedded IMDb ID (%s).",
             file_path.name,
             eid,
         )
-        return None
-
-    eid2 = tmdb_m.group(1) or tmdb_m.group(2) or tmdb_m.group(3)
-    if not eid2:
-        return None
-
-    if not tmdb_api_key:
-        logger.debug(
-            "Skipping TMDb embedded ID lookup for '%s' \u2014 no API key configured.",
-            file_path.name,
-        )
-        return None
-
-    _tmdb_media_type = _get_tmdb_endpoint(file_path.stem)
-    codes = _lookup_tmdb_by_id(eid2, tmdb_api_key, _tmdb_media_type)
-    if codes is None:
-        return None
-
-    logger.info(
-        "Identified native language(s) for '%s': %s (source=tmdb_embedded_id).",
-        file_path.name,
-        codes,
-    )
-    _maybe_cache_result(db, file_path, codes, "tmdb_embedded_id", None)
     return codes
 
 
-def _resolve_tmdb_embedded(
-    eid: str,
+def _resolve_embedded_tmdb_fallback(
+    file_stem: str,
     file_path: Path,
     db: Database | None,
     tmdb_api_key: str | None,
 ) -> list[str] | None:
-    """Resolve via a TMDb-only embedded ID."""
+    """Resolve via an embedded TMDb ID in *file_stem*, if one is present."""
     if not tmdb_api_key:
         return None
-
-    _tmdb_media_type = _get_tmdb_endpoint(file_path.stem)
-    codes = _lookup_tmdb_by_id(eid, tmdb_api_key, _tmdb_media_type)
-    if codes is None:
+    tmdb_m = _EMBEDDED_TMDB_RE.search(file_stem)
+    if not tmdb_m:
         return None
-
-    logger.info(
-        "Identified native language(s) for '%s': %s (source=tmdb_embedded_id).",
-        file_path.name,
-        codes,
+    eid = tmdb_m.group(1) or tmdb_m.group(2) or tmdb_m.group(3)
+    if not eid:
+        return None
+    return _lookup_and_cache(
+        _lookup_tmdb_by_id,
+        (eid, tmdb_api_key, _get_tmdb_endpoint(file_stem)),
+        file_path,
+        db,
+        "tmdb_embedded_id",
     )
-    _maybe_cache_result(db, file_path, codes, "tmdb_embedded_id", None)
-    return codes
+
+
+def _resolve_embedded_tvdb_fallback(
+    file_stem: str,
+    file_path: Path,
+    db: Database | None,
+    tvdb_api_key: str | None,
+) -> list[str] | None:
+    """Resolve via an embedded TVDB ID in *file_stem*, if one is present."""
+    if not tvdb_api_key:
+        return None
+    tvdb_m = _EMBEDDED_TVDB_RE.search(file_stem)
+    if not tvdb_m:
+        return None
+    eid = tvdb_m.group(1) or tvdb_m.group(2) or tvdb_m.group(3)
+    if not eid:
+        return None
+    return _lookup_and_cache(
+        _lookup_tvdb_by_id,
+        (eid, tvdb_api_key),
+        file_path,
+        db,
+        "tvdb_embedded_id",
+    )
+
+
+def _resolve_tmdb_embedded(
+    eid: str,
+    file_stem: str,
+    file_path: Path,
+    db: Database | None,
+    tmdb_api_key: str | None,
+    tvdb_api_key: str | None = None,
+) -> list[str] | None:
+    """Resolve via a TMDb-only embedded ID, falling back to an embedded TVDB ID."""
+    if tmdb_api_key:
+        _tmdb_media_type = _get_tmdb_endpoint(file_path.stem)
+        codes = _lookup_tmdb_by_id(eid, tmdb_api_key, _tmdb_media_type)
+        if codes is not None:
+            logger.info(
+                "Identified native language(s) for '%s': %s (source=tmdb_embedded_id).",
+                file_path.name,
+                codes,
+            )
+            _maybe_cache_result(db, file_path, codes, "tmdb_embedded_id", None)
+            return codes
+
+    return _resolve_embedded_tvdb_fallback(file_stem, file_path, db, tvdb_api_key)
 
 
 def _resolve_tvdb_embedded(
@@ -1195,9 +1348,9 @@ def _resolve_embedded_id_phase(
 
     source, eid = embedded
     if source == "imdb":
-        codes = _resolve_imdb_embedded(eid, file_stem, file_path, db, tmdb_api_key)
+        codes = _resolve_imdb_embedded(eid, file_stem, file_path, db, tmdb_api_key, tvdb_api_key)
     elif source == "tmdb":
-        codes = _resolve_tmdb_embedded(eid, file_path, db, tmdb_api_key)
+        codes = _resolve_tmdb_embedded(eid, file_stem, file_path, db, tmdb_api_key, tvdb_api_key)
     else:  # tvdb
         codes = _resolve_tvdb_embedded(eid, file_path, db, tvdb_api_key)
 

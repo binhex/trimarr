@@ -1,4 +1,4 @@
-"""Shell command hook execution for pre/post processing."""
+"""Command hook execution for pre/post processing."""
 
 from __future__ import annotations
 
@@ -8,8 +8,13 @@ import shlex
 import subprocess
 from typing import TYPE_CHECKING
 
+from trimarr.logger import sanitize_for_log
+
 if TYPE_CHECKING:
     from loguru import Logger
+
+_PLACEHOLDER_RE = re.compile(r"\{(leaf|dir)\}")
+"""Matches a ``{leaf}``/``{dir}`` placeholder inside one already-tokenised argument."""
 
 
 def _resolve_hook_template(
@@ -22,32 +27,15 @@ def _resolve_hook_template(
     if not cmd_template.strip():
         return None
 
-    # Strip user-supplied quote wrapping around {leaf}/{dir} markers.
-    # Use word-boundary assertions so that only standalone quote-wrapped
-    # markers are stripped (e.g. ``'{leaf}'``), NOT quotes inside larger
-    # arguments such as ``--file="{leaf}"``.
+    # Strip user-supplied quote wrapping around a marker (e.g. ``'{leaf}'``).
+    # Only fully balanced wrapping is removed.  Unbalanced quotes are left
+    # untouched: rewriting them silently changed where an argument boundary
+    # fell (``--message "{leaf} unlocked"`` lost its opening quote) or made
+    # shlex reject a template that the user wrote correctly.
     template = cmd_template
     for marker in ("{leaf}", "{dir}"):
-        for q in ("'", '"'):
-            escaped_q = re.escape(q)
-            escaped_marker = re.escape(marker)
-            # Balanced: q+marker+q -> marker
-            template = template.replace(f"{q}{marker}{q}", marker)
-            # Unbalanced: q+marker (only when q is preceded by start/whitespace)
-            template = re.sub(
-                rf"(^|\s){escaped_q}{escaped_marker}",
-                rf"\1{marker}",
-                template,
-            )
-            # Unbalanced: marker+q (only when marker is at word boundary
-            # AND q is followed by whitespace/end).  This avoids stripping
-            # quotes inside arguments like ``--file="{leaf}"`` where the
-            # closing quote is structural, not user-added wrapping.
-            template = re.sub(
-                rf"(?:^|(?<=\s)|(?<=['\"])){escaped_marker}{escaped_q}(\s|$)",
-                rf"{marker}\1",
-                template,
-            )
+        for quote in ("'", '"'):
+            template = template.replace(f"{quote}{marker}{quote}", marker)
 
     try:
         posix = platform.system() != "Windows"
@@ -56,7 +44,8 @@ def _resolve_hook_template(
         logger.warning(f"Hook command template is malformed: {exc}")
         return None
 
-    return [arg.replace("{leaf}", leaf).replace("{dir}", dir_path) for arg in args]
+    values = {"leaf": leaf, "dir": dir_path}
+    return [_PLACEHOLDER_RE.sub(lambda m: values[m.group(1)], arg) for arg in args]
 
 
 def _run_hook_command(
@@ -69,11 +58,13 @@ def _run_hook_command(
         "shell": False,
         "capture_output": True,
         "text": True,
+        # Never let undecodable hook output raise: a hook must not abort a run.
+        "errors": "replace",
     }
     if timeout_seconds is not None:
         kwargs["timeout"] = timeout_seconds
 
-    cmd_display = " ".join(args)
+    cmd_display = sanitize_for_log(" ".join(args))
     logger.debug(f"Running hook: {cmd_display}")
 
     try:
@@ -88,7 +79,7 @@ def _run_hook_command(
 
     if result.returncode != 0:
         stderr = result.stderr.strip()
-        logger.warning(f"Hook command exited with code {result.returncode}: {stderr}")
+        logger.warning(f"Hook command exited with code {result.returncode}: {cmd_display}: {stderr}")
 
 
 def _run_hook(

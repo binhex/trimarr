@@ -9,7 +9,7 @@ from trimarr.hooks import _run_hook
 
 
 class TestRunHook:
-    """_run_hook substitutes variables and executes via shell."""
+    """_run_hook substitutes variables and executes without a shell."""
 
     def test_substitutes_leaf_and_dir(self) -> None:
         """{leaf} and {dir} are replaced in the command template."""
@@ -210,8 +210,8 @@ class TestRunHook:
         # The leaf value is passed directly as a single arg (no shell)
         assert "99 Homes (2014)" in args_list, f"Expected leaf value in args, got {args_list}"
 
-    def test_unbalanced_quotes_around_leaf_are_stripped(self) -> None:
-        """Unbalanced quotes around {leaf} are stripped, not left for shlex.split to choke on."""
+    def test_unbalanced_quote_is_not_rewritten(self) -> None:
+        """An unbalanced quote is reported as malformed instead of silently rewritten."""
         logger = MagicMock()
         with patch("trimarr.hooks.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
@@ -223,8 +223,83 @@ class TestRunHook:
                 logger=logger,
             )
 
-        _args, kwargs = mock_run.call_args
-        args_list = _args[0]
-        # The value is passed directly (no doubled or dangling quotes)
-        assert "some file.mkv" in args_list, f"Expected leaf value in args, got {args_list}"
+        mock_run.assert_not_called()
+        logger.warning.assert_called_once()
+
+    def test_balanced_quotes_inside_an_argument_are_preserved(self) -> None:
+        """A quoted placeholder followed by more text keeps its argument boundaries."""
+        logger = MagicMock()
+        with patch("trimarr.hooks.subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            _run_hook(
+                'notify --message "{leaf} unlocked" --dir "{dir}"',
+                "some file.mkv",
+                "/some/dir",
+                timeout_seconds=300,
+                logger=logger,
+            )
+
+        args_list = mock_run.call_args[0][0]
+        assert args_list == [
+            "notify",
+            "--message",
+            "some file.mkv unlocked",
+            "--dir",
+            "/some/dir",
+        ], f"Argument boundaries changed: {args_list}"
         logger.warning.assert_not_called()
+
+    def test_two_quoted_placeholders_keep_two_arguments(self) -> None:
+        """Two quoted placeholders in one argument stay a single argument."""
+        logger = MagicMock()
+        with patch("trimarr.hooks.subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            _run_hook(
+                'notify "{leaf} and {dir}"',
+                "movie.mkv",
+                "/media/movies",
+                timeout_seconds=300,
+                logger=logger,
+            )
+
+        args_list = mock_run.call_args[0][0]
+        assert args_list == ["notify", "movie.mkv and /media/movies"], f"Argument boundaries changed: {args_list}"
+
+
+class TestPlaceholderSubstitutionOrder:
+    """A leaf literally named "{dir}" must not be rewritten by the second placeholder."""
+
+    def test_leaf_that_looks_like_a_placeholder_is_not_rewritten(self) -> None:
+        logger = MagicMock()
+        with patch("trimarr.hooks.subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            _run_hook(
+                "echo {leaf} {dir}",
+                "{dir}",
+                "/media/{dir}",
+                timeout_seconds=300,
+                logger=logger,
+            )
+
+        assert mock_run.call_args[0][0] == ["echo", "{dir}", "/media/{dir}"]
+
+
+class TestLogSanitisation:
+    """Untrusted names must not be able to forge log lines."""
+
+    def test_control_characters_are_replaced(self) -> None:
+        from trimarr.logger import sanitize_for_log
+
+        assert sanitize_for_log("ok\nFAKE | ERROR | injected") == "ok?FAKE | ERROR | injected"
+        assert sanitize_for_log("esc\x1b[31m") == "esc?[31m"
+
+    def test_hook_error_warning_names_the_command(self) -> None:
+        logger = MagicMock()
+        with patch("trimarr.hooks.subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 1
+            mock_run.return_value.stderr = "boom"
+            _run_hook("script {leaf}", "movie.mkv", "/media", timeout_seconds=300, logger=logger)
+
+        message = logger.warning.call_args[0][0]
+        assert "script movie.mkv" in message
+        assert "boom" in message

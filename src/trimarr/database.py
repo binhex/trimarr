@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,14 @@ if TYPE_CHECKING:
 # Number of bytes to read from the start of a file for the partial hash.
 # 64 KB is a good balance between speed and collision resistance for large video files.
 _PARTIAL_HASH_BYTES = 65_536
+
+_NEGATIVE_CACHE_TTL_DAYS = 7
+"""How long a failed native-language lookup is trusted before retrying.
+
+A failure row (``native_languages IS NULL``) is otherwise permanent: a
+transient network error, or a run without an API key configured, would stop
+``--keep-native-audio`` from ever resolving that file again.
+"""
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS processed_files (
@@ -56,7 +65,10 @@ def fingerprint(path: Path) -> str:
         path: Path to the file to fingerprint.
 
     Returns:
-        A string in the form ``"<size>:<mtime_ns>:<sha256_prefix>"``.
+        A string in the form ``"<size>:<mtime_ns>:<sha256_of_first_64k>"``.
+        The ``size`` and ``mtime_ns`` components detect most edits without
+        hashing; the digest covers the leading :data:`_PARTIAL_HASH_BYTES`
+        so that same-size, same-mtime rewrites still differ.
     """
     stat = path.stat()
     size = stat.st_size
@@ -67,24 +79,64 @@ def fingerprint(path: Path) -> str:
     return f"{size}:{mtime_ns}:{hasher.hexdigest()}"
 
 
+def _decode_cached_languages(json_langs: str | None) -> tuple[bool, list[str] | None]:
+    """Decode a cached language list.
+
+    Returns:
+        ``(ok, languages)``.  ``ok`` is False when the stored value is present
+        but not a JSON list of strings — a damaged row that must be treated as
+        a cache miss rather than as a cached failure.  ``languages`` is None for
+        an empty result.
+    """
+    if not json_langs:
+        return True, None
+    try:
+        decoded = json.loads(json_langs)
+    except (TypeError, ValueError):
+        return False, None
+    if not isinstance(decoded, list) or not all(isinstance(code, str) for code in decoded):
+        return False, None
+    return True, list(decoded) or None
+
+
+def _cache_entry_expired(cached_at: str | None) -> bool:
+    """Return True if a negative cache entry is older than the retry TTL.
+
+    ``cached_at`` is the SQLite ``CURRENT_TIMESTAMP`` value (UTC, second
+    resolution).  An unparseable or missing timestamp is treated as expired so
+    the lookup is retried rather than trusted indefinitely.
+    """
+    if not cached_at:
+        return True
+    try:
+        stored = datetime.strptime(cached_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+    except (TypeError, ValueError):
+        return True
+    return datetime.now(UTC) - stored > timedelta(days=_NEGATIVE_CACHE_TTL_DAYS)
+
+
 class Database:
     """SQLite database for tracking which MKV files have been processed.
 
     Supports use as a context manager::
 
         with Database(path) as db:
-            if not db.is_processed(file_path):
+            if not db.is_processed(file_path, profile_hash=profile_hash):
                 ...
-                db.mark_processed(file_path)
+                db.mark_processed(file_path, profile_hash=profile_hash, bytes_saved=0)
 
     Args:
         db_path: Path to the SQLite database file.  Parent directories are
             created automatically if they do not exist.
+        cache_writes_enabled: When False, :meth:`set_native_language_cache` is a
+            no-op.  Used by ``--dry-run`` so lookups still *read* the cache but
+            cannot seed it (including failure rows) for a later real run.
     """
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(self, db_path: str | Path, *, cache_writes_enabled: bool = True) -> None:
         self._db_path = Path(db_path)
         self._conn: sqlite3.Connection | None = None
+        self._cache_writes_enabled = cache_writes_enabled
 
     # ------------------------------------------------------------------
     # Context manager
@@ -174,7 +226,8 @@ class Database:
     def mark_processed(self, path: Path, *, profile_hash: str, bytes_saved: int = 0) -> None:
         """Record *path* as processed with its current fingerprint and processing profile.
 
-        Performs an upsert so repeated calls are idempotent.
+        Performs an upsert: a file keeps a single row, and when its
+        fingerprint is unchanged the recorded ``bytes_saved`` accumulates.
 
         Args:
             path: Absolute or relative path to the MKV file.
@@ -223,20 +276,27 @@ class Database:
 
         Only returns a hit when the stored file_hash matches the current
         fingerprint. A mismatched hash means the file was replaced — caller
-        should re-lookup.
+        should re-lookup.  Stored *failures* expire after
+        :data:`_NEGATIVE_CACHE_TTL_DAYS` so a transient error or a run
+        without an API key does not disable lookups permanently.
         """
         conn = self._require_connection()
         row = conn.execute(
-            "SELECT file_hash, native_languages, lookup_source, lookup_error FROM metadata_cache WHERE file_path = ?",
+            "SELECT file_hash, native_languages, lookup_source, lookup_error, cached_at "
+            "FROM metadata_cache WHERE file_path = ?",
             (str(path),),
         ).fetchone()
         if row is None:
             return None
-        stored_hash, json_langs, source, error = row
+        stored_hash, json_langs, source, error, cached_at = row
         current_hash = fingerprint(path)
         if stored_hash != current_hash:
             return None  # file changed, cache is stale
-        langs: list[str] | None = json.loads(json_langs) if json_langs else None
+        decoded_ok, langs = _decode_cached_languages(json_langs)
+        if not decoded_ok:
+            return None  # damaged row — re-lookup rather than trust it
+        if langs is None and _cache_entry_expired(cached_at):
+            return None  # failed lookup expired — allow a retry
         return langs, source, error
 
     def set_native_language_cache(
@@ -249,8 +309,12 @@ class Database:
         """Store native language lookup result for *path*.
 
         native_languages may be None when the lookup failed — this avoids
-        retrying on every subsequent run for the same file.
+        retrying on every subsequent run for the same file.  Writes are
+        suppressed entirely when the database was opened with
+        ``cache_writes_enabled=False``.
         """
+        if not self._cache_writes_enabled:
+            return
         conn = self._require_connection()
         current_hash = fingerprint(path)
         conn.execute(

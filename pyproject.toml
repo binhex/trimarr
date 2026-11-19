@@ -23,7 +23,7 @@ classifiers = [
 dependencies = [
     "click",
     "croniter>=6.0.0",
-    "imdbpie",
+    "imdbpie>=5.8.1",
     "loguru",
     "pycountry",
     "requests",
